@@ -1,144 +1,354 @@
 # LCM 全景：以最小运行时完成低延迟消息分发
+我们先不看源码，只把 LCM 当成一个刚装上的机器人通信库来用。
 
-想象一台移动底盘以 1 kHz 发布关节和里程计状态：控制进程需要最新值，界面进程需要画曲线，记录进程要保存可回放的数据。最朴素的程序会把 C++ 结构体直接 `sendto()`，另一端按本机结构体强制转换，再在接收线程里调用所有业务函数。换一台不同字节序或编译选项的计算机，字段偏移就可能不一致；记录回调一次阻塞 20 ms，后面的消息便排队，控制回调拿到越来越旧的状态；一次 UDP 分片丢失后，大消息不完整，应用只能观察到序列号跳变或解码失败。
+假设定位进程每 10 ms 产生一次位姿，控制器要读它，可视化工具也要读它，晚上还要把整场实验录下来。你第一次接触 LCM 时，最先写出来的代码其实很朴素：
 
-这组失败把问题拆成三件事：怎样让不同语言对同一消息字节达成一致；怎样替换网络、内存队列与日志而不改订阅语义；怎样把网络接收与业务回调分开，并明确队列溢出时丢什么。LCM 的回答是一条短而清晰的数据链：类型生成器负责消息编码，provider 负责传输，`lcm_handle()` 在调用者线程中分发回调。它不给慢回调另开线程，所以应用还必须自行决定隔离策略。
+~~~cpp
+lcm::LCM lcm;
 
-固定源码版本为 lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864。本系列以 C 运行时为主线，因为 C++、Python、Java 等绑定最终都要落到相同的 provider 协议与线格式上。
+pose_t pose;
+pose.x = 1.2;
+pose.y = 0.4;
 
-## LCM 在机器人系统中的位置
+lcm.publish("POSE", &pose);
+~~~
 
-一个机器人程序通常需要同时传输：
+订阅端也没有什么“框架味”：
 
-- 高频但允许丢失的状态、姿态和传感器数据；
-- 需要跨语言共享的结构化消息；
-- 可记录、回放并离线分析的数据流；
-- 同一局域网内多个进程之间的一对多广播。
-
-LCM 对这类需求给出的答案是：使用 `.lcm` 类型描述生成各语言编码器，用 channel 字符串标识数据流，再由可替换 provider 把字节发送到 UDP multicast、TCP queue、内存队列或日志文件。
-
-```text
-typed object
-  -> generated encode()
-  -> lcm_publish(channel, bytes)
-  -> provider vtable
-  -> UDPM / TCPQ / MEMQ / LOGFILE
-  -> provider receive queue
-  -> lcm_handle()
-  -> channel handler
-  -> generated decode()
-```
-
-LCM 不提供组件生命周期、分布式参数服务器或协程调度器。算法线程怎样组织、callback 在哪个线程执行、慢消费者如何隔离，都由应用明确决定。功能较少也意味着边界更容易推导。
-
-## 适用场景
-
-LCM 适合以下系统：
-
-- 受控局域网中的实验机器人；
-- 需要 C、C++、Python、Java 等多语言互通的研究平台；
-- 传感器流和状态流更关注低延迟而非逐包可靠；
-- 需要通过日志记录复现一次实验；
-- 希望把通信库嵌入自有事件循环，而不是接受一套完整执行框架。
-
-典型程序只需要几行：
-
-
-```cpp
-lcm::LCM bus;
-bus.subscribe("POSE", &Handler::OnPose, &handler);
-
-while (running) {
-  bus.handleTimeout(10);
-}
-```
-
-这一小段代码隐藏了网络接收线程、完整消息 buffer list、subscription 配额、通知 pipe、正则订阅表和 provider 虚表，但没有隐藏回调执行线程：`OnPose` 在调用 `handleTimeout()` 的线程中执行。
-
-## 不适用场景
-
-LCM 的默认 UDPM provider 不适合把“消息必达”视为安全条件的链路。UDP multicast 没有端到端确认、重传和流量控制；一个分片丢失会使整条大消息无法重组。
-
-以下需求通常需要额外设计或其他传输：
-
-- 跨不可靠广域网的可靠命令；
-- 需要认证、加密和细粒度访问控制的生产网络；
-- 必须向慢订阅者施加背压而不能丢数据；
-- 需要服务发现、请求响应和复杂 QoS 协商；
-- 需要框架负责线程池、优先级和组件生命周期。
-
-LCM 的优势来自约束明确，而不是覆盖所有分布式系统问题。
-
-## 四个核心组成部分
-
-### 类型生成器
-
-`.lcm` 文件描述结构体、字段、数组和嵌套类型。`lcm-gen` 为目标语言生成：
-
-- 数据结构定义；
-- `encode` 与 `decode`；
-- 编码长度计算；
-- 类型 fingerprint/hash；
-- 部分语言的发布订阅便利封装。
-
-类型生成器让运行时只处理字节数组。provider 不需要理解 `pose_t` 或 `laser_t`，因此传输层与消息 schema 解耦。
-
-### 核心句柄 lcm_t
-
-固定版本的 `lcm_t` 保存订阅、channel 匹配缓存、provider 接口和 handle 并发状态。它不是抽象图，而是核心实际持有的对象布局：
-
-
-```c
-struct _lcm_t {
-    GRecMutex mutex;
-    GRecMutex handle_mutex;
-
-    GPtrArray *handlers_all;
-    GHashTable *handlers_map;
-
-    lcm_provider_vtable_t *vtable;
-    lcm_provider_t *provider;
-
-    int default_max_num_queued_messages;
-    int in_handle;
+~~~cpp
+class Handler {
+public:
+    void onPose(const lcm::ReceiveBuffer*,
+                const std::string& channel,
+                const pose_t* pose) {
+        std::cout << channel << ": "
+                  << pose->x << ", " << pose->y << "\n";
+    }
 };
-```
 
-这个结构把“与传输无关的订阅语义”和“provider 私有网络状态”分开。顶层只持有不透明 `lcm_provider_t*`，具体对象可以是 `lcm_udpm_t`、`lcm_tcpq_t` 或 `lcm_memq_t`。
+Handler handler;
+lcm::LCM lcm;
+lcm.subscribe("POSE", &Handler::onPose, &handler);
 
-### provider
+while (true) {
+    lcm.handle();
+}
+~~~
 
-Provider 是 C 风格的策略对象。URL 的 scheme 选择实现：
+如果只停在 API 层，LCM 很像一个很小的 topic 消息总线：
 
-```text
-udpm://239.255.76.67:7667?ttl=1
-tcpq://127.0.0.1:7700
-memq://
-file://experiment.lcm
-```
+~~~text
+Publisher                         Subscriber
 
-每个 provider 实现同一组函数：创建、销毁、订阅、取消订阅、发布、处理一条消息和暴露可等待文件描述符。
+pose_t
+  |
+  | publish("POSE")
+  v
++---------------- LCM ----------------+
+                                      |
+                                      | callback("POSE")
+                                      v
+                                   pose_t
+~~~
 
-### 用户驱动的事件循环
+真正值得研究的地方从这里才开始。因为这几行代码一下子隐藏了六个问题：
 
-LCM 不会自动选择业务 callback 线程。应用调用：
+1. `pose_t` 是 C++ 对象，网络只认识字节，它什么时候被编码？
+2. `"POSE"` 只是一个字符串，订阅者是怎样匹配到它的？
+3. 如果底层今天走 UDP，明天改成日志回放，为什么 `publish()` 可以不变？
+4. 谁负责收包？`onPose()` 又到底在哪条线程里执行？
+5. 如果 callback 卡住 50 ms，网络接收会不会跟着停？
+6. 为什么 LCM 要求我们自己调用 `handle()`，而不是自动给我们开 worker thread？
 
+本文就沿着这六个问题往下钻。顺序不是“先背模块名，再查源码”，而是从使用体验出发，先猜最简单的内部实现，再用具体失败把下一层设计逼出来，最后回到固定源码确认作者真正怎么做。
 
-```c
-lcm_handle(lcm);
-```
+源码固定到 `lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864`。后面明确称为固定版本源码的片段都来自这个提交；为了拆机制而写的小程序会明确说明是教学实现。
 
-provider 取出一条完整消息，再由核心订阅表依次调用匹配 handler。回调执行完，`lcm_handle()` 才返回。调用边界如下；参数 `lcm` 是已创建句柄，返回值来自 provider 的一次 `handle` 操作。
+## 第一问：`publish("POSE", &pose)` 到底发送了什么？
 
-对应的上游实现如下：
+我们传进去的是一个 C++ 对象，但 socket 不认识“对象”，最终只能接收一段字节。
 
-```c
+最容易写出的第一版，是直接把对象内存发出去：
+
+~~~cpp
+// 错误思路：把 C++ 对象布局直接当 wire format
+send(sock, &pose, sizeof(pose), 0);
+~~~
+
+只要消息里有 `std::string`、`std::vector`、指针，或者两边编译器布局不同，这个方案就会出问题。比如：
+
+~~~cpp
+struct Pose {
+    double x;
+    std::string frame_id;
+};
+~~~
+
+`std::string` 里保存的是本进程自己的实现状态，其中可能包含指向堆内存的地址。把整个对象的内存镜像发到另一进程，并不会把字符串内容“神奇地搬过去”。
+
+所以第一个必须被单独解决的问题是：
+
+> 业务对象要先转换成双方都认可的 wire bytes。
+
+这就是 `.lcm` 类型描述和 `lcm-gen` 的意义。生成器为 C++、Python、Java 等语言生成相同协议对应的编码/解码代码。LCM 核心后面只需要认识：
+
+~~~text
+channel + byte pointer + byte length
+~~~
+
+它不必理解 `pose_t` 的字段。
+
+### C++ 模板 publish() 先把类型“消掉”
+
+固定版本 C++ 包装层的模板实现非常直接：
+
+~~~cpp
+template <class MessageType>
+inline int LCM::publish(const std::string &channel, const MessageType *msg)
+{
+    unsigned int datalen = msg->getEncodedSize();
+    uint8_t *buf = new uint8_t[datalen];
+    msg->encode(buf, 0, datalen);
+    int status = this->publish(channel, buf, datalen);
+    delete[] buf;
+    return status;
+}
+~~~
+
+逐句执行一次：
+
+~~~text
+pose_t
+  |
+  | getEncodedSize()
+  v
+需要 N 字节
+  |
+  | new uint8_t[N]
+  v
+临时 byte buffer
+  |
+  | encode()
+  v
+真正的 wire bytes
+  |
+  | publish(channel, void*, N)
+  v
+进入无类型 C runtime
+~~~
+
+这几行代码里有两个很值得注意的设计信息。
+
+第一，模板只存在于 C++ 这一层。进入 `publish(channel, const void*, length)` 以后，消息的 C++ 类型已经不再参与传输。
+
+第二，`delete[] buf` 紧跟在底层 `publish()` 返回之后。这意味着 provider 如果想异步继续使用 payload，就不能偷偷长期保存这根裸指针；它必须在返回前完成消费，或者取得自己的独立副本/所有权。
+
+也就是说，**仅仅看调用方的生命周期，就能反推出被调用层必须遵守什么约束。**
+
+## 第二问：为什么 publish() 不直接写死 UDP？
+
+如果 LCM 永远只有 UDP，我们完全可以写：
+
+~~~cpp
+int publish(const char* channel,
+            const void* data,
+            std::size_t size) {
+    return udp_send(channel, data, size);
+}
+~~~
+
+但机器人项目很快会出现不同需求：
+
+~~~text
+在线实验    -> UDP multicast
+离线记录    -> logfile
+单元测试    -> memory queue
+某些部署    -> TCP queue
+~~~
+
+最自然的第二版通常是 `switch`：
+
+~~~c
+switch (transport_kind) {
+case UDPM:    return udpm_publish(...);
+case TCPQ:    return tcpq_publish(...);
+case MEMQ:    return memq_publish(...);
+case LOGFILE: return logfile_publish(...);
+}
+~~~
+
+真正的问题不是这一处 switch 有多丑，而是 transport 还需要 create、destroy、subscribe、handle、get_fileno。每增加一种传输，公共核心都会越来越了解本不属于自己的 socket、文件和队列细节。
+
+于是我们才真正得到一个设计问题：
+
+~~~text
+稳定的东西：
+    publish / subscribe / handle 这些公共语义
+
+变化的东西：
+    UDP / TCPQ / MEMQ / logfile 的具体实现
+~~~
+
+这时才需要 provider。
+
+运行时只保存：
+
+~~~text
+lcm_t
+  |
+  +--> provider vtable  : “能做哪些动作”
+  |
+  `--> provider object  : “这一个具体 transport 的状态”
+~~~
+
+后面的[Provider 抽象](provider-vtable.md)会把函数指针、`void*`/不透明指针、C++ 虚函数、Strategy 与 Factory 逐层拆开。此处只需要建立一个直觉：provider 不是为了“使用设计模式”，而是为了让公共 API 不跟着 transport 种类一起膨胀。
+
+## 第三问：为什么创建 `lcm::LCM` 后，真正的运行时还是 C 对象？
+
+我们平时只写：
+
+~~~cpp
+lcm::LCM lcm;
+~~~
+
+固定版本构造函数实际上只是：
+
+~~~cpp
+inline LCM::LCM(std::string lcm_url) : owns_lcm(true)
+{
+    this->lcm = lcm_create(lcm_url.c_str());
+}
+~~~
+
+所以 C++ `LCM` 更像一层语言友好的外壳，核心对象仍然是 `lcm_t*`：
+
+~~~text
+C++ user
+   |
+   v
+lcm::LCM
+   |
+   | wraps
+   v
+lcm_t
+   |
+   +--> subscription registry
+   +--> provider vtable
+   `--> provider instance
+~~~
+
+为什么保留这两层？
+
+因为 C runtime 很适合做多语言绑定，而 C++ 层可以额外提供模板编码、成员函数 callback 和 RAII。
+
+`owns_lcm` 也不是多余字段。另一个构造函数允许包装外部传进来的 `lcm_t*`，这时它不能在析构时替别人销毁对象。这里正好说明一个非常基础但经常被忽略的 C/C++ 原则：
+
+> 裸指针只说明“对象在哪里”，不说明“谁负责销毁它”。
+
+## 第四问：subscribe 以后，callback 到底在哪条线程？
+
+这是第一次使用 LCM 时最容易误判的地方。
+
+很多人看到：
+
+~~~cpp
+lcm.subscribe("POSE", &Handler::onPose, &handler);
+~~~
+
+会下意识想成：
+
+~~~text
+网络线程收包
+  -> LCM worker
+  -> onPose()
+~~~
+
+但固定版本 C++ API 的说明明确指出：callback 在调用 `LCM::handle()` 的同一线程中执行。
+
+所以真正的应用侧时间线是：
+
+~~~text
+应用线程
+│
+│ lcm.handle()
+│    │
+│    ├── 取得一条完整消息
+│    ├── 匹配 subscription
+│    ├── onPose() ───────── 业务代码可能运行 20 ms
+│    └── return
+│
+│ 下一次 lcm.handle()
+v
+~~~
+
+这意味着 callback 里写磁盘 20 ms，同一 LCM 实例后续业务分发至少会晚 20 ms。
+
+### 那慢 callback 会不会直接卡住 socket recv？
+
+又不能简单回答“会”。
+
+UDPM provider 的接收侧和应用 callback 是两条执行流。先用一张最小图理解：
+
+~~~text
+网络接收侧                             应用侧
+
+UDP socket
+    |
+receiver thread
+    |
+    | 收包 / 重组
+    v
+完整消息队列
+    |
+    | notify
+    +--------------------------> lcm.handle()
+                                     |
+                                     v
+                              subscription dispatch
+                                     |
+                                     v
+                                user callback
+~~~
+
+这层隔离的意义是：业务 callback 不直接占住 socket receive loop。
+
+但这不等于慢 callback 没有代价。应用侧消费速度低于网络侧生产速度时，完整消息会积压在有限缓存中，最终仍会出现丢弃或旧数据。
+
+所以对控制系统来说，更合理的结构往往是：
+
+~~~text
+LCM callback
+    |
+    | 只做快速 decode / copy / swap
+    v
+有界最新值缓存
+    |
+control thread
+~~~
+
+而不是把几十毫秒算法直接塞进 callback。
+
+## 第五问：为什么要我自己调用 handle()？
+
+如果 LCM 自动替你执行 callback，它就必须顺便替你决定：
+
+- callback 用几条线程；
+- 和控制循环谁优先；
+- GUI loop 怎么整合；
+- backlog 一次处理多少；
+- shutdown 时先停谁。
+
+LCM 选择把这一层控制权留给应用。
+
+固定 C 层 `lcm_handle()`：
+
+~~~c
 int lcm_handle(lcm_t *lcm)
 {
     if (lcm->provider && lcm->vtable->handle) {
         int ret;
         g_rec_mutex_lock(&lcm->handle_mutex);
-        assert(!lcm->in_handle);  // recursive calls to lcm_handle are not allowed
+        assert(!lcm->in_handle);
         lcm->in_handle = 1;
         ret = lcm->vtable->handle(lcm->provider);
         lcm->in_handle = 0;
@@ -147,38 +357,70 @@ int lcm_handle(lcm_t *lcm)
     } else
         return -1;
 }
-```
+~~~
 
-`handle_mutex` 只串行化同一实例的 handle 调用，`in_handle` 断言拒绝 callback 递归进入第二轮分发；它没有锁住 provider 的网络接收线程，也不会让 callback 并行运行。下一跳是所选 vtable 的 `handle`，因此真实等待和一次调用消费多少消息要继续看 provider。
+这里真正发生的事情很少：
 
-这给出非常直接的执行模型：若 callback 运行 20 ms，同一 LCM 实例上的下一条 callback 至少晚 20 ms。网络接收线程可能继续收包，但有限队列会积压并最终丢弃。
+~~~text
+检查 provider
+  -> 串行化 handle
+  -> 标记正在 handle
+  -> 进入当前 provider 的 handle()
+  -> 清标记
+  -> 返回
+~~~
 
-## C 与 C++ 两层 API
+`handle_mutex` 串行化的是同一个 LCM 实例的 handle 调用，不是“给整个 LCM 加了一把大锁”。它也不会让 callback 自动并行。
 
-LCM 的核心用 C 编写。C++ 类 `lcm::LCM` 主要是 RAII 与模板适配层：
+这种设计让 `getFileno()` 变得很有用：应用可以把 LCM 的 ready fd 合入自己的 `select/poll`、GUI 或机器人事件循环，而不必把主线程交给 LCM。
 
-对应的上游实现如下：
+## 现在再看 LCM，已经不是三个 API 了
 
-```cpp
-class LCM {
- public:
-  explicit LCM(const std::string& url = "");
-  ~LCM();
+从最初的：
 
-  int publish(const std::string& channel,
-              const void* data, unsigned int size);
-  int handle();
-  int handleTimeout(int timeout_millis);
+~~~text
+publish / subscribe / handle
+~~~
 
- private:
-  lcm_t* lcm;
-};
-```
+一路追问以后，我们已经自然推出：
 
-构造函数调用 `lcm_create()`，析构函数调用 `lcm_destroy()`。模板订阅把 C++ 成员函数包装成 C callback 加 `void* userdata`。
+~~~text
+typed object
+   |
+generated codec
+   |
+byte buffer
+   |
+C++ wrapper
+   |
+lcm_t
+   |
+   +--> provider vtable --> UDPM/TCPQ/MEMQ/LOGFILE
+   |
+   `--> subscription registry
+             ^
+             |
+receiver thread -> complete-message queue -> ready notification
+                                             |
+                                             v
+                                         lcm.handle()
+                                             |
+                                             v
+                                        user callback
+~~~
 
-这是一种薄封装，而不是另一套运行时。阅读 C++ API 时遇到性能或并发问题，应继续下钻到 `lcm.c` 和选中的 provider。
+注意这些层不是为了“架构看起来漂亮”才存在的。每一层都对应一个具体失败：
 
+| 新的一层 | 它解决的直接问题 |
+|---|---|
+| generated codec | 不能把 C++ 对象布局当 wire protocol |
+| C++ wrapper | 手工管理 C 指针、编码和成员函数 callback 太繁琐 |
+| provider | transport 变化污染公共 API |
+| receive queue | 业务 callback 不应直接占住 socket receive path |
+| ready fd | 中间件不应强迫应用接受它自己的 event loop |
+| subscription object | 一个字符串到一个函数不足以表达匹配、配额与生命周期 |
+
+接下来再读 `lcm_create()`、`lcm_publish()`、接收线程和 subscription dispatch，源码里的对象就有了来路：我们已经知道作者为什么需要它们，而不是只认识它们的名字。
 ## lcm_create 的装配过程
 
 `lcm_create(url)` 先建立 provider 描述列表：
