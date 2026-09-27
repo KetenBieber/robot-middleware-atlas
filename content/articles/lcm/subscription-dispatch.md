@@ -1,10 +1,16 @@
 # 订阅与分发：正则缓存、队列配额和回调期删除
 
-机械臂状态 `ARM_STATE` 同时送给三个订阅者：控制器 1 ms 内必须看到新状态，记录器可以稍慢，可视化 callback 偶尔需要 15 ms 绘图。若初学者为每个订阅复制一份 payload，再让所有 callback 在同一个循环里无界执行，慢图形会让控制状态晚到，消息副本还会按订阅数和积压一起增长。Provider 交给核心层的是一条完整消息：channel、payload 视图和接收时间。核心层随后要决定哪些 subscription 能看见它、哪些订阅已经积压过多，以及 callback 执行期间取消订阅是否安全。
+上一章我们已经会写 `lcm.subscribe("ARM_STATE", ...)`，也知道真正运行 callback 的是自己调用 `handle()` 的线程。作为使用者，接下来很可能遇到一个比“怎样订阅”更具体的问题：**同一条消息交给好几个 callback，其中一个取消了另一个订阅，会发生什么？**
 
-本文固定分析 `lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864`，重点符号是 `lcm_subscribe()`、`lcm_try_enqueue_message()`、`lcm_unsubscribe()` 与 `lcm_dispatch_handlers()`。它们展示一个小型事件分发器必须处理的三个问题：匹配成本、过载隔离和可重入生命周期。
+假设关节状态同时送给诊断、记录、可视化三个模块。诊断 callback 发现设备异常，于是取消可视化订阅；而 LCM 此刻正在分发同一条 `ARM_STATE`。如果内部只是一个存放 callback 指针的 `vector`，诊断函数一旦删除数组里的可视化节点，分发循环的下一个下标可能移动，原先保存的指针也可能悬空。若在整个循环里始终持锁，用户 callback 又可能反过来调用 `unsubscribe()`，形成另一种锁和重入难题。
 
-下文讨论的锁是核心对象 `lcm_t::mutex`：它保护 `handlers_all`、`handlers_map`、subscription 的排队计数和延迟删除标记。`handle_mutex` 只把同一实例的 `lcm_handle()` 串成一个分发者；provider 的 `lcm_udpm_t::mutex` 则保护接收缓冲队列与 ring，二者不要混成一把锁。固定版本的 `lcm_handle()` 持有 `handle_mutex` 调用 provider 的 `handle`，而 callback 由这个调用栈同步执行。
+把问题稍微扩大：如果可视化偶尔绘图 15 ms，而机械臂状态每 1 ms 到一条，我们是否应该为每个订阅保留一份 payload？如果不复制，又怎样只丢弃可视化的新消息，同时保留控制器的消息？
+
+本章就从这两个真实使用疑问逐层反推 LCM 的订阅系统：先构造一个会失效的 callback 数组，再引入“冻结本轮遍历 + 延迟回收”；接着把一条消息交给多个订阅，发现需要**公共 payload 队列 + 各订阅自己的准入计数**；最后才看 channel 正则匹配缓存和核心的三种锁边界。阅读完之后，`callback_scheduled`、`num_queued_messages` 不应再只是需要记忆的字段，而是上一版设计失败后不得不出现的状态。
+
+源码固定到 `lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864`，下面出现的两个关键函数是 `lcm_try_enqueue_message()` 和 `lcm_dispatch_handlers()`。先把它们当成运行时想回答的两个问题：**“这条消息还值得留下吗？”**和**“留下之后，当前有哪些 callback 真正会被调用？”**
+
+在固定实现中，核心 `lcm_t::mutex` 保护订阅集合、匹配缓存、配额和删除标志；`handle_mutex` 串行化同一实例的 `handle()` 调用；UDPM provider 的另一把 mutex 保护接收缓冲区。三把锁各有不同的职责。理解它们的区别，需要先看它们各自保护了什么状态，而不是先背锁名。
 
 ## subscription 的状态
 
@@ -159,6 +165,37 @@ int lcm_try_enqueue_message(lcm_t *lcm, const char *channel)
 
 这不是传统的“每 subscription 一条 payload queue”。`num_queued_messages` 是资格计数，实际 buffer 位于 provider 的全局 FIFO。分发到该消息时，只调用计数仍大于零的 handler。
 
+### 同一份 payload，为什么三个订阅者能有三种丢帧结果？
+
+先用一个有数字的实验看懂 `lcm_try_enqueue_message()`，再回头看上面那段源码。假设三个订阅匹配同一个 `ARM_STATE`，应用线程暂时没有调用 `handle()`：
+
+| 订阅者 | 配额 | 用途 |
+|---|---:|---|
+| A | 1 | 控制器，只愿意留一条尚未处理的消息 |
+| B | 2 | 记录模块，愿意保留两条 |
+| C | 0 | 不设上限（LCM 的 `<=0` 约定） |
+
+现在接收线程连续取得 M1、M2、M3，并分别对每条消息调用一次 `lcm_try_enqueue_message()`。我们先假定每个订阅初始 pending=0：
+
+| 到来的消息 | A 的 pending | B 的 pending | C 的 pending | 这条消息是否进入公共队列 |
+|---|---:|---:|---:|---|
+| M1 | 1（保留） | 1（保留） | 1（保留） | 是 |
+| M2 | 1（已满，放弃 M2） | 2（保留） | 2（保留） | 是 |
+| M3 | 1（已满，放弃 M3） | 2（已满，放弃 M3） | 3（保留） | 是 |
+
+注意这张表有一个反直觉的事实：**公共 FIFO 里仍然只有 M1、M2、M3 各一份，A/B/C 并没有各自保存消息副本。** 订阅者的 pending 只是一种尚未处理的准入资格，并不指向某个独占 payload。随后应用线程依次消费 FIFO，分发函数面对 M1 时发现三个订阅 pending 都大于零，分别减一并调用 callback；面对 M2 时只给 B、C 执行；面对 M3 时只给 C 执行。
+
+~~~text
+公共 FIFO:       [M1] -> [M2] -> [M3]
+                   |       |       |
+控制器 A:          √       ×       ×
+记录器 B:          √       √       ×
+无上限 C:          √       √       √
+~~~
+
+这样节省 payload 内存，但并不等于每个订阅都有独立消费线程：如果 A 在 M1 的 callback 里耗费 20 ms，B 和 C 连 M1 都还没处理，更不可能越过它先处理 M2。**独立配额隔离的是消息准入，并非 CPU 时间。**
+
+真实代码里还有一个时序约束：上述对应关系依赖 provider 按接收顺序将完成的消息入队，再由单个 `handle()` 调用链按该顺序分发；它不是可在任意应用并发调度和订阅变更条件下使用的事务性投递承诺。要实现“控制器永远拿最新帧”，不能只把 A 配额设为 1；固定代码在已满时拒绝的是**新消息**，因此需要在应用自己的有界覆盖槽中进一步实现 drop-oldest/latest-only。
 ## 单副本与订阅者隔离的折中
 
 一份 payload 对多个 handler 的设计节省内存：
@@ -174,6 +211,131 @@ one MessageBuffer
 
 配额隔离的是“为某订阅者保留多少历史”，不是 CPU 执行隔离。需要并行时，callback 应快速转交到应用自有队列；转交时必须复制或 decode，因为 provider payload 在 handle 返回后失效。
 
+## 先自己实现一次：为什么不能在 callback 内直接删除订阅？
+
+此刻先不要考虑网络。假设一条 `ARM_STATE` 已经成功接收，匹配到了三个订阅 A、B、C；A 的职责是监测设备状态，B 负责可视化，C 负责日志。我们最容易写出这样的代码：
+
+~~~cpp
+// 反例：callback 有权直接 erase 时，for 循环持有的下标和指针会失效。
+for (auto* subscription : handlers) {
+    subscription->callback(message);
+}
+~~~
+
+A 的 callback 若直接删除 B，会触发两种可能：若 B 的对象被释放，下一轮可能解引用悬空指针；若用 `vector::erase` 删除 B，后面的 C 又向前移动，基于旧下标的循环可能跳过它。把循环完全放在 mutex 里也不是答案：业务 callback 可能试图再次修改订阅表，还可能进行耗时 I/O。
+
+### 可以编译运行的订阅删除实验
+
+我们暂时**不使用线程**，只复刻 LCM 的生命周期核心。以下是完整的 C++17 教学程序，刻意让 A 在处理当前消息时注销 B，并登记一个新订阅 D。固定上游并不使用 `std::unique_ptr` 来保存 subscription；这里用它是为了消除实验本身的内存泄漏干扰。
+
+~~~cpp
+#include <algorithm>
+#include <cassert>
+#include <functional>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+struct Subscription {
+    std::string name;
+    std::function<void()> callback;
+    int pending = 0;
+    bool scheduled = false;
+    bool removed = false;
+};
+
+class Dispatcher {
+public:
+    Subscription* add(std::string name, std::function<void()> callback) {
+        auto item = std::make_unique<Subscription>();
+        item->name = std::move(name);
+        item->callback = std::move(callback);
+        auto* raw = item.get();
+        handlers_.push_back(std::move(item));
+        return raw;
+    }
+
+    void unsubscribe(Subscription* item) {
+        if (item->scheduled) {
+            item->removed = true;       // 本轮仍持有指针，只标记
+            return;
+        }
+        handlers_.erase(std::remove_if(handlers_.begin(), handlers_.end(),
+            [item](const auto& p) { return p.get() == item; }),
+            handlers_.end());
+    }
+
+    void admit() {
+        for (auto& p : handlers_)
+            if (!p->removed) ++p->pending;  // 这里只模拟准入，未设置上限
+    }
+
+    void dispatch() {
+        const auto count = handlers_.size(); // 冻结本轮数量
+        for (std::size_t i = 0; i < count; ++i)
+            handlers_[i]->scheduled = true;
+
+        for (std::size_t i = 0; i < count; ++i) {
+            auto* p = handlers_[i].get();
+            if (!p->removed && p->pending > 0) {
+                --p->pending;
+                p->callback();           // 不在锁内运行用户代码
+            }
+        }
+
+        for (std::size_t i = 0; i < count; ++i)
+            handlers_[i]->scheduled = false;
+        handlers_.erase(std::remove_if(handlers_.begin(), handlers_.end(),
+            [](const auto& p) { return p->removed; }), handlers_.end());
+    }
+
+private:
+    std::vector<std::unique_ptr<Subscription>> handlers_;
+};
+
+int main() {
+    Dispatcher bus;
+    std::vector<std::string> calls;
+    Subscription* b = nullptr;
+    bool first = true;
+
+    bus.add("A", [&] {
+        calls.push_back("A");
+        if (first) {
+            first = false;
+            bus.unsubscribe(b);          // B 尚未执行，但仍在本轮快照内
+            bus.add("D", [&] { calls.push_back("D"); });
+        }
+    });
+    b = bus.add("B", [&] { calls.push_back("B"); });
+    bus.add("C", [&] { calls.push_back("C"); });
+
+    bus.admit();
+    bus.dispatch();
+    assert((calls == std::vector<std::string>{"A", "C"}));
+
+    bus.admit();
+    bus.dispatch();
+    assert((calls == std::vector<std::string>{"A", "C", "A", "C", "D"}));
+}
+~~~
+
+使用 `g++ -std=c++17 -Wall -Wextra -Werror -pedantic` 编译。第一次分发时，我们冻结 `count=3` 并把 A、B、C 都标记为 scheduled。A 取消 B 时，B **没有立即析构**，只记录 `removed=true`；A 新登记 D，D 排在原有三个元素之后，不属于本次冻结的范围。随后 B 被跳过、C 正常执行。循环结束，旧 B 才被集中回收，下一次消息才轮到 D。
+
+~~~text
+刚入队:     A(pending=1)  B(1)  C(1)
+冻结本轮:   [A scheduled] [B scheduled] [C scheduled]
+执行 A:     B.removed=true; append D
+执行 B:     已标记删除，跳过
+执行 C:     正常运行
+安全点:     清 scheduled，物理删除 B
+下一轮:     A、C、D
+~~~
+
+现在再回到真实 `lcm_dispatch_handlers()`，读者就能预测它为什么有三个循环：第一个冻结本轮并设置 `callback_scheduled`，第二个解锁执行符合准入条件的 callback，第三个清标记、收集并销毁延期删除对象。这里的 `scheduled` **不是正在占用 CPU**，只是“本轮仍有可能访问这个对象”的生命周期承诺。
+
+教学例子故意省略了并发：它没有 mutex，假定只有一个 dispatch 调用栈。真实 LCM 的 `lcm_t::mutex` 必须保护登记/取消/计数和逻辑删除；独立的 `handle_mutex` 则串行化完整的 `handle()`。把教学例子里的单线程成功直接推广为跨线程安全，是错误的。
 ## 分发时如何冻结迭代边界，却在锁外执行业务
 
 此时 provider 已经接收完整消息，核心层也知道这条具体 channel 应交给哪些 handler。新的矛盾是：业务 callback 可能很慢，还可能在内部执行 `unsubscribe()`，因此不能一直持有核心订阅表的互斥锁；但如果解锁后让 callback 直接删除正在遍历的 handler，又会发生迭代器失效和悬空指针。

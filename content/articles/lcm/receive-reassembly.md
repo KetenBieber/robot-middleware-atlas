@@ -1,11 +1,74 @@
 # 从 UDP 数据报到订阅回调：LCM 的接收、重组与缓冲区归还
+上一章我们发现：`subscribe()` 并不会自动创建一个帮我们执行 callback 的 worker。真正调用业务函数的是 `lcm.handle()` 所在的应用线程。那么，一个实际使用中的疑问就来了：**我没有调用 `handle()` 的这段时间，网络上新来的 UDP 消息都去了哪里？**
 
-机械臂控制进程每毫秒发布一次关节状态，同时接收相机标定和地图更新。最直接的接收循环会在 recvfrom() 后立刻解析并调用用户 callback。若地图 callback 偶尔做 20 ms 的文件写入，这个线程就有 20 个毫秒收不到 UDP；内核 socket 接收缓冲区填满后会丢包，控制端看到的 sequence gap 便不再是网络本身造成，而是自己的磁盘工作挡住了收包。
+先模拟一次很普通的机器人实验。底盘每 1 ms 发布一条位姿，GUI 上同时订阅这条消息；GUI 的 callback 偶尔为了保存截图运行 15 ms。你在日志里看到消息时间戳连续到达、画面却一阵阵更新，随后开始出现丢帧。第一反应可能是“UDP 不可靠”，但这个现象也可能完全由自己写的 callback 引起。
 
-要修复它，先得把“收包”和“处理业务”拆开：网络接收线程尽可能快地从 socket 取数据、识别短消息或重组长消息，然后把完整消息放到进程内队列；调用 lcm_handle() 的应用线程再取出消息并同步运行 callback。拆开之后仍然有几个不同的时刻：UDP 数据报进入内核 socket 缓冲区、recvmsg() 将数据复制进用户态、分片成为完整消息、完整消息进入 inbufs_filled、通知 pipe 写入字节、handle 线程从内核阻塞中变为可运行、操作系统将 CPU 分给它、callback 才真正开始执行。把这些步骤都叫作“消息被唤醒”会掩盖积压究竟发生在哪一层。
+## 如果我们自己写接收器，第一版会怎样？
 
-本文按 lcm-proj/lcm 固定提交 ad0c54cee0ec048ef12357c34349ec1443158864 展开。文中的固定源码摘录均来自这个提交；它们用于解释真实控制流，不是教学代码。
+大多数人第一次写 socket 都会得到以下教学伪代码：
 
+~~~cpp
+while (running) {
+    Packet packet = recv_one_datagram(socket);
+    if (auto message = decode_or_reassemble(packet))
+        user_callback(*message);
+}
+~~~
+
+假设 t=0 ms 收到第一帧，`user_callback` 用了 15 ms。接收循环直到 t=15 ms 才再次 `recv`。期间网卡与内核仍可能接收 UDP 数据报，但用户态没有及时从 socket 缓冲区取走它们；如果内核缓冲区被写满，后续数据报就被丢弃。**给 callback 加锁或者改成另一个函数都不能改变接收线程被它占住 15 ms 的事实。**
+
+所以第一次改造必须把两种工作分开：接收线程负责尽快从 socket 搬走数据、检查协议并重组长消息；应用线程决定什么时候取出一条完整消息并运行 callback。二者之间必须有一个传递数据所有权的队列。
+
+~~~text
+                         内核空间         进程内存
+网络报文 ──> UDP socket 接收缓冲 ──recv──> receiver thread
+                                                  |
+                                              协议校验
+                                                  |
+                                           短消息/分片重组
+                                                  |
+                                            完整消息队列
+                                                  |
+应用线程调用 handle() ──等待通知──取出消息────────+
+           |
+           +──匹配订阅──运行 callback──归还消息缓冲
+~~~
+
+此时业务 callback 可以慢，但它不直接占住 socket 接收线程。然而**两线程不等于无限吞吐**。如果输入频率为 1000 Hz，而每条回调平均耗费 15 ms，单条应用线程最多每秒处理约 66 条；剩余消息仍然积压，最终依赖队列容量和订阅配额发生丢弃。对控制器来说，必须同时考虑“网络收到”与“业务实际处理”之间的数据年龄。
+
+## 队列里有消息后，handle 为什么会醒来？
+
+初学者可能会给每条完整消息都向 pipe 写一个字节，把 pipe 当作计数器。但如果应用线程正在运行耗时 callback，接收线程还在以 1 kHz 入队，通知 pipe 也会很快积压。我们真正需要传递的是一个条件：**队列从空变成非空了，可以来取。**
+
+固定源码中的 receiver 在取得 provider mutex 后，只在 `inbufs_filled` 为空时写通知字节，随后把消息描述符入队：
+
+~~~c
+g_rec_mutex_lock(&lcm->mutex);
+
+if (lcm_buf_queue_is_empty(lcm->inbufs_filled))
+    if (lcm_internal_pipe_write(lcm->notify_pipe[1], "+", 1) < 0)
+        perror("write to notify");
+
+lcm_buf_enqueue(lcm->inbufs_filled, lcmb);
+
+g_rec_mutex_unlock(&lcm->mutex);
+~~~
+
+这里有两个重要细节。首先，检查空队列、通知、入队处于**同一把 mutex 的锁域**，应用侧不会在这三个动作中间拿走一个不完整的队列状态。其次，通知不是 payload，也不是新建一个 callback：pipe 可读只意味着应用线程现在可以进入 `handle()` 的下一步。
+
+对应的 `lcm_udpm_handle()` 先读走一个通知字节，再持锁从 `inbufs_filled` 取一条完整消息；如果队列仍非空，它会往 pipe **写回一个字节**，保证下一次调用 `handle()` 仍能发现有数据可处理。所以在稳定态下，队列可能有很多消息，而 pipe 里只需要维护“还有工作可做”的可读状态。
+
+~~~text
+初始：       queue=[]             pipe=空
+收到 M1：    queue=[M1]           pipe="+"
+收到 M2：    queue=[M1,M2]        pipe="+"（无需重复通知）
+handle M1：  queue=[M2]           pipe 读走后重新写回 "+"
+handle M2：  queue=[]             pipe 被读空
+~~~
+
+注意 `notify_pipe` 解决的是应用线程的**等待与唤醒**，不是停止接收线程的信号；后者使用独立的 `thread_msg_pipe`。接下来读 provider 的数据结构时，读者就能理解为什么一个看似很小的 UDP provider 需要两条队列、两个 pipe、接收线程、mutex 和 ring allocator，而不是一只 socket 就够了。
+
+源码版本为 `lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864`。本章后面的原始代码将沿消息实际走过的路径继续展开：先建立接收资源，再等待 socket 与退出事件，最后处理 LC02 短包、LC03 分片以及缓冲区归还。以上 `recv_one_datagram` 是帮助推导的伪代码，不是该提交的函数。
 ## 先让接收端拥有可复用的状态
 
 每个 UDPM provider 都要保留接收 socket、两条 buffer 队列、ring buffer、接收线程、两条通知 pipe 和未完成分片表。notify_pipe 通知应用线程有完整消息可取；thread_msg_pipe 单独用于通知 receiver 退出。前者随 provider 建立，后者与接收资源一起延迟创建。它们的方向不同，不能合并成一个含糊的“事件 fd”。

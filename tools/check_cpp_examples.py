@@ -17,6 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = {
     "content/articles/lcm/provider-vtable.md": "### 先写一个能运行的 C++17 缩小版",
+    "content/articles/lcm/subscription-dispatch.md": "### 可以编译运行的订阅删除实验",
     "content/articles/yarp/cpp-design-lab.md": "## 从 `M × C` 个专用函数走向两条动态分派边界",
     "content/articles/ecal/cpp-design-lab.md": "## 用一个可运行的弱句柄实验建立所有权模型",
 }
