@@ -23,6 +23,164 @@ int publish(Bus *bus, const char *channel, const void *data, size_t size) {
 
 当选择依据稳定但实现可替换时，核心只需保存“实例状态”和“该实例对应的一组操作”。接下来的 C 指针与调用表就是解决这个具体变化点的最小方案；它并不自动统一三种 provider 的阻塞、丢弃或持久化语义。
 
+## 使用者真正看到的第一处“可替换”：只改 URL，为什么整套通信方式都变了？
+
+回到实际调用。我们已经用下面的代码在局域网里收发机械臂关节状态：
+
+~~~cpp
+lcm::LCM bus("udpm://239.255.76.67:7667?ttl=1");
+bus.publish("ARM_STATE", &state);
+~~~
+
+现在控制算法暂时不需要改，却要测试“断开真实网络以后，消息分发是否仍正确”。于是把构造时的 URL 换成 §memq://§；实验录制工具可能又使用日志 provider。**代码中的 §publish("ARM_STATE", ...)§ 不需要因为切换传输而增删一个参数。**
+
+但仅仅看到 API 一致，并不能直接证明底层用了“策略模式”。假如你来写这套库，第一版完全可以在 §lcm_publish()§ 内写一个 switch，让所有请求转发给具体实现。问题是这个 switch 会慢慢扩散：§handle()§ 要区分是读文件还是等 UDP，§get_fileno()§ 要区分返回 socket 还是通知 pipe，§destroy()§ 要知道究竟释放哪些资源。传输种类每增加一次，公共层的许多函数都得一起修改。
+
+先停下来识别一个**真正的设计边界**：公共层只关心“我要发送这一段字节”，具体传输层负责“怎么发、等什么事件、如何释放自己”。公共层不能把“所有实现都一样快、都会重试、都有同一个文件描述符”也包装成承诺。函数**签名一致**与函数**行为等价**是两回事。
+
+### 我们先用 C 写一个最小运行时分派，而不是背 vtable 的定义
+
+下面是一份完全独立的 C11 教学程序。它只有两个后端，§Memory§ 把最后一条消息复制到固定数组，§Drop§ 故意丢弃；不依赖 LCM，也不模拟真实网络。先观察最重要的事实：调用者只知道 §Bus§，但一个间接调用却可以走进两段不同的函数。
+
+~~~c
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+typedef struct {
+    char last[64];
+    unsigned calls;
+} Memory;
+
+typedef struct {
+    unsigned dropped;
+} Drop;
+
+typedef struct {
+    int  (*publish)(void *self, const char *channel, const char *payload);
+    void (*destroy)(void *self);
+} Ops;
+
+typedef struct {
+    void *state;       /* 具体后端的对象地址 */
+    const Ops *ops;    /* 借用静态函数表 */
+} Bus;
+
+static int memory_publish(void *self, const char *channel,
+                          const char *payload) {
+    Memory *m = self;
+    int n = snprintf(m->last, sizeof m->last, "%s:%s", channel, payload);
+    if (n < 0 || (size_t)n >= sizeof m->last) return -1;
+    ++m->calls;
+    return 0;
+}
+
+static int drop_publish(void *self, const char *channel,
+                        const char *payload) {
+    Drop *d = self;
+    (void)channel;
+    (void)payload;
+    ++d->dropped;
+    return 0;
+}
+
+/* 这里状态由 main 的栈对象拥有，因此销毁钩子无需 free。 */
+static void borrowed_destroy(void *self) { (void)self; }
+
+static const Ops memory_ops = {memory_publish, borrowed_destroy};
+static const Ops drop_ops = {drop_publish, borrowed_destroy};
+
+static int bus_publish(Bus *b, const char *channel, const char *payload) {
+    return b->ops->publish(b->state, channel, payload);
+}
+
+int main(void) {
+    Memory memory = {{0}, 0};
+    Drop drop = {0};
+    Bus a = {&memory, &memory_ops};
+    Bus b = {&drop, &drop_ops};
+
+    assert(bus_publish(&a, "ARM", "42") == 0);
+    assert(bus_publish(&b, "ARM", "42") == 0);
+    assert(strcmp(memory.last, "ARM:42") == 0);
+    assert(memory.calls == 1 && drop.dropped == 1);
+    puts("same API, different provider");
+}
+~~~
+
+使用 §gcc -std=c11 -Wall -Wextra -Werror -pedantic§ 编译这份程序。§Bus a§ 和 §Bus b§ 的布局完全相同：都是“状态地址 + 函数表地址”。§Memory§ 与 §Drop§ 的布局完全不同：一个含字符串缓存，另一个只有计数器。核心不需要知道它们的定义。
+
+这不是使用 §if (a==...)§ 来分派；真正的调用点是：
+
+~~~c
+b->ops->publish(b->state, channel, payload)
+~~~
+
+第一次 §bus_publish(&a, ...)§：§b->ops§ 指向 §memory_ops§，取到 §memory_publish§，§b->state§ 被恢复为 §Memory*§；第二次用同一段调用代码处理 §b§，取得的则是 §drop_publish§。从编译期角度看，§bus_publish§ 只编译一次。它的二进制不需要有 §Memory§ 和 §Drop§ 的字段访问指令，这些访问只在具体后端函数内出现。
+
+### 代码里的函数指针，和你熟悉的普通函数到底差在哪？
+
+§int (*publish)(void *, const char *, const char *)§ 不是“返回一个函数指针的函数”。从变量名 §publish§ 往外读：星号说明它是一个指针，圆括号让这颗星号和名字先绑定，后面参数列表说明指向的是一类函数，最外层 §int§ 是被指函数的返回值。
+
+~~~c
+int  publish(void *, const char *);     /* 函数声明 */
+int (*publish)(void *, const char *);   /* 指向函数的变量 */
+~~~
+
+§Ops§ 中每个字段都固定了签名。具体函数地址装入 §memory_ops§ 这张静态表以后，§Bus§ 只需要记住表的位置，而不需要在每个实例里复制两份函数指针。表本身属于静态存储期；上面的 §Memory memory§ 则属于 §main§ 的自动存储期。因而不能把两者误认为相同的“拥有者”：§ops§ 是借用，§state§ 由谁释放还得额外约定。
+
+这也揭示了 vtable 最危险的一种错误：如果拿 §Drop*§ 冒充 §Memory*§，却同时把 §memory_ops§ 传给 Bus，那么 §memory_publish§ 会把错误布局当成 Memory 读取，触发未定义行为。§void*§ 让公共 API 避免依赖具体实现，也同时把“状态类型与函数表必须配对”的责任交给**唯一的构造入口**。因此实际框架里还要有 URL 解析和 provider 工厂，而不能让用户任意拼两根地址。
+
+### 从自己的两字段 Bus，映射回 LCM 真正的三个对象
+
+固定源码里的第一份证据是 §lcm_t§，它确实同时存有：
+
+~~~c
+lcm_provider_vtable_t *vtable;
+lcm_provider_t *provider;
+~~~
+
+第二份证据是 §lcm_create()§。它先调用内建的 provider 注册函数，把各实现的 §name§ 和 §vtable§ 收集到 §providers§ 数组；解析 URL 得到 scheme 后，线性寻找匹配名称。找到 §info§ 以后，才装配下面这对字段：
+
+~~~c
+lcm->vtable = info->vtable;
+lcm->provider = info->vtable->create(lcm, network, args);
+~~~
+
+这与我们的教学 §Bus§ 还差一个重要环节：**工厂必须把“正确的对象”与“正确的表”绑定起来。** §info->vtable§ 来自匹配的 scheme，§create()§ 再产生那一类 provider 的实例。没有这一层，类型擦除会失去安全配对的来源。
+
+以 UDPM 为例，源码中 §lcm_udpm_t§ 实际是 §struct _lcm_provider_t§ 的 typedef；其函数表静态初始化为 §create/destroy/subscribe/publish/handle/get_fileno§ 等对应函数。它的私有对象内部拥有 §sendfd§、§recvfd§、两条控制/通知 pipe、接收线程、消息缓存队列、§transmit_lock§ 和其他状态。你在调用 §publish§ 时无需知道这些成员；真正访问它们的，是表项指向的 §lcm_udpm_publish§。
+
+最后把整个构造和发送放到同一条时间轴上：
+
+~~~text
+构造：lcm::LCM("udpm://...")
+    |
+    v
+lcm_create -> parse URL -> find udpm_info
+    |
+    | 保存 udpm_vtable
+    v
+udpm_vtable.create -> 申请 UDPM 实例
+    |
+    | 返回 provider 指针
+    v
+lcm_t{vtable, provider}
+
+发送：LCM::publish("ARM_STATE", &state)
+    |
+    | generated encode -> 临时 byte buffer
+    v
+lcm_publish -> vtable.publish(provider, ...)
+    |
+    | provider 为 UDPM 实例
+    v
+lcm_udpm_publish -> socket send path
+~~~
+
+此刻才可以给它命名：具体 provider 承担传输 **Strategy**，§lcm_create§ 里的 scheme 匹配和实例创建承担 **Factory**。不过 LCM 的内建 provider 是编译期注册，不是任意动态库插件；§Ops§ 所有字段也是源码内部约定，不等于对外承诺了一套可无缝升级的第三方 ABI。
+
+
 ## vtable 的完整契约
 
 固定版本的 C 核心用以下方法表约定 provider 的操作：
@@ -154,27 +312,42 @@ int main() {
 这一步才可以把设计归纳为 **Strategy**：同一个 Bus 可以通过不同 provider 满足同一组操作。URL 在创建时选择 `provider_info` 和方法表，又对应 **Factory**。两者并不等价：Factory 决定对象如何出生，Strategy 决定出生后 `publish` 如何执行，RAII 再决定什么时候安全销毁。LCM 的 provider 随 URL 创建后不会因每条消息自动切换；要替换它，应新建相应实例并协调旧实例的收尾，而不是在有活跃回调时直接重写 `lcm->vtable`。
 ## 不透明 provider 指针完成类型擦除
 
-核心层只声明：
+现在已经看过可运行的双后端例子，再回到 LCM，确认类型擦除究竟怎样落在 C 语言里。公共内部头文件先只声明一个尚未给出布局的结构体：
 
-
-```c
+~~~c
 typedef struct _lcm_provider_t lcm_provider_t;
-```
+~~~
 
-它不知道结构体字段。UDPM 实现可以把自己的 `lcm_udpm_t*` 转成 `lcm_provider_t*` 返回，调用时再转回：
+这里有个看似细小、实际上关系到 C 类型系统的问题：UDPM 实现不是定义一个无关结构再做不安全的函数指针强制转换，而是给**同一个结构体标签**取了一个本地别名。固定提交的原始结构体声明以如下字段开头：
 
+~~~c
+typedef struct _lcm_provider_t lcm_udpm_t;
+struct _lcm_provider_t {
+    SOCKET recvfd;
+    SOCKET sendfd;
+    struct sockaddr_in dest_addr;
+    lcm_t *lcm;
+    // 其后省略原结构体中的参数、队列、接收线程、锁及 pipe 等成员。
+};
+~~~
 
-```c
-static int lcm_udpm_publish(lcm_udpm_t *udpm, ...);
+上面特意只展示真实声明的**连续前缀**；省略符号是教学注释，不应把它当作完整的 UDPM 对象。因为两个 typedef 指向同一标签，`lcm_provider_t*` 与 `lcm_udpm_t*` 在 UDPM 实现单元里是兼容的指针类型。实际函数 `lcm_udpm_publish(lcm_udpm_t*, const char*, const void*, unsigned int)` 可以直接赋给方法表的 `publish`，不需要绕过编译器的函数指针强制转换。
 
+非 Windows 构建分支的真实方法表是：
+
+~~~c
 static lcm_provider_vtable_t udpm_vtable = {
     .create = lcm_udpm_create,
     .destroy = lcm_udpm_destroy,
+    .subscribe = lcm_udpm_subscribe,
+    .unsubscribe = NULL,
     .publish = lcm_udpm_publish,
-    // ...
+    .handle = lcm_udpm_handle,
+    .get_fileno = lcm_udpm_get_fileno,
 };
-```
+~~~
 
+Windows 分支因编译器兼容性问题在初始化函数里逐字段赋值，但对应操作相同。注意 `unsubscribe = NULL`：这是一种**可选操作**，公共层必须先检查函数指针是否存在才可调用。UDPM 使用共享多播接收资源，单个 channel 的逻辑取消订阅仍交给核心订阅表，而不是逐 channel 断开网络连接。
 这种不透明句柄有三项价值：
 
 - `lcm.c` 不需要包含每种 provider 的私有头文件；
