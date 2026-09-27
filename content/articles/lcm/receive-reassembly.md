@@ -73,10 +73,8 @@ handle M2：  queue=[]             pipe 被读空
 
 每个 UDPM provider 都要保留接收 socket、两条 buffer 队列、ring buffer、接收线程、两条通知 pipe 和未完成分片表。notify_pipe 通知应用线程有完整消息可取；thread_msg_pipe 单独用于通知 receiver 退出。前者随 provider 建立，后者与接收资源一起延迟创建。它们的方向不同，不能合并成一个含糊的“事件 fd”。
 
-对应的上游实现如下：
+下面先看真实的 `lcm_udpm_t`，把收包线程、缓存队列和两条 pipe 放回同一个对象里：
 
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：struct _lcm_provider_t
 
 ~~~c
 typedef struct _lcm_provider_t lcm_udpm_t;
@@ -134,10 +132,8 @@ struct _lcm_provider_t {
 
 这个结构体本身不创建线程；它保存后来由 _setup_recv_parts() 建立的资源。进程提供地址空间和打开的资源，线程则是在这个进程里独立运行、会被内核调度的执行流。UDPM receiver 与调用 handle 的线程共享同一个 lcm_udpm_t、队列和内存，所以线程边界能隔离业务耗时，却不会自动复制这些对象；两条执行流访问共享队列时仍必须遵守同一把 mutex。两个队列里放的是 lcm_buf_t 描述符：inbufs_empty 提供可重用的空壳，inbufs_filled 暂存已经完整、等业务线程处理的消息。消息 payload 并不一定来自同一个分配器，因此描述符还要记录 ring buffer 所有者。
 
-对应的上游实现如下：
+接着沿 `lcm_buf_t` 和 `lcm_frag_buf_t` 的字段，把描述符、payload 与分片中间状态分开：
 
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：lcm_buf_t 与 lcm_frag_buf_t
 
 ~~~c
 typedef struct _lcm_buf {
@@ -176,9 +172,6 @@ typedef struct _lcm_frag_buf {
 
 lcm_buf_t::next 让这些描述符连成单链表。队列不只是一个 head 指针：tail 保存“下一个可写入的位置”，初始指向 head，添加节点后改指向新节点的 next。下面是队列数据结构和实际入队/出队代码：
 
-
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：lcm_buf_queue_t、lcm_buf_queue_new()、lcm_buf_dequeue()、lcm_buf_enqueue()
 
 ~~~c
 typedef struct _lcm_buf_queue {
@@ -225,13 +218,149 @@ void lcm_buf_enqueue(lcm_buf_queue_t *q, lcm_buf_t *el)
 
 tail 的类型是二级指针：它不是指向“最后一个节点”，而是指向一个链表指针槽位。空队列时该槽位就是 q->head；加节点后，槽位变成刚加节点的 next。这样入队不用从头扫描尾节点，出队也只动 head；如果出队后 head 为空，tail 必须重新指向 q->head。这个实现不自带线程安全：没有 lcm->mutex，producer 与 handle consumer 同时改 head、tail 或 count 时会产生 C data race；两个入队者可能覆盖同一指针槽，导致一条消息从链表丢失。LCM 在调用这些函数的外围锁住共享 queue，而不是靠链表函数本身解决并发。
 
+### 追问：为什么队列尾巴不是普通指针，而是二级指针？
+
+前面已经解决“为什么要有接收线程和应用线程”。可是这两条线程之间仍有一个具体成本：如果每收到一条 datagram 都申请一个全新的消息对象，处理完再释放，接收线程会不断承担分配开销。因此真实 UDPM 把描述符与描述符所指向的 payload 分开，借助两条队列重复利用描述符。
+
+先别看 socket。下面是一个**独立可编译的 C11 教学程序**，只保留实际链表的 `head`、`tail`、`count` 和三个节点，让一条消息完整经历“空闲描述符 → 已填充描述符 → callback 完成 → 归还”。
+
+~~~c
+#include <assert.h>
+#include <stdio.h>
+
+typedef struct Node {
+    int id;
+    struct Node *next;
+} Node;
+
+typedef struct {
+    Node *head;
+    Node **tail;       /* 指向下一个能够写入 Node* 的槽位 */
+    unsigned count;
+} Queue;
+
+static void init(Queue *q) {
+    q->head = NULL;
+    q->tail = &q->head;
+    q->count = 0;
+}
+
+static void push(Queue *q, Node *n) {
+    assert(n->next == NULL);
+    *(q->tail) = n;
+    q->tail = &n->next;
+    ++q->count;
+}
+
+static Node *pop(Queue *q) {
+    Node *n = q->head;
+    if (n == NULL) return NULL;
+    q->head = n->next;
+    n->next = NULL;
+    if (q->head == NULL) q->tail = &q->head;
+    --q->count;
+    return n;
+}
+
+int main(void) {
+    Node a = {1, NULL}, b = {2, NULL}, c = {3, NULL};
+    Queue empty, filled;
+    init(&empty);
+    init(&filled);
+    push(&empty, &a);
+    push(&empty, &b);
+    push(&empty, &c);
+    assert(empty.count == 3 && empty.tail == &c.next);
+
+    Node *receiving = pop(&empty);
+    assert(receiving == &a && receiving->next == NULL);
+    push(&filled, receiving);
+
+    receiving = pop(&empty);
+    assert(receiving == &b);
+    push(&filled, receiving);
+    assert(filled.count == 2 && filled.tail == &b.next);
+
+    Node *handling = pop(&filled);
+    assert(handling == &a && filled.head == &b);
+    push(&empty, handling);
+    assert(empty.head == &c && empty.tail == &a.next);
+
+    handling = pop(&filled);
+    assert(handling == &b && filled.head == NULL);
+    assert(filled.tail == &filled.head);
+    push(&empty, handling);
+    printf("empty=%u filled=%u\n", empty.count, filled.count);
+}
+~~~
+
+使用 `gcc -std=c11 -Wall -Wextra -Werror -pedantic -O0 queue.c -o queue` 编译，预期输出 `empty=3 filled=0`。这里的“空闲”是描述符尚未承载待分发消息，不代表没有分配过内存。
+
+现在再看最难懂的 `Node **tail`。它保存的**不是尾节点的地址，而是下一次应该改写的指针变量的地址**：
+
+~~~text
+初始： head = NULL; tail = &head
+
+push(A):
+    head -> A -> NULL
+                  ^
+    tail = &A.next
+
+push(B):
+    head -> A -> B -> NULL
+                       ^
+    tail = &B.next
+
+pop(A):
+    head -> B -> NULL
+                  ^
+    tail = &B.next
+
+pop(B):
+    head = NULL; tail = &head    // 这一步不可省略
+~~~
+
+如果只保存尾节点地址，空队列入队时要修改 `head`，非空时要修改 `tail->next`，就必须写两条分支。二级指针把这两种情况统一成 `*(q->tail) = n`，但也引入了一条维护不变量：**每次弹出最后一条消息，都要把 tail 重新指回 head 的地址**。否则 tail 会悬挂在已出队节点的 next 字段上；以后复用该节点，新的入队就可能把两条原本独立的链表接在一起。
+
+这仍然不是无锁队列。教学程序只有一个执行线程；真实的 receiver 与 handle 线程在访问 `head/tail/count` 时必须由外围 `lcm->mutex` 串行化。普通指针赋值即使在某个 CPU 上一次就能写完，也不意味着它符合 C 语言的跨线程同步规则。
+
+### 队列里放的是描述符，不等于 payload 内存归谁所有
+
+真实的 `inbufs_empty` 与 `inbufs_filled` 保存的是 `lcm_buf_t` 描述符。receiver 从空闲队列取出描述符后，再为当前 datagram 绑定 ring 或 heap 内存；完整消息入 filled 队列；`lcm_udpm_handle` 将其出队，构造临时 `lcm_recv_buf_t` 交给同步业务 callback；callback 返回后才释放 payload，并归还同一个描述符：
+
+~~~text
+empty --pop--> lcm_buf_t
+                  |
+                  | ring/heap 上取得 payload
+                  | recvmsg + 解析/重组
+                  v
+filled <--push-- lcm_buf_t
+   |
+   | handle 线程 pop
+   v
+lcm_recv_buf_t 临时借用 lcm_buf_t.buf
+   |
+   | 同步调用匹配的 callback
+   v
+释放 payload；把 lcm_buf_t 重新 push 到 empty
+~~~
+
+固定源码里，`lcm_udpm_handle` 在 dispatch 返回后执行：
+
+~~~c
+g_rec_mutex_lock(&lcm->mutex);
+lcm_buf_free_data(lcmb, lcm->ringbuf);
+lcm_buf_enqueue(lcm->inbufs_empty, lcmb);
+g_rec_mutex_unlock(&lcm->mutex);
+~~~
+
+因此，callback 可以同步读取 `rbuf.data`，却不能只保存这根指针就返回，让另一个线程日后使用：那时指向的内存已经被释放或允许复用。需要异步处理的机器人应用，应在 callback 返回前复制必要字节，或将内容转移到自己拥有寿命的业务消息中。
+
+下一问自然出现：为什么 `lcm_buf_free_data` 还需要收到一个 `ringbuf` 参数？因为分配这段 payload 的旧 ring 可能已经满了，receiver 切换了新 ring，而等待处理的旧消息还引用着旧 ring。释放 payload 的时候必须认出它究竟来自哪一代分配器，不能把“当前 ring”误当成“所有消息的 ring”。
 lcm_buf_t::buf 是一个裸指针，单看它并不能判断该调用 ring deallocate 还是 free()；ringbuf 字段正是分配来源标签，空值表示 buffer 由堆分配。lcm_frag_buf_t::data 则暂时由分片项拥有，完整消息形成后才转给 lcm_buf_t。这里不是 shared_ptr，没有引用计数：每个阶段都要明确只有一个负责释放它的对象。
 
 接收时先从 empty queue 取一个描述符，再给它分配最大 UDP datagram 区域。描述符池空了就补一批；ring 空间不够时，源码创建更大的新 ring，但把仍被旧消息使用的 ring 暂时留存，并在每个描述符上记录实际分配来源：
 
-
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：lcm_buf_allocate_data()
 
 ~~~c
 lcm_buf_t *lcm_buf_allocate_data(lcm_buf_queue_t *inbufs_empty, lcm_ringbuf_t **ringbuf)
@@ -278,6 +407,74 @@ lcm_buf_t *lcm_buf_allocate_data(lcm_buf_queue_t *inbufs_empty, lcm_ringbuf_t **
 }
 ~~~
 
+### 为什么要换一整代 ring，而不是把旧内存直接覆盖？
+
+把 `inbufs_empty` 和 `inbufs_filled` 弄明白之后，接收器还有一个更棘手的问题。假设应用线程正在执行第 1 条消息的 callback，暂时还没有释放它的 payload；receiver 却继续收到第 2、3、4 条消息。假如环形缓冲区写指针简单地绕回起点，第 4 条就可能覆盖 callback 仍在读取的第 1 条。**写指针到达尾部，不意味着起点那段内存已经可以写。**
+
+真实的 `ringbuffer.c` 因此不是简单的 `data[write++ % capacity]`。它在同一块连续内存里保存一个个变长的分配记录，每条记录前面都有自己的管理头部：
+
+~~~c
+struct _lcm_ringbuf_rec {
+    int32_t magic;
+    lcm_ringbuf_rec_t *prev;
+    lcm_ringbuf_rec_t *next;
+    unsigned int length;
+    char buf[];
+};
+~~~
+
+`buf[]` 是 C 的 flexible array member，说明 payload 紧跟在记录头部后面，并不是一个独立分配的数组。`lcm_ringbuf_alloc(ring, len)` 会先把需求加上这个头部的大小，再向上对齐到 32 字节。如果 payload 只需要 3 字节，实际占用仍要包含记录头部、对齐填充；所以 `ring->used` 计算的是**已分配块的总占用**，不能拿它直接当作业务消息字节数。
+
+这块内存里有两种合法的存放形态：
+
+~~~text
+形态一：已分配记录处于连续区间
+ring.data
+| 可用 | 头部+A | 头部+B | 可用 ... |
+         ^head              ^tail
+
+形态二：写入越过 ring 末端后从开头继续
+ring.data
+| 头部+C | 可用 ... | 头部+A | 头部+B |
+  ^tail                        ^head
+~~~
+
+这里的 `head/tail` 是**分配记录的链表头尾**，不是上面 `inbufs_filled` 消息描述符队列的头尾。两个容器虽然使用相似名字，却在维护不同的资源：队列决定“下一条处理什么消息”，ring 记录决定“这段 payload 内存何时可以重新使用”。
+
+看 `lcm_ringbuf_alloc` 的真正决策：如果 `head` 在 `tail` 前面，下一块只能放在当前 tail 与 head 之间；如果 head 在 tail 前面，则先尝试 tail 之后直到 ring 末尾，放不下才尝试从开头到 head 之前。两个区域都放不下就返回 `NULL`。这里不能为了追求吞吐直接覆盖 head，因为 head 可能仍由正在等待处理的消息借用。
+
+### 一条回调没结束时，旧 ring 为什么必须留下？
+
+假设 ring R1 里还有两块正在使用的 payload。receiver 要求再分配一个最大 datagram 缓冲，却发现 R1 没有足够的连续空间。这时 `lcm_buf_allocate_data` 会将当前 ring 指针换成更大的 R2，但**不会释放 R1**；每只 `lcm_buf_t` 仍在 `ringbuf` 字段里记着自己分配时所属的 R1 或 R2：
+
+~~~text
+当前 ring: R1
+  A.buf -> R1[记录 A]    callback 正在借用
+  B.buf -> R1[记录 B]    等待分发
+
+R1 分配失败：
+  current_ring -> R2
+  C.buf -> R2[记录 C]    新消息
+
+处理 A、B 时：
+  free_data(A) -> 从 R1 解除 A 的占用
+  free_data(B) -> 从 R1 解除 B 的占用
+                  R1 的 used 终于变成 0 -> 释放 R1
+
+R2 仍是 current_ring，不随 A/B 释放
+~~~
+
+这就是 `lcm_buf_free_data(lcmb, current_ring)` 的两个参数各自负责的事情。`lcmb->ringbuf` 表示**当前消息实际来源**；`current_ring` 只用来判断该来源是不是已经被淘汰的上一代。当来源非空时，对**来源**执行 `lcm_ringbuf_dealloc`；如果来源不是当前 ring，并且来源的 `used` 已经降为 0，才调用 `lcm_ringbuf_free`。若 `lcmb->ringbuf == NULL`，说明该 payload 独立来自 heap，应调用普通的 `free`。
+
+这里也暴露了 ring allocator 的一项真实限制。`lcm_ringbuf_dealloc` 有明确断言：
+
+~~~c
+assert(rec == ring->head || rec == ring->tail);
+~~~
+
+它只允许释放**最早**或**最新**的分配记录，不能随意回收中间的一块。因此 ring allocator 并不是通用的任意顺序内存池。网络路径通常沿 FIFO 方向消费消息；最近一次分配失败、需要取消的临时块可以从 tail 方向退回。设计一个自己的异步分发器时，不能直接把这些 ring 指针交给任意顺序的多线程 worker，再假定它们可以随时释放。若业务需要乱序完成，应让 worker 使用独立所有权的缓冲池，或由统一回收器按分配顺序释放。
+
+从机器人控制角度看，旧 ring 被保留也是一个**背压与内存占用信号**：慢 callback 持有旧 payload，接收线程仍要继续服务新流量，于是可能创建 R2、R3……。描述符队列的复用减少了分配次数，却不能由此推断系统存在固定内存上限；生产环境仍需要监控数据年龄、缓存占用和丢弃策略。
 结构体描述符的补充并没有队列最大项数，ring 满后也会扩容；因此这部分适合减少频繁分配，却不能当成绝对内存上限。每个接收 buffer 会先分配 65536 字节，recvmsg 最多写入 65535 字节，最后一字节保留零值以保证字符串扫描有终点。短消息路径随后会把最近一次 ring 分配收缩到实际 datagram 长度；长消息的 payload 则另由分片 buffer 暂时保存。
 
 ## 第一次需要接收时才建立线程
@@ -286,10 +483,8 @@ lcm_buf_t *lcm_buf_allocate_data(lcm_buf_queue_t *inbufs_empty, lcm_ringbuf_t **
 
 GCond 是带条件谓词的等待机制。线程不能把“收到 signal”当成谓词已经成立，因为信号可能在检查之前发出，也可能发生虚假唤醒。正确的用法是：持有 mutex 检查共享状态；条件不满足时在循环中 wait；wait 原子地释放 mutex 并阻塞；醒来后重新取得 mutex，再检查谓词。LCM 用 creating_read_thread 表示创建过程是否结束，并用 thread-local 标记识别创建者的重入调用。
 
-对应的上游实现如下：
+首次订阅时的竞态并非靠“先检查 thread_created”解决；看 `_setup_recv_parts()` 如何处理另一个线程已经在初始化的情况：
 
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：_setup_recv_parts() 的并发初始化等待分支
 
 ~~~c
     g_rec_mutex_lock(&lcm->mutex);
@@ -330,10 +525,8 @@ thread-local 标记是每条 OS 线程各自的一份状态：创建者再次进
 
 接收线程不能只阻塞在 recvmsg()。若 destroy 只设置一个普通标志，线程仍可能睡在没有新报文的 socket 上，关闭操作便无法等它退出。LCM 用 select() 同时等待接收 socket 与独立的退出 pipe；pipe 字节进入内核缓冲区后，阻塞在 select() 的线程才会变为 runnable。
 
-对应的上游实现如下：
+实际接收线程用 `select()` 同时等待网络数据和退出 pipe，相关循环如下：
 
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：udp_read_packet() 中等待输入与处理退出命令的循环
 
 ~~~c
     int got_complete_message = 0;
@@ -443,9 +636,6 @@ thread-local 标记是每条 OS 线程各自的一份状态：创建者再次进
 短消息不会长期占满 ring；在 udp_read_packet() 得到完整消息后，它把最后一次预分配收缩到实际 datagram 长度：
 
 
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：udp_read_packet() 的 ring-buffer 收缩分支
-
 ~~~c
     if (lcmb->ringbuf) {
         g_rec_mutex_lock(&lcm->mutex);
@@ -462,10 +652,8 @@ select() 返回只表示 fd 已经可读，不表示 callback 开始运行。线
 
 接收线程处理好一条完整消息后，在同一把 lcm->mutex 下完成“检查队列是否为空、写入一个通知字节、把描述符入队”：
 
-对应的上游实现如下：
+固定源码中检查空队列、发送通知与入队的锁域如下：
 
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：recv_thread()
 
 ~~~c
 static void *recv_thread(void *user)
@@ -514,9 +702,6 @@ pipe 中不是“一条消息对应一个字节”的计数器。它表达的是
 
 下面是 _recv_message_fragment() 的固定源码。它也揭示了此版本的一个重要约束：字段 fragments_remaining 只减计数，没有按 fragment_no 设置 bitmap 去重。
 
-
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：_recv_message_fragment()
 
 ~~~c
 static int _recv_message_fragment(lcm_udpm_t *lcm, lcm_buf_t *lcmb, uint32_t sz)
@@ -638,10 +823,8 @@ static int _recv_message_fragment(lcm_udpm_t *lcm, lcm_buf_t *lcmb, uint32_t sz)
 
 还有一个很具体的边界条件：lcm_frag_buf_store_add() 在插入之前检查当前总字节数和现有条目数，故达到阈值时再添加一个刚好合法的新消息后，账面用量可以越过阈值一项。新片的 data 在入表前已经 malloc(data_size)，因此淘汰旧项和新分配可能短暂同时占内存。
 
-对应的上游实现如下：
+看 `lcm_frag_buf_store_add()` 如何维护分片内存配额与淘汰旧项：
 
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：lcm_frag_buf_store_add()
 
 ~~~c
 void lcm_frag_buf_store_add(lcm_frag_buf_store *store, lcm_frag_buf_t *fbuf)
@@ -667,9 +850,6 @@ void lcm_frag_buf_store_add(lcm_frag_buf_store *store, lcm_frag_buf_t *fbuf)
 删除分片项还涉及值对象的生存期。固定提交创建 hash table 时把 value destroy callback 设为 lcm_frag_buf_destroy；移除 key 会同步销毁对应 fbuf。因此，在 data_size 不匹配的分支中，先 remove 再从 fbuf 读取剩余分片数，是一个条件性 use-after-free：只有启用了调试输出、并且 DBG_LCM 模式实际开启时，dbg 的参数表达式才会求值；这时读的是刚释放对象的字段。比如同一发送端的序号复用，但新消息长度改变，接收端会进入这个分支。正常构建也会丢弃旧消息重建；开启该诊断路径则可能打印错误数字或触发未定义行为。修复方式是先把 fragments_remaining 复制到局部变量再 remove，再打印局部值。
 
 
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：lcm_frag_buf_store_new()、lcm_frag_buf_destroy()、lcm_frag_buf_store_remove()
-
 ~~~c
     store->frag_bufs = g_hash_table_new_full(_lcm_frag_key_hash, _lcm_frag_key_equal, NULL,
                                              (GDestroyNotify) lcm_frag_buf_destroy);
@@ -691,10 +871,8 @@ void lcm_frag_buf_store_remove(lcm_frag_buf_store *store, lcm_frag_buf_t *fbuf)
 
 当最后一片让计数归零时，LCM 先确认至少一个匹配订阅仍有排队额度，然后释放当前 UDP datagram 的 ring 区域，再把 fbuf->data 指针交给 lcmb->buf。紧接着把源指针设成 NULL，使 lcm_frag_buf_store_remove() 销毁分片项时不会再释放 payload。随后该 lcm_buf_t 进入 filled queue，由 lcm_handle() 线程在 callback 返回后回收。
 
-对应的上游实现如下：
+`lcm_udpm_handle()` 的真实收尾代码解释了 payload 为什么只能借给同步 callback：
 
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：lcm_udpm_handle()
 
 ~~~c
 static int lcm_udpm_handle(lcm_udpm_t *lcm)
@@ -761,9 +939,6 @@ static int lcm_udpm_handle(lcm_udpm_t *lcm)
 释放实现使用分配来源字段来选择 allocator：
 
 
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：lcm_buf_free_data()
-
 ~~~c
 void lcm_buf_free_data(lcm_buf_t *lcmb, lcm_ringbuf_t *ringbuf)
 {
@@ -795,9 +970,6 @@ ring buffer 因容量用尽而被替换时，仍被未归还消息引用的旧 r
 
 正常关闭时 _destroy_recv_parts() 往退出 pipe 写一个字节，然后 g_thread_join() 等接收线程结束；只有 join 返回后，才关闭 socket 和 pipes、销毁分片表、释放两个队列和 ring。写字节会让 select() 的等待条件满足；线程实际执行退出分支后，join 才完成。
 
-
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：_destroy_recv_parts() 与 lcm_udpm_destroy()
 
 ~~~c
 static void _destroy_recv_parts(lcm_udpm_t *lcm)
