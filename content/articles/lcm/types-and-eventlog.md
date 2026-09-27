@@ -1,18 +1,60 @@
 # 类型指纹与事件日志：把机器人消息变成可验证、可回放的字节
+前面的篇章已经能把机械臂关节状态通过 `publish("ARM_STATE", &state)` 发送到另一进程。第一次用起来时，你可能不会关心这条消息由几字节组成：定位端发布，控制端订阅，日志进程记录。一切都正常，直到几个月后，你给关节状态增加了一个字段，拿新程序回放旧实验，接收端突然不能解码。
 
-实验室里记录了一段机械臂末端位姿。第二天，团队给消息结构加了一个 frame 字段。若旧日志中的 payload 被直接拷贝进当前 C++ struct，程序就会把旧消息中的字节按新布局解释：新增字段读到旧 position 的一部分，后续浮点数随之错位。更危险的是这些数看起来仍像合法浮点数，机械臂可能平滑地追随错误目标。
+这才出现两个原本被 API 隐藏的问题：**消息格式究竟由谁规定？日志又怎样保证明天还能读出今天的含义？** 如果我们把两者混成一件事，就很容易产生“既然录像完整，按当前 C++ 结构体直接转换不就行了吗”的错觉。
 
-要避免这种静默误读，消息类型需要定义稳定的 wire bytes，并让接收端在解码入口识别类型是否相符；实验回放还要保存原始 bytes 与 channel、时间、序号。LCM 把前一项放在生成代码里，把后一项放在 event log 里。运行时负责搬运字节，不负责动态反射 schema。
+先不要急着研究 hash 算法。我们先从一条真正被发送的消息开始，把它在发送前、网络中和解码后的三个形态摆在一起：
 
-本文锁定 lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864。所列固定源码摘录均来自这个提交；示例代码会另行标明身份。
+~~~text
+发布进程内                   网络 / 日志                      接收进程内
+channel_to_port_t             wire bytes                   channel_to_port_t
 
+channel = "arm"   ────────►  schema fingerprint ────────►  检查类型
+port    = 7667                string length = 4              |
+                              'a' 'r' 'm' '\0'               字段解码
+                              port: 2 bytes                  |
+                                                            v
+                                                    新分配的 channel 字符串
+                                                    port = 7667
+~~~
+
+这张图最关键的并不是字段顺序，而是**对象表示与通信表示彻底分开**。原来的 `channel` 是一个本进程的 `char*`，接收端不能复用它；发送时必须写出真正的字符串字节，接收时再分配自己的内存。文件只是保存中间这列 wire bytes，既不知道原进程的指针地址，也不应该依赖它。
+
+## 第一次追问：为什么不把 C++ 结构体直接写进日志？
+
+假设第一版记录器只是：
+
+~~~cpp
+// 错误的教学思路：把内存镜像当持久化协议。
+file.write(reinterpret_cast<const char*>(&state), sizeof(state));
+~~~
+
+一开始，当 `state` 只包含几个浮点数、写入和读取都来自同一份程序时，它可能看起来“确实能用”。但有两个失败不需要换平台就能发生。
+
+第一，加入 `std::string` 或 `std::vector` 后，记录器保存的是容器对象内部的指针和长度等本机状态，而不是它们指向的数据。第二，修改字段顺序或增加字段后，同样的字节偏移可以被解释为完全不同的业务量。最危险的是读出的数值仍可能落在正常范围内，错误不一定表现为崩溃。
+
+所以我们真正需要的是一个与编译器内存布局无关的**字段级协议**。对于 `channel_to_port_t`，固定版本生成器写出的格式有精确的长度关系：
+
+~~~text
+偏移             字段                         字节数
+[0, 8)           schema fingerprint          8
+[8, 12)          "arm" 的长度（包含 \0）       4
+[12, 16)         'a' 'r' 'm' '\0'            4
+[16, 18)         port                        2
+
+总长度：8 + 4 + 4 + 2 = 18 字节
+~~~
+
+注意这里的 18 字节属于 `channel="arm", port=7667` 这条**具体消息**，不属于 `sizeof(channel_to_port_t)`。换成 `channel="left_camera"`，编码长度就变了，而本地结构体 `sizeof` 完全可以不变。
+
+对应的源码恰好给出三个相互独立的函数：`channel_to_port_t_encoded_size` 算出这次需要的容量；`channel_to_port_t_encode` 先写 8 字节 fingerprint，再调用 `__channel_to_port_t_encode_array`；后者先编码字符串，再编码端口。这些函数的拆分不是为了让 API 看起来丰富，而是为了让**申请容量、生成字节、恢复对象**能各自单独检查错误。
+
+下面进入本地固定提交 `lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864` 的真实生成代码。先观察字段和长度，再讨论 fingerprint 为什么能够在新旧版本不兼容时提前拒绝解码。
 ## 从字段结构到确定的字节顺序
 
 先看固定提交中一个真实生成类型。它只有字符串 channel 和 16 位端口号，结构体里的 C 指针布局不是网络格式：32 位与 64 位进程的指针宽度不同，结构体对齐也可能不同，因而不能拿 sizeof(struct) 当消息长度直接发送。
 
 
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：channel_to_port_t
 
 ~~~c
 typedef struct _channel_to_port_t channel_to_port_t;
@@ -31,10 +73,7 @@ struct _channel_to_port_t
 
 类型指纹是 wire 消息开头的 64 位 schema 标识。它不是整条消息内容的 checksum，也不是身份认证 MAC；它回答的是“这个 decoder 所期待的字段结构，是否与这段 bytes 声称的类型相同”。生成代码首先计算并缓存一个基于 schema 的值：
 
-对应的上游实现如下：
 
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：__channel_to_port_t_hash_recursive() 与 __channel_to_port_t_get_hash()
 
 ~~~c
 LCM_NO_EXPORT
@@ -75,8 +114,6 @@ int64_t __channel_to_port_t_get_hash(void)
 接着，生成 encoder 先把 hash 作为一个 64 位字段编码，再依次编码真实字段。每个字段编码器接收剩余容量，并在失败时向上传回负值：
 
 
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：channel_to_port_t_encode()
 
 ~~~c
 LCM_NO_EXPORT
@@ -97,10 +134,8 @@ int channel_to_port_t_encode(void *buf, int offset, int maxlen, const channel_to
 
 decode 先读出 fingerprint 并比较，再解码字段。新旧类型不匹配时它返回失败，而不是猜测“相似字段”或把旧字节塞进新 struct：
 
-对应的上游实现如下：
+现在看 `channel_to_port_t_decode()` 怎样先比较 schema fingerprint，再决定是否解码字段：
 
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：channel_to_port_t_decode() 与 channel_to_port_t_decode_cleanup()
 
 ~~~c
 LCM_NO_EXPORT
@@ -130,8 +165,6 @@ int channel_to_port_t_decode_cleanup(channel_to_port_t *p)
 字符串字段是动态内存。底层 string decoder 为它分配独立缓冲，生成的 cleanup 最终调用 free；因此调用者拿到的是有所有权的解码对象，而不是指向网络接收 buffer 的字符串视图。下面是实际通用 string decoder 的分配语句与释放函数：
 
 
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：__string_decode_array() 与 __string_decode_array_cleanup()
 
 ~~~c
 static inline int __string_decode_array(const void *_buf, int offset, int maxlen, char **p,
@@ -182,8 +215,6 @@ static inline int __string_decode_array_cleanup(char **s, int elements)
 固定提交的 C++ 模板发布路径把 typed message 编码成临时 byte array，调用底层 publish 后立即释放：
 
 
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：LCM::publish<MessageType>()
 
 ~~~cpp
 template <class MessageType>
@@ -216,8 +247,6 @@ event log 为每条事件存放同步 magic、递增 event number、时间戳、
 事件结构明确把两个长度定义成有符号 32 位：
 
 
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：struct _lcm_eventlog_event_t
 
 ~~~c
 struct _lcm_eventlog_event_t {
@@ -254,8 +283,6 @@ struct _lcm_eventlog_event_t {
 writer 按固定顺序写字段，然后原样写 channel 与 payload：
 
 
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：lcm_eventlog_write_event()
 
 ~~~c
 int lcm_eventlog_write_event(lcm_eventlog_t *l, lcm_eventlog_event_t *le)
@@ -287,10 +314,8 @@ int lcm_eventlog_write_event(lcm_eventlog_t *l, lcm_eventlog_event_t *le)
 
 eventnum 维护文件顺序；timestamp 记录事件时间，两者用途不同。即使两条事件具有相同时间戳，文件顺序仍能确定回放先后。eventlog 本身对 data 不做 decode/re-encode，所以日志忠实保留生成器输出的 fingerprint 与 payload bytes。文件 provider 组装待写 event 时从系统实时钟取得时间，并把 channel 与 payload 复制进一块连续分配：
 
-对应的上游实现如下：
+继续看文件 provider 的 `lcm_logprov_publish()` 怎样复制消息并写入日志：
 
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：lcm_logprov_publish()
 
 ~~~c
 static int lcm_logprov_publish(lcm_logprov_t *lcm, const char *channel, const void *data,
@@ -335,8 +360,6 @@ static int lcm_logprov_publish(lcm_logprov_t *lcm, const char *channel, const vo
 文件不是天然可信的。日志可能因断电截断、磁盘损坏或人工修改而带有错误长度。固定读取函数检查 channel 长度在 1 到 999 之间，并拒绝负的 data 长度；但它没有给非负 data 长度设置应用级上限，也没有在分配前确认剩余文件足够长。
 
 
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：lcm_eventlog_read_next_event()
 
 ~~~c
 lcm_eventlog_event_t *lcm_eventlog_read_next_event(lcm_eventlog_t *l)
@@ -414,8 +437,6 @@ lcm_eventlog_event_t *lcm_eventlog_read_next_event(lcm_eventlog_t *l)
 读取函数为 event、channel 和 data 分别分配内存；成功返回后，调用者负责调用配对的 free 函数。它清理三个分配并释放 event 本身：
 
 
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：lcm_eventlog_free_event()
 
 ~~~c
 void lcm_eventlog_free_event(lcm_eventlog_event_t *le)
@@ -445,10 +466,8 @@ for (;;) {
 
 file provider 也遵守这个寿命：handle 线程先用当前 event 的 data 同步 dispatch callback，等 callback 返回后才 load_next_event；后者首先释放旧 event，再读下一条。故 callback 内 bytes 可同步读取，callback 返回后不得保存旧 data 指针。
 
-对应的上游实现如下：
+先看 `load_next_event()` 怎样释放上一条事件并取得下一条：
 
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：load_next_event()
 
 ~~~c
 static int load_next_event(lcm_logprov_t *lr)
@@ -464,10 +483,8 @@ static int load_next_event(lcm_logprov_t *lr)
 }
 ~~~
 
-对应的上游实现如下：
+接着看 `lcm_logprov_handle()` 怎样安排当前事件和后续回放时间：
 
-仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
-符号：lcm_logprov_handle()
 
 ~~~c
 static int lcm_logprov_handle(lcm_logprov_t *lr)
@@ -542,7 +559,6 @@ handle 先从 notify pipe 读取一个字节；该 pipe 可读只表示当前 ev
 
 日志事件的 timestamp 文档语义是消息收到时的 UNIX epoch 微秒；文件 provider 另用 g_get_real_time() 计算本次回放的 wall-clock 目标。两者都不等于传感器测量时刻。相机图像可能在曝光结束时采样，经过驱动和网络后才被 logger 记录。要做传感器融合，应同时保留 measurement timestamp 与记录/接收时间，并注明时钟域。
 
-timestamp 字段的文档语义是“消息被接收的 UNIX epoch 微秒时间”；这不等于传感器测量时间。相机图像可能在曝光结束时采样，经过驱动和网络后才被 logger 记录。要做传感器融合，应同时保留 measurement timestamp 与记录/接收时间，并说明它们的时钟域。
 
 ## 逐步复刻：先有稳定 wire，再做坏文件恢复
 
