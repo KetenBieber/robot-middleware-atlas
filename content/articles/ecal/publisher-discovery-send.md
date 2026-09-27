@@ -150,7 +150,7 @@ choose TCP
 
 `CPublisher::Send()` 先 lock weak pointer。实现已被 finalize 时返回 false；没有 established Subscriber 时，可能只更新统计并提前返回。
 
-**固定提交源码摘录（`eclipse-ecal/ecal@1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，两个 `Send` 重载与字符串重载，连续摘录）：**
+接着看 `Send` 的真实实现：
 
 ```cpp
 bool CPublisher::Send(const void* const buf_, const size_t len_, const long long time_ /* = DEFAULT_TIME_ARGUMENT */)
@@ -423,7 +423,7 @@ TCP envelope/queue             O(S) + session queue cost
 
 发送调用已经进入 `CPublisherImpl::Write()`，此处的输入是调用者提供的 payload writer，函数先根据当前连接计数和配置判断能否直接走 SHM：
 
-**固定提交源码摘录（`eclipse-ecal/ecal@1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，`CPublisherImpl::Write()` 的 zero-copy 判定与 staging 片段；后续 SHM/UDP/TCP 分支省略）：**
+接着看 `CPublisherImpl::Write()` 的真实实现：
 
 ```cpp
 bool allow_zero_copy(false);

@@ -20,7 +20,6 @@ Port facade             稳定用户 API
 
 固定提交里 PortCore 与每个 Unit 都继承 `ThreadImpl`。PortCore 自己的线程负责阻塞监听与接入新连接；InputUnit 的线程负责各自连接的数据读取；OutputUnit 默认可由调用 `write()` 的线程直接发送，只有开启后台写才按需启动长期线程。这里的“线程”是操作系统可调度的执行上下文；阻塞在 `Face::read()` 或 socket read 的线程会变为 blocked，通知/中断只让它有机会变为 runnable，CPU 何时真正执行仍由 OS 调度器决定。
 
-**固定提交源码摘录（`robotology/yarp@91710eb45baf5d9cb62dd5a0cb3c3a00f42481b9`，`PortCore` 类声明）：**
 
 ```cpp
 class YARP_os_impl_API PortCore :
@@ -30,7 +29,7 @@ class YARP_os_impl_API PortCore :
 
 这个声明说明 PortCore 既是 `ThreadImpl` 的派生类，也实现 `PortReader`；具体状态成员在类的 private 区域。该摘录只展示类头，接下来直接看 registry 和锁字段。
 
-**固定提交源码摘录（同一提交，`PortCore` 的连接表与同步字段）：**
+接着看 `PortCore` 的真实实现：
 
 ```cpp
 private:
@@ -75,7 +74,6 @@ source Carrier connects directly to 10.0.0.8:10042
 
 固定版本在 `PortCore::sendHelper()` 中先持有 `m_stateMutex`，再锁住 `m_packetMutex` 更新 packet，随后遍历 `m_units` 并调用每个输出 Unit。下面从 state lock 建立处连续摘录到 fan-out 循环结束：
 
-**固定提交源码摘录（`robotology/yarp@91710eb45baf5d9cb62dd5a0cb3c3a00f42481b9`，`PortCore::sendHelper`）：**
 
 ```cpp
 std::lock_guard<std::mutex> lock(m_stateMutex);
@@ -188,7 +186,6 @@ PortCore 还处理连接管理、询问状态和可能的管理流量。管理�
 
 先只实现单 listener、一个输入和一个输出：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 class PortCore {
@@ -211,7 +208,6 @@ private:
 
 等价的 C++ 骨架如下：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 bool PortCore::Open(const Contact& requested) {

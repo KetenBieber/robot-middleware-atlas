@@ -112,7 +112,6 @@ CPublisher::Send
 
 这条发送入口可以直接从固定源码验证。调用者此时仍在自己的线程中，`buf_` 与 `len_` 是本次发送的借用视图；先构造的 `CBufferPayloadWriter` 只包装地址和长度，不会替调用者延长原缓冲区寿命：
 
-**固定提交源码摘录（`eclipse-ecal/ecal@1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，`CPublisher::Send` 两个连续重载）：**
 
 ```cpp
 bool CPublisher::Send(const void* const buf_, const size_t len_, const long long time_ /* = DEFAULT_TIME_ARGUMENT */)
@@ -229,7 +228,7 @@ Gate 既是按 topic 查找实体的索引，也是实现对象的所有权根�
 
 发送后的接收汇聚也不是“收到 payload 就直接调用业务函数”。不同 transport reader 都把 topic 元数据和一段仍由 reader/observer 管理的借用 payload 交给 SubGate。SubGate 先在 topic 索引中找出本进程的 SubscriberImpl，再把对象寿命与索引锁分开：
 
-**固定提交源码摘录（`eclipse-ecal/ecal@1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，`CSubGate::ApplySample`）：**
+接着看 `CSubGate::ApplySample` 的真实实现：
 
 ```cpp
 bool CSubGate::ApplySample(const Payload::TopicInfo& topic_info_, const char* buf_, size_t len_, long long id_, long long clock_, long long time_, size_t hash_, eTLayerType layer_)

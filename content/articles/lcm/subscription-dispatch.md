@@ -8,7 +8,7 @@
 
 ## subscription 的状态
 
-**代码身份：固定提交源码摘录，来自 `lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864`，符号 `_lcm_subscription_t`，逐字连续定义。**
+对应的上游实现如下：
 
 ```c
 struct _lcm_subscription_t {
@@ -70,7 +70,6 @@ provider->subscribe(channel)
 
 provider subscribe 成功、但后续正则编译失败时，需要对应的 provider rollback。固定提交摘录如下；输入是调用者传入的 channel、handler 与 userdata，函数先进入 provider，再创建核心节点，最后把节点登记到两级容器。
 
-**代码身份：固定提交源码摘录，来自 `lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864`，符号 `lcm_subscribe()`，逐字连续函数体。**
 
 ```c
 lcm_subscription_t *lcm_subscribe(lcm_t *lcm, const char *channel, lcm_msg_handler_t handler,
@@ -136,7 +135,6 @@ steady message dispatch: O(1) lookup + O(matches)
 
 Provider 完整接收一条消息后，先调用核心层 `lcm_try_enqueue_message()`。输入是目标 channel；函数查已缓存的匹配列表，在同一把核心 mutex 下逐个检查该订阅的待处理计数并为有空间者预留资格。以下是固定版本的完整函数：
 
-**代码身份：固定提交源码摘录，来自 `lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864`，符号 `lcm_try_enqueue_message()`，逐字连续函数体。**
 
 ```c
 int lcm_try_enqueue_message(lcm_t *lcm, const char *channel)
@@ -247,7 +245,6 @@ int lcm_dispatch_handlers(lcm_t *lcm, lcm_recv_buf_t *buf, const char *channel)
 
 如果 handler 在自身 callback 中调用 unsubscribe，立即从数组删除并 free 会让 dispatch 循环持有悬空指针。LCM 检查：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 if (subscription->callback_scheduled) {
@@ -260,7 +257,6 @@ if (subscription->callback_scheduled) {
 
 这是 deferred reclamation：逻辑删除立即生效，物理回收推迟到已知没有迭代者的安全点。这里保护的是 C 核心的 `lcm_subscription_t`。下面的固定实现还显示了另一个边界：当前批次中的 unsubscribe 只设置标记并跳过 provider hook。此时输入是被取消的节点；核心 mutex 覆盖标记与容器操作，provider 私有状态并未因此同步改变。
 
-**代码身份：固定提交源码摘录，来自 `lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864`，符号 `lcm_unsubscribe()`，逐字连续函数体。**
 
 ```c
 int lcm_unsubscribe(lcm_t *lcm, lcm_subscription_t *subscription)
@@ -312,7 +308,7 @@ C++ 中可以用 `shared_ptr<Subscription>` 简化对象寿命，但仍需要定
 
 把一次 dispatch 从查表直到回收连起来看，才能看到锁保护的状态和对象何时安全释放。`lcm_udpm_handle()` 已从 provider 队列取出一条消息，然后在 provider 锁外调用核心 `lcm_dispatch_handlers()`；因此回调运行在线程调用 `lcm_handle()` 的调用栈中。下面从构造接收视图处摘取连续语句，输入 `lcmb` 是刚从 filled queue 取出的唯一完整消息 buffer。
 
-**代码身份：固定提交源码摘录，来自 `lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864`，符号 `lcm_udpm_handle()`，连续摘录。**
+对应的上游实现如下：
 
 ```c
     lcm_recv_buf_t rbuf;
@@ -340,7 +336,6 @@ C++ 中可以用 `shared_ptr<Subscription>` 简化对象寿命，但仍需要定
 
 `rbuf` 是栈上视图，`data` 借用 `lcmb` 中的 payload；这段函数在调用 `lcm_dispatch_handlers()` 时没有持有 provider mutex，callback 因而不会长时间阻塞接收线程队列锁，但仍阻塞当前 `lcm_handle()` 调用。所有 callback 返回后 provider 才重新加锁，释放 payload 对 ring 的占用并把 `lcmb` 节点放回空闲链表。回调保存 `rbuf.data` 到返回之后会读到过期存储。
 
-**代码身份：固定提交源码摘录，来自 `lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864`，符号 `lcm_dispatch_handlers()`，逐字连续函数体。**
 
 ```c
 int lcm_dispatch_handlers(lcm_t *lcm, lcm_recv_buf_t *buf, const char *channel)
@@ -455,7 +450,6 @@ O(1) hash lookup
 
 ## 可复刻的数据结构
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 struct Subscription {

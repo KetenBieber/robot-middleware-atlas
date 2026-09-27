@@ -21,7 +21,6 @@ YARP 网络由两段路径组成：
 
 终端 A：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```bash
 yarpserver
@@ -29,7 +28,6 @@ yarpserver
 
 终端 B：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```bash
 yarp check
@@ -40,7 +38,6 @@ yarp name list
 
 ## CMake
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cmake
 cmake_minimum_required(VERSION 3.16)
@@ -71,7 +68,6 @@ yarp_demo/
 
 构建与运行顺序：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```bash
 cmake -S . -B build
@@ -86,7 +82,6 @@ yarp connect /atlas/state:o /atlas/state:i tcp
 
 ### `Network` 对象为什么应当先构造、最后析构
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 int main() {
@@ -113,7 +108,6 @@ int main() {
 
 ## 命令行建立基线
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```bash
 yarp read /atlas/in
@@ -132,7 +126,6 @@ yarp ping /atlas/in
 
 命名建议包含系统、功能和方向，例如 `/robot1/localization/pose:o`，而不要包含会频繁变化的 IP、PID 或容器编号。多个实例必须从命令行或配置获得前缀，不能把同一个全局名字硬编码进二进制。
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 yarp::os::Network yarp;

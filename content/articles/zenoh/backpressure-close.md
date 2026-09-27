@@ -10,7 +10,6 @@
 
 Zenoh 的 Subscriber、Queryable 和 Reply 接口既支持 callback，也支持接收器。接收器形式在内部仍然是 callback，只是 callback 将事件写入一个 channel：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 中间件分发线程
   -> Callback<T>
@@ -26,7 +25,6 @@ Zenoh 的 Subscriber、Queryable 和 Reply 接口既支持 callback，也支持�
 
 FIFO handler 使用有界 channel。概念代码如下：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 fn fifo_handler<T>(capacity: usize) -> (Callback<T>, Receiver<T>) {
     let (tx, rx) = flume::bounded(capacity);
@@ -41,7 +39,6 @@ fn fifo_handler<T>(capacity: usize) -> (Callback<T>, Receiver<T>) {
 
 固定提交的 `FifoChannel::into_handler` 将 sender 移入 Zenoh 执行的回调闭包，同时把 receiver 交给应用。实际的有界入队不是异步等待，而是同步调用 `send`：
 
-**代码身份：固定提交源码摘录，`FifoChannel::into_handler` 的连续函数。**
 
 ```rust
 fn into_handler(self) -> (Callback<T>, Self::Handler) {
@@ -59,7 +56,6 @@ fn into_handler(self) -> (Callback<T>, Self::Handler) {
 
 `move` 将 sender 的所有权转交分发侧，应用持有 `FifoChannelHandler(receiver)`。`flume::bounded` 限制容量，`sender.send(t)` 在队列满时同步阻塞，等待直接传回执行当前 callback 的线程；若 receiver 已经析构则返回错误并记录日志。这种阻塞不会因为 Zenoh 在其他位置使用 async runtime 而自动消失。
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 应用消费慢
   -> FIFO 满
@@ -76,7 +72,6 @@ fn into_handler(self) -> (Callback<T>, Self::Handler) {
 
 Ring handler 将固定容量视为循环窗口。满载后，新数据继续进入，同时覆盖或淘汰旧数据：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 capacity = 3
 
@@ -90,7 +85,6 @@ capacity = 3
 
 固定实现还将样本存储与唤醒通知分离。下面是 `RingChannel::into_handler` 连续源码：
 
-**代码身份：固定提交源码摘录，`RingChannel::into_handler`。**
 
 ```rust
 fn into_handler(self) -> (Callback<T>, Self::Handler) {
@@ -130,7 +124,6 @@ FIFO 与 Ring 的选择是业务语义，而不是单纯性能开关：
 
 直接 callback 通常运行在 Zenoh 的分发或异步任务上下文中。它不是自动获得一个独占线程。下面的回调会把数据库慢查询直接加到分发延迟中：
 
-**代码身份：错误示例；不是上游源码。**
 ```rust
 session.declare_subscriber("robot/**")
     .callback(|sample| {
@@ -141,7 +134,6 @@ session.declare_subscriber("robot/**")
 
 更稳定的边界是让 callback 只做轻量验证、时间戳记录和入队，把慢工作交给受控 worker：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 .callback(move |sample| {
     if work_tx.try_send(sample).is_err() {
@@ -156,7 +148,6 @@ session.declare_subscriber("robot/**")
 
 Zenoh 的流量控制至少包含三层：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 应用 handler queue
   管理 callback -> 应用消费者
@@ -173,7 +164,6 @@ Reliability marker
 
 固定提交 `PublicationBuilder::reliability` 的原始源码直接限定了这个字段的语义：
 
-**代码身份：固定提交源码摘录，`PublicationBuilder::reliability` 的连续注释与函数。**
 
 ```rust
 /// Changes the [`Reliability`](crate::qos::Reliability) to apply when routing the data.
@@ -197,7 +187,7 @@ pub fn reliability(self, reliability: Reliability) -> Self {
 
 异步系统容易产生“启动后没人负责停止”的 detached task。Zenoh 使用 `TaskController` 将任务归属到 Session 或 Runtime：
 
-**代码身份：固定提交源码摘录，`TaskController` 的完整结构定义。**
+对应的上游实现如下：
 ```rust
 #[derive(Clone)]
 pub struct TaskController {
@@ -213,7 +203,6 @@ pub struct TaskController {
 
 `spawn` 与关闭实现必须连在一起读。固定提交的 `spawn` 不检查 tracker 是否已关闭：
 
-**代码身份：固定提交源码摘录，`TaskController::spawn` 与 `terminate_all_async` 两处分别保留完整、连续的原始函数。**
 ```rust
 pub fn spawn<F, T>(&self, future: F) -> JoinHandle<T>
 where
@@ -247,7 +236,6 @@ pub async fn terminate_all_async(&self) {
 
 Cancellation token 不是强制杀线程。下面的任务即使 token 已取消，也可能永久不退出：
 
-**代码身份：错误示例；不是上游源码。**
 ```rust
 controller.spawn(async move {
     loop {
@@ -258,7 +246,6 @@ controller.spawn(async move {
 
 正确任务要么使用 abortable 包装，要么显式选择取消分支：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 controller.spawn(async move {
     loop {
@@ -276,7 +263,6 @@ controller.spawn(async move {
 
 Session 关闭状态可以概括为：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 OPEN
   |
@@ -303,7 +289,6 @@ CLOSED
 
 关闭代码把 registry maps 移到局部变量，再释放 Session 写锁。原始实现并非用单个 `entities` 容器抽象全部状态，而是逐个 `take` 出保存 callback、查询和匹配监听器的 map：
 
-**代码身份：固定提交源码摘录，`WeakSession::close_inner` 的连续函数，包括上游的原始注释。**
 ```rust
 async fn close_inner(&self, close_args: SessionCloseArgs) {
     let primitives = zwrite!(self.0.state).primitives.take();
@@ -360,7 +345,6 @@ async fn close_inner(&self, close_args: SessionCloseArgs) {
 
 普通 `open()` 创建的 Session 可以拥有一个 static Runtime；插件环境中的 Session 也可以挂到共享 DynamicRuntime。两者关闭含义不同：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 Session owns static Runtime
   -> terminate Session tasks
@@ -379,7 +363,7 @@ Session shares DynamicRuntime
 
 自有 Runtime 的关闭顺序为：
 
-**代码身份：固定提交源码摘录，`impl Closee for Arc<RuntimeState>` 中 `close_inner` 的连续函数。**
+对应的上游实现如下：
 
 ```rust
 async fn close_inner(&self, _: ()) {
@@ -411,7 +395,6 @@ async fn close_inner(&self, _: ()) {
 
 最后一个逻辑 Session handle 析构时，`Session::drop` 会尝试同步关闭，但错误只能记录到日志。显式调用：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 session.close().await?;
 ```
@@ -445,4 +428,3 @@ session.close().await?;
 7. close 有可配置上界，并能报告仍未结束的对象。
 
 这些规则比某个特定 async runtime 更重要。即便用 C++ 的 `std::jthread`、stop token 和 condition variable 重写，也应保留相同的所有权与终止顺序。
-

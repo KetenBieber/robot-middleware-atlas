@@ -83,7 +83,6 @@ PubGate 和 SubGate 可以理解为进程内注册表：
 
 固定提交 `eclipse-ecal/ecal@1ec0ea2fe5e5e61e3e492be6128c27cc6026d717` 在两个 Gate 中分别声明如下；这些是两个头文件里的并列源码摘录。
 
-**固定提交源码摘录（`CPubGate` 成员）：**
 
 ```cpp
 using TopicNamePublisherMapT = std::multimap<std::string, std::shared_ptr<CPublisherImpl>>;
@@ -91,7 +90,7 @@ std::shared_timed_mutex  m_topic_name_publisher_mutex;
 TopicNamePublisherMapT   m_topic_name_publisher_map;
 ```
 
-**固定提交源码摘录（`CSubGate` 成员）：**
+接着看 `CSubGate` 的真实实现：
 
 ```cpp
 using TopicNameSubscriberMapT = std::unordered_multimap<std::string, std::shared_ptr<CSubscriberImpl>>;
@@ -116,7 +115,6 @@ Key 是 topic name，value 是实现对象。同一 topic 可能有多个 Publis
 
 下面直接并排看这两条真实调用路径。摘录来自固定提交 `eclipse-ecal/ecal@1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，分别是 `CPubGate::ApplySubscriberRegistration` 和 `CSubGate::ApplySample`；每段均为对应函数的连续摘录。
 
-**固定提交源码摘录：`CPubGate::ApplySubscriberRegistration`**
 
 ```cpp
 void CPubGate::ApplySubscriberRegistration(const Registration::Sample& ecal_sample_)
@@ -180,7 +178,7 @@ void CPubGate::ApplySubscriberRegistration(const Registration::Sample& ecal_samp
 
 registration sample 先被解析为订阅者身份、类型信息和 layer 能力；真正进入 Gate 锁后，函数按 topic 取出所有本地 Publisher，并在 shared lock 仍然持有时逐个调用 `ApplySubscriberRegistration`。这让“读取 topic 索引”和“更新某个 Publisher 的连接状态”处在同一个 Gate 读临界区中：并发读者可以共存，但要修改 topic map 的独占操作必须等它退出。慢连接更新因此可能推迟其他 topic map 写操作，即使它只影响一个 topic。这里没有 User callback；它调用的是中间件内部的 Publisher 实现，不过锁内调用仍然扩大了 Gate 锁的持有时间。
 
-**固定提交源码摘录：`CSubGate::ApplySample`**
+接着看 `CSubGate::ApplySample` 的真实实现：
 
 ```cpp
 bool CSubGate::ApplySample(const Payload::TopicInfo& topic_info_, const char* buf_, size_t len_, long long id_, long long clock_, long long time_, size_t hash_, eTLayerType layer_)

@@ -6,7 +6,6 @@ Zenoh 的核心不是某一个发布函数，而是一组相互制约的结构�
 
 把这些结构按因果关系连接起来，可以得到一幅完整的实现图：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 Application
   |
@@ -67,7 +66,6 @@ Query 路径另外增加四个不变量：
 
 声明、拓扑变化和 key-expression 匹配属于控制面；Put/Push 和 Reply 转发属于数据面。Zenoh 把更多计算放到控制面：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 控制面
   建立 Resource
@@ -181,7 +179,6 @@ Builder 放在最后，是因为它只负责收集参数和触发执行。真正
 
 第一版不必实现完整 Zenoh wire compatibility，可以先固定以下接口：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```cpp
 struct KeyExpr {
   bool intersects(const KeyExpr&) const;
@@ -232,4 +229,3 @@ class Session {
 - close 返回后没有活动 task、Face、pending query 或可达 Resource 子树。
 
 达到这些条件，才说明复刻的不只是 API 形状，而是 Zenoh 最关键的路由、聚合与生命周期设计。
-

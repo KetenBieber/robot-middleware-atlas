@@ -4,7 +4,6 @@
 
 ## BufferedPort Publisher
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 #include <yarp/os/BufferedPort.h>
@@ -31,7 +30,6 @@ int main() {
 
 完整循环还应包含连接状态、序号和节拍：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 #include <chrono>
@@ -57,7 +55,6 @@ Bottle 适合原型、管理命令和异构字段调试，因为可以直接打�
 
 ## Subscriber
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 yarp::os::BufferedPort<yarp::os::Bottle> port;
@@ -71,7 +68,6 @@ read 返回的对象只保证到下一次 read 前有效；需要异步处理时
 
 接收循环必须先处理关闭。`interrupt()` 会让阻塞的 `read()` 返回空指针，所以空指针既可能表示中断，也可能表示端口关闭：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 while (!stopping.load()) {
@@ -92,7 +88,6 @@ YARP 默认 BufferedPort 偏向低延迟，可能丢旧消息；`writeStrict()` 
 
 ## 连接
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```bash
 yarp connect /atlas/state:o /atlas/state:i tcp
@@ -104,7 +99,6 @@ UDP 是单向 streaming Carrier，不适合 request/reply RPC。[Carrier configu
 
 服务端使用 RpcServer 或带 replier 的 Port，解析 Bottle 请求并写 Bottle 回复；客户端 RpcClient 执行 write(request, reply)。命令行快速测试：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```bash
 yarp rpcserver /atlas/control
@@ -119,7 +113,6 @@ RPC handler 不应在 Port 线程执行长任务；对长操作返回 job id，�
 
 继承 `PortReader` 可以把解析与业务执行分开。下面只接受 `set_limit <double>` 和 `status`，未知命令返回结构化错误：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 class ControlReader final : public yarp::os::PortReader {
@@ -164,7 +157,6 @@ private:
 
 服务端装配时让 reader 的生命周期覆盖端口：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 yarp::os::RpcServer rpc;
@@ -178,7 +170,6 @@ rpc.setReader(reader);
 
 ### 客户端的失败语义
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 yarp::os::RpcClient client;
@@ -198,7 +189,6 @@ RPC 超时后存在经典的不确定性：请求可能未到达，也可能已�
 
 ## 串起三个进程
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```bash
 # 终端 1

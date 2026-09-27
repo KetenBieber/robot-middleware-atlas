@@ -10,7 +10,6 @@
 
 可以先给数据取一组不依赖机器地址的名字：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 robot/17/pose
 robot/17/battery
@@ -30,21 +29,18 @@ Zenoh 把这套名字称为 key；能够包含通配规则的表达式叫作 **K
 
 先看一个具体 key：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 robot/17/joint/1/state
 ```
 
 它指向 17 号机器人 1 号关节的状态。若监控程序希望观察 17 号机器人的任意一个关节，可以写：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 robot/17/joint/*/state
 ```
 
 `*` 匹配一个路径片段。若要覆盖更深的层级，可以写：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 robot/**/temperature
 ```
@@ -55,7 +51,6 @@ robot/**/temperature
 
 ### 相交表示两组 key 至少有一个共同成员
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 robot/*/pose
 robot/17/*
@@ -65,7 +60,6 @@ robot/17/*
 
 ### 包含表示一个表达式覆盖另一个表达式的全部范围
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 robot/**  includes  robot/17/pose
 ```
@@ -89,7 +83,6 @@ robot/**  includes  robot/17/pose
 
 查询更像一次面向数据空间的提问。诊断程序可以查询：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 robot/17/**/temperature
 ```
@@ -102,7 +95,6 @@ robot/17/**/temperature
 
 Zenoh 应用通常从下面这行开始：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 let session = zenoh::open(config).await?;
 ```
@@ -120,7 +112,6 @@ Session 不是一条 TCP connection。它更像应用进入这片数据空间的
 
 最小对象图先保留到这一层即可：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 Application
     |
@@ -141,7 +132,6 @@ Session
 
 一个持续发布关节状态的最小片段如下：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 let session = zenoh::open(config).await?;
 
@@ -162,7 +152,6 @@ publisher.put(payload).await?;
 
 订阅端可以声明一组感兴趣的 key：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 let subscriber = session
     .declare_subscriber("robot/*/pose")
@@ -179,7 +168,6 @@ Publisher 的表达式和 Subscriber 的表达式相交时，这份数据才有�
 
 一条消息的第一版路径可以压缩为：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 publisher.put(payload)
   -> Publisher 保存的 key 与策略

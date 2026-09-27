@@ -27,7 +27,6 @@ create sample list
 
 周期线程把增量队列搬到当前快照时有一个需要源码读者注意的同步边界。`AddSingleSample()` 用 `m_applied_sample_list_mtx` 保护 `push_back`，但固定版本 `RegisterSendThread()` 先在锁外调用 `empty()`，只有确认非空后才加锁复制并清空：
 
-**固定提交源码摘录（`eclipse-ecal/ecal@1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，`RegisterSendThread` 增量搬运片段）：**
 
 ```cpp
 // append applied samples list to sample list
@@ -84,7 +83,6 @@ registration receiver thread
 
 `CSampleApplier::ApplySample()` 持 callback-map mutex 执行所有 consumers。下面是从过滤成功到返回的完整固定提交函数：
 
-**固定提交源码摘录（同一提交，`CSampleApplier::ApplySample`）：**
 
 ```cpp
 bool CSampleApplier::ApplySample(const Registration::Sample& sample_)
@@ -132,7 +130,6 @@ Refresh 时在 map 中查找约 `O(log N)`，再用 list iterator `splice` 到�
 
 下面的固定实现展示两条索引怎样保持一致：过期时从 map 取出值、同时删除 map/list 节点；refresh 时不搬动 map entry，而是把对应 list 节点移到尾部并更新时间戳。
 
-**固定提交源码摘录（eCAL `1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，`CExpirationMap::erase_expired/update_timestamp`）：**
 
 ```cpp
 std::map<Key, T> erase_expired()
@@ -180,7 +177,6 @@ lease expires
 
 真实 timeout provider 先在 `sample_tracker_mutex` 下取出并删除一批超期 sample，然后释放锁，再逐个把 synthetic unregister 交给普通 apply callback。收到正常 refresh 时，provider 则在同一 tracker mutex 下查找 identity，缺失就插入合成注销记录，已存在就刷新它在过期 list 中的位置：
 
-**固定提交源码摘录（eCAL `1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，`CTimeoutProvider::CheckForTimeouts/UpdateOrInsertSample`）：**
 
 ```cpp
 void CheckForTimeouts()
@@ -253,7 +249,7 @@ ACTIVE
 
 `CSubscriberImpl` 的实现把第一次样本写为 inactive，后续样本更新同一连接时才把它置 active；count 在锁内从 connection map 重算，connect event 则在锁释放后触发：
 
-**固定提交源码摘录（eCAL `1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，`CSubscriberImpl::ApplyPublisherRegistration`）：**
+接着看 `CSubscriberImpl::ApplyPublisherRegistration` 的真实实现：
 
 ```cpp
 void CSubscriberImpl::ApplyPublisherRegistration(
@@ -310,7 +306,7 @@ Subscriber reader layer 应先应用 layer parameter，再宣布 connection acti
 
 Publisher 一侧还把“layer 已可发送”与“subscriber 已建立连接”分开：首条 registration 选择并启动 writer、写入 connection map 的 `pending` 项、增加 layer counter；第二条 refresh 才把 `pending` 改成 `established` 并增加 public count。以下摘录保留了这个状态边界：
 
-**固定提交源码摘录（eCAL `1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，`CPublisherImpl::ApplySubscriberRegistration`）：**
+接着看 `CPublisherImpl::ApplySubscriberRegistration` 的真实实现：
 
 ```cpp
 void CPublisherImpl::ApplySubscriberRegistration(
@@ -409,7 +405,6 @@ enqueue event to bounded executor
 
 固定实现的 event callback 把几层锁叠在一起。以 Publisher connect 事件为例，registration receiver 的 `CSampleApplier::ApplySample()` 持 callback-map mutex 调 Gate；`CPubGate::ApplySubscriberRegistration()` 持 topic shared lock 调 PublisherImpl；Impl 更新 connection map 后虽已释放自己的 map mutex，但同步进入 `FireEvent()`。`FireEvent()` 先在 event mutex 外读 `std::function`，之后取得 event mutex，并在仍持锁时调用用户 callback：
 
-**固定提交源码摘录（eCAL `1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，`CPublisherImpl::FireEvent/SetEventCallback/RemoveEventCallback`）：**
 
 ```cpp
 bool CPublisherImpl::SetEventCallback(const PubEventCallbackT& callback_)

@@ -101,7 +101,6 @@ NameClient -> Name Server   仅注册/解析 Contact 与 Route
 
 一个 Unit 对应一条连接的活动状态，隔离各连接的协议状态。固定版本 `robotology/yarp@91710eb45baf5d9cb62dd5a0cb3c3a00f42481b9` 在 `PortCore` 声明里使用 `std::vector<PortCoreUnit*> m_units`；这些裸指针由 PortCore 手动关闭和删除，并非 `shared_ptr<Unit>` 租约。
 
-**固定提交源码摘录（`robotology/yarp@91710eb45baf5d9cb62dd5a0cb3c3a00f42481b9`，`PortCore` 的 registry 与锁字段）：**
 
 ```cpp
 private:
@@ -114,7 +113,7 @@ private:
 
 再看发送端如何用锁：
 
-**固定提交源码摘录（同一提交，`PortCore::sendHelper` 的 state lock 与 packet 初始化）：**
+接着看 `PortCore::sendHelper` 的真实实现：
 
 ```cpp
 std::lock_guard<std::mutex> lock(m_stateMutex);
@@ -136,7 +135,7 @@ m_packetMutex.unlock();
 
 `lock` 是函数作用域内的 RAII 对象，在 `sendHelper()` 返回前都不会析构。下面的逐 Unit `send()` 因此也处在 `m_stateMutex` 临界区；与之不同，`m_packetMutex` 在每段 packet 操作完成后立即释放。
 
-**固定提交源码摘录（同一提交，`PortCore::sendHelper` 的连接 fan-out 循环）：**
+接着看 `PortCore::sendHelper` 的真实实现：
 
 ```cpp
 // Scan connections, placing message everywhere we can.

@@ -23,7 +23,6 @@ LCM handle
 
 ## 构建与安装
 
-**代码身份：教学命令示例。**
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -47,7 +46,6 @@ lib/cmake/lcm/*             find_package 配置和 lcmUtilities.cmake
 
 固定提交提供 `LCM_USE_FILE`、`lcm_wrap_types`、`lcm_add_library` 和 `lcm_target_link_libraries`。一个同时生成 C++ 类型并构建发送/接收程序的工程可写成：
 
-**代码身份：教学构建配置示例。**
 
 ```cmake
 cmake_minimum_required(VERSION 3.16)
@@ -95,7 +93,6 @@ lcm_demo/
 
 默认构造：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 lcm::LCM lcm;
@@ -132,7 +129,6 @@ udpm://239.255.76.67:7667?ttl=1&recv_buf_size=4194304
 
 一个进程中所有需要互通的 LCM 实例也必须使用一致 URL。推荐只在组合根读取环境并向下传递：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 int main() {
@@ -204,7 +200,6 @@ NIC/switch
 
 把 Provider URL、channel 前缀、schema commit 和运行模式放入一个部署清单，而不是只设置终端临时环境变量：
 
-**代码身份：教学配置示例。**
 
 ```yaml
 middleware:

@@ -102,7 +102,6 @@ LCM command channel
 
 真实连接代码的形状是：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 builder.Connect(command_sub.get_output_port(),
@@ -247,7 +246,6 @@ abstract state message + context_count=N
 
 默认构造的 LCM message 可能全零，但“全零”未必是合法安全命令。Receiver System 应同时输出或内部保存有效位、message count 和源时间戳：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 struct CommandSnapshot {
@@ -382,7 +380,6 @@ Receiver 不应顺手执行控制算法。保持转换层纯粹以后，可以�
 
 假设生成消息 `lcmt_device_command` 含有关节数组和源时间戳，Receiver 的职责只是验证并转换成框架内部向量。下面是结构等价的教学骨架，不是 Drake 仓库的逐字源码：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 class DeviceCommandReceiver final : public drake::systems::LeafSystem<double> {
@@ -432,7 +429,6 @@ class DeviceCommandReceiver final : public drake::systems::LeafSystem<double> {
 
 这段代码短，却集中出现了继承、初始化列表、成员函数指针、`const` 引用和裸指针。逐项看清后，再读 Drake 其他 `LeafSystem` 会容易很多。
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 class DeviceCommandReceiver final
@@ -441,7 +437,6 @@ class DeviceCommandReceiver final
 
 冒号后的 `public` 继承表示 `DeviceCommandReceiver` 是一种 `LeafSystem<double>`，可以通过基类接口放进 Diagram。`final` 禁止继续派生；这里系统的端口和计算规则已经在构造函数中固定，避免子类只改一部分行为而破坏不变量。
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 explicit DeviceCommandReceiver(int joint_count)
@@ -450,7 +445,6 @@ explicit DeviceCommandReceiver(int joint_count)
 
 `explicit` 阻止编译器把整数偷偷当成 Receiver，例如 `DeviceCommandReceiver r = 16;` 会被拒绝。冒号后的初始化列表直接构造 `joint_count_`；成员真正的初始化顺序由它们在类中的声明顺序决定，不由列表书写顺序决定。
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 &DeviceCommandReceiver::CalcDesiredPosition
@@ -458,7 +452,6 @@ explicit DeviceCommandReceiver(int joint_count)
 
 这不是立即调用函数，而是取得成员函数指针。Drake 保存这个“以后怎样计算输出”的规则；真正求值时，框架同时提供具体对象、`Context` 和输出缓存。它与普通函数指针的区别是，调用成员函数还需要一个 `this` 对象。
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 const auto& message = input_->Eval<lcmt_device_command>(context);
@@ -466,7 +459,6 @@ const auto& message = input_->Eval<lcmt_device_command>(context);
 
 `auto` 让编译器推导消息类型，`&` 表示不复制对象，`const` 表示当前函数不能借此修改消息。这个引用只在被求值对象仍有效时可用，不能保存到 Receiver 成员供以后使用。尖括号中的类型让 `Eval` 检查 abstract port 里实际保存的是不是 `lcmt_device_command`。
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 void CalcDesiredPosition(...) const
@@ -474,7 +466,6 @@ void CalcDesiredPosition(...) const
 
 末尾的 `const` 约束 `this`：计算输出时不能修改普通成员。它帮助维持“同一个 Context 得到同一个输出”的纯计算语义，但不自动保证线程安全；若成员指向外部可变对象，仍可能被其他线程修改。
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 static_cast<std::size_t>(joint_count_)
@@ -484,7 +475,6 @@ static_cast<std::size_t>(joint_count_)
 
 教学骨架中的 `Eigen::VectorXd value(joint_count_)` 每次求值都可能从堆申请缓冲，适合说明转换流程，却不适合直接声称“实时安全”。更稳妥的版本让 Drake 直接提供已经分配好的 `output`，逐项写入其中，或者使用编译期固定维度：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 for (int i = 0; i < joint_count_; ++i) {
@@ -530,7 +520,6 @@ Encoder 是普通 `LeafSystem`，输出 `Value<lcmt_device_status>`；Publisher 
 
 ### 在 DiagramBuilder 中完成所有权与连线
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 auto* lcm = builder.AddSystem<drake::systems::lcm::LcmInterfaceSystem>();

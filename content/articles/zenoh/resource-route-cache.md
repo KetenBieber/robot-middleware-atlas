@@ -12,7 +12,6 @@ KeyExpr 是分段的逻辑资源名，`*` 和 `**` 可表达一段或多段通�
 
 以下声明：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 robot/arm/state
 robot/arm/cmd
@@ -21,7 +20,6 @@ robot/**
 
 不会作为三个互不相关的字符串存入普通哈希表，而是共享前缀节点：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 root
 └─ robot
@@ -33,7 +31,6 @@ root
 
 源码中的节点可压缩表示为：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 struct Resource {
     parent: Option<Arc<Resource>>,
@@ -54,7 +51,6 @@ struct ResourceContext {
 
 上面是为读者先看清角色写的教学压缩模型，下面才是固定提交的真实字段。它们分成两段摘录，是因为 context 类型在 `Resource` 之前定义：
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `ResourceContext` 与 `HatResourceContext`。**
 ```rust
 pub(crate) struct ResourceContext {
     pub(crate) matches: Vec<Weak<Resource>>,
@@ -77,7 +73,7 @@ pub(crate) struct HatResourceContext {
 
 router HAT 读取 Resource 状态时，通过 `res_hat` 把类型擦除的值还原为具体 `HatContext`；写入路径则需要可变借用：
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `Hat::res_hat` 与 `Hat::res_hat_mut`。**
+对应的上游实现如下：
 ```rust
 pub(self) fn res_hat<'r>(&self, res: &'r Resource) -> &'r HatContext {
     res.context().hats[self.region].ctx.downcast_ref().unwrap()
@@ -93,7 +89,7 @@ pub(self) fn res_hat_mut<'r>(&self, res: &'r mut Arc<Resource>) -> &'r mut HatCo
 
 `downcast_ref` 不复制 router context，只借出不可变引用；`downcast_mut` 经内部受控的 `get_mut_unchecked` 修改同一对象，调用者必须持有允许修改 Tables/Resource 的独占访问。若某 HAT 把另一种具体值放入槽位，downcast 的 `unwrap()` 会暴露内部类型不变量被破坏，而不是悄悄按另一种布局解释内存。
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `Resource`。**
+对应的上游实现如下：
 ```rust
 pub struct Resource {
     pub(crate) parent: Option<Arc<Resource>>,
@@ -116,7 +112,6 @@ pub struct Resource {
 
 `children` 的 key 不是完整表达式，而是当前层的分段。例如 `robot/arm/state` 的 `robot` 节点只用 `arm` 查下一层。固定实现让 `Child` 以子节点 `suffix()` 的字符串做相等比较与哈希，并实现 `Borrow<str>`，所以查找 `"arm"` 不必先创建一个临时 Resource：
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `Child` 的 key 比较与借用查找。**
 ```rust
 #[derive(Clone)]
 pub(crate) struct Child(Arc<Resource>);
@@ -158,7 +153,7 @@ impl Borrow<str> for Child {
 
 节点分支度也不均匀：大量路径节点没有孩子，许多只有一个。若每个 `children` 都直接持有普通 HashSet，空集合和单孩子节点也要承担哈希表表示。Zenoh 的 `SingleOrBoxHashSet` 用枚举把这三种规模分开：
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `SingleOrBoxHashSet::{new,insert,contains,get}`。**
+对应的上游实现如下：
 ```rust
 pub enum SingleOrBoxHashSet<T> {
     Empty,
@@ -247,7 +242,6 @@ where
 
 多个路由和 Face context 会共享节点，所以结构使用 `Arc<Resource>`。需要特别纠正一个常见误读：这个固定提交的树父子关系本身是双向强引用——`Resource.parent` 是 `Option<Arc<Resource>>`，children 中的 `Child` 也包着 `Arc<Resource>`。因此父子链形成的强引用环不会靠 Arc 自行归零，必须由 Resource 清理逻辑显式拆开。与此不同，匹配关系是非拥有关系，使用 `Weak<Resource>`：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 parent --Arc--> child --Arc--> parent
 match A --Weak--> match B
@@ -260,7 +254,7 @@ match B --Weak--> match A
 
 `Child` 的强 Arc 包装和基于 suffix 的 key 已在前面看到；新节点创建时会反向强持有 parent，并继承/更新确定前缀：
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `Resource::new`。**
+对应的上游实现如下：
 ```rust
 fn new(parent: &Arc<Resource>, suffix: &str, context: Option<ResourceContext>) -> Resource {
     let nonwild_prefix = match &parent.nonwild_prefix {
@@ -294,7 +288,6 @@ fn new(parent: &Arc<Resource>, suffix: &str, context: Option<ResourceContext>) -
 
 Resource 创建过程沿 `/` 逐段推进：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 make_resource("robot/arm/state")
   current = root
@@ -306,7 +299,6 @@ make_resource("robot/arm/state")
 
 实现刻意采用迭代而非递归。这样树深度由输入表达式决定时，不会把同样深度转化成调用栈深度，也更容易在循环中维护当前完整表达式和 suffix。
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `Resource::make_resource`。**
 ```rust
         let mut from = from.clone();
         // do not use recursion as the tree may have arbitrary depth
@@ -342,7 +334,6 @@ make_resource("robot/arm/state")
 
 Key expression 不是简单相等关系。例如：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 a/*       intersects a/b
 a/**      intersects a/b/c
@@ -351,7 +342,6 @@ a/b       does not intersect x/b
 
 `match_resource` 在声明或资源建立时计算相交集合，并维护双向弱引用边：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 Resource("a/*")  --Weak--> Resource("a/b")
 Resource("a/b")  --Weak--> Resource("a/*")
@@ -367,7 +357,6 @@ Resource("a/b")  --Weak--> Resource("a/*")
 
 `get_matches` 与 `match_resource` 由固定提交分别承担“找出交集”和“安装交集关系”。前者在声明期工作；若把这次表达式相交遍历放到每条 20 Hz 状态消息上，key 数量越多，消费线程就越常重走资源树。它把待检查状态放进 FIFO `VecDeque`，每项保存“尚未匹配的表达式后缀”和“当前 Resource”，循环弹出而不递归，因此超长 key 不会变成同等深度的 Rust 调用栈。
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `Resource::get_matches`。**
 ```rust
 pub fn get_matches(tables: &TablesData, key_expr: &keyexpr) -> Vec<Weak<Resource>> {
     pub fn visit_nodes<T>(node: T, mut visit: impl FnMut(T, &mut VecDeque<T>)) {
@@ -462,7 +451,6 @@ pub fn get_matches(tables: &TablesData, key_expr: &keyexpr) -> Vec<Weak<Resource
 
 这里要区分“计算匹配集合”和“安装双向边”：`get_matches` 负责计算，`match_resource` 接收已经得到的 `Weak<Resource>` 列表并维护对称关系。固定实现的边界如下：
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `Resource::match_resource` 与 `Resource::upgrade_resource`。**
 ```rust
     pub fn match_resource(
         _tables: &TablesData,
@@ -498,7 +486,6 @@ pub fn get_matches(tables: &TablesData, key_expr: &keyexpr) -> Vec<Weak<Resource
 
 `Routes<T>` 并不是全局拿 key expression 做哈希索引。每个 Resource context 自己拥有一个或多个 `Routes<T>`；在其中，逻辑映射键是：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 Resource context selects Routes object
 Routes mapping key: (source Region, mapped source NodeId)
@@ -513,7 +500,6 @@ route is usable only if Routes.version == current routes_version
 
 每一个 `Routes<T>` 都保存当前版本。全局或区域级拓扑变化时，调用方传入新的版本；只要不相等，旧映射就不会被命中。固定提交 `eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5` 中的 `Routes::{get_route,set_route}` 如下：
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `Routes::{default,get_route,set_route}`。**
 ```rust
 pub type RoutesVersion = u64;
 
@@ -583,7 +569,6 @@ impl<T> Routes<T> {
 
 查找流程如下：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 get_or_set_route(current_version, region, node_id)
   |
@@ -605,7 +590,7 @@ get_or_set_route(current_version, region, node_id)
 
 合并 data route cache 的 miss 还有一层工作：`get_data_route` 闭包遍历各 routing region，再读取或填充对应的 per-Hat cache 并合并方向。因此合并缓存的写 guard 在整个跨 region 汇总期间都存活；这份 Resource cache 的冷 miss 延迟可能包含多份 per-Hat cache 查询或计算。不同 Resource 有独立的 cache lock，争用范围不会因为同一把缓存锁扩展到整棵 Resource tree；但它们仍共享 Tables 读锁保护的拓扑快照。
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `get_or_set_route`。**
+对应的上游实现如下：
 ```rust
 pub(crate) fn get_or_set_route<T: Clone>(
     routes: &RwLock<Routes<T>>,
@@ -635,7 +620,6 @@ pub(crate) fn get_or_set_route<T: Clone>(
 
 声明变更只影响与某个表达式相交的资源，适合局部失效：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 declare subscriber("a/**")
   -> clear resource("a/**") data route cache
@@ -647,7 +631,6 @@ declare subscriber("a/**")
 
 Face、拓扑或 routing region 发生变化时，潜在影响接近全局。逐个遍历所有 Resource 清缓存的成本很高，于是系统只递增版本号：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 HatTablesData.routes_version += 1
 TablesData.routes_version    += 1
@@ -659,7 +642,6 @@ TablesData.routes_version    += 1
 
 固定提交 `eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5` 中的 `Hat::disable_data_routes` 展示局部失效会同时清目标 Resource 与其相交资源的 per-Hat、合并 data route 缓存：
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `Hat::disable_data_routes`。**
 ```rust
 fn disable_data_routes(&mut self, res: &mut Arc<Resource>) {
     if res.ctx.is_some() {
@@ -684,7 +666,6 @@ fn disable_data_routes(&mut self, res: &mut Arc<Resource>) {
 
 拓扑级失效则在 HAT 状态上递增 HAT 自己的 `routes_version`，并递增全局 `TablesData.routes_version`；固定来源是 `Hat::disable_all_routes` 与 `TablesData::disable_all_routes`。版本递增用 `saturating_add(1)`，不遍历整个 Resource tree。
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `Hat::disable_all_routes`。**
 ```rust
 fn disable_all_routes(&mut self, tables: &mut TablesData) {
     let routes_version = &mut tables.hats[self.region()].routes_version;
@@ -694,7 +675,7 @@ fn disable_all_routes(&mut self, tables: &mut TablesData) {
 }
 ```
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `TablesData::disable_all_routes`。**
+对应的上游实现如下：
 ```rust
 pub(crate) fn disable_all_routes(&mut self) {
     let routes_version = &mut self.routes_version;
@@ -706,7 +687,6 @@ pub(crate) fn disable_all_routes(&mut self) {
 
 一个 Resource 即使不再直接承载声明，也可能仍被子节点、Face mapping、Route 或临时计算引用。下面固定提交中的 `Resource::clean` 会 clone 当前 Arc，再以受控的内部可变访问检查强引用计数；当它不是 root、没有孩子且引用数不超过当前调用预期阈值时，删掉匹配边、断开 nonwild prefix、从 parent.children 摘除自己，然后递归尝试清父节点。
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `Resource::clean` 与 `Resource::close`。**
 ```rust
 pub fn clean(res: &mut Arc<Resource>) {
     let mut resclone = res.clone();
@@ -755,7 +735,7 @@ pub fn close(self: &mut Arc<Resource>) {
 
 Runtime 强制关闭时不再依赖普通增量清理，而由 `root_res.close()` 深度 drain children、断开 parent/nonwild 引用并清空 contexts。它是完整 teardown 路径。下面从 Runtime 的调用点确认关闭顺序和 Tables 锁边界：
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `RuntimeState::close_inner`。**
+对应的上游实现如下：
 ```rust
 impl Closee for Arc<RuntimeState> {
     type CloseArgs = ();
@@ -783,7 +763,7 @@ impl Closee for Arc<RuntimeState> {
 
 `clean` 本身没有取得 Tables 锁；真正的排他边界在调用现场。先看 Face 怎样解析待撤销的表达式：已有资源的查找先拿 Tables 读锁，找到节点后明确释放读 guard，随后取得写锁，并在 guard 存活期间把 `&mut Tables` 交给闭包。
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `Face::with_mapped_nullable_expr`。**
+对应的上游实现如下：
 ```rust
 pub(crate) fn with_mapped_nullable_expr<F>(
     &self,
@@ -839,7 +819,7 @@ pub(crate) fn with_mapped_nullable_expr<F>(
 
 `with_mapped_nullable_expr` 的闭包类型要求 `&mut Tables`，局部变量 `wtables` 则持有写 guard。摘录还包含 `make_if_unknown` 分支：若允许创建缺少的 Resource，它会在释放读 guard 后取得写 guard，再创建节点并安装匹配边；本节的撤销调用传 `false`，只接受已有资源。下面的调用者在该闭包里撤销 Subscriber；当最后一方离开时，路由缓存失效后才调用 `Resource::clean`：
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `Face::remove_subscriber`。**
+对应的上游实现如下：
 ```rust
 self.with_mapped_nullable_expr(expr, /* make_if_unknown */ false, |tables, res| {
     let region = self.state.region;

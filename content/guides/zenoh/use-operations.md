@@ -4,7 +4,6 @@
 
 ## 最小显式拓扑
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 robot clients -> tcp/router-host:7447 <- edge/cloud clients
 ```
@@ -36,7 +35,6 @@ Zenoh 1.x 的配置意图可以写成下面这样；字段以部署版本附带�
 
 ## 拓扑状态机
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 Starting -> SessionOpen -> Connecting -> Matched -> Ready
                               |             |
@@ -51,7 +49,6 @@ transport 重连成功不表示声明已经重新匹配，更不表示收到的�
 
 推荐按组织/机器人/子系统/数据分类：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 factory/line-a/robot-07/arm/state
 factory/line-a/robot-07/arm/cmd
@@ -122,7 +119,6 @@ Query 收到部分 Reply 后超时，通常要继续检查某个路由方向是�
 
 一个服务对象可以把依赖方向固定下来：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```cpp
 class ZenohService {
 public:

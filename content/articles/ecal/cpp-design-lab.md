@@ -1,8 +1,73 @@
 # eCAL C++ 设计实验室：从公开句柄到并发回调
 
-eCAL 的公开接口看起来很薄：构造 Publisher，调用 `Send()`；构造 Subscriber，安装回调。真正困难的部分并不在这两行，而在接口背后的四个工程问题：公开对象能否安全失效、后台发现线程如何找到实体、回调期间对象能否被销毁、全局运行时怎样按依赖顺序关闭。
+一台巡检机器人启动了图像 Publisher。随后，诊断模块持有它的发送句柄；而系统管理线程发现传输配置出错，准备撤销这只 Publisher 并关闭网络连接。如果业务句柄就是一个裸 `PublisherImpl*`，管理线程先 `delete`，诊断线程再调用 `Send()`，就会访问已释放的对象。反过来，如果业务句柄总是用 `shared_ptr` 强持有实现对象，管理线程清空注册表以后，残留句柄又可能使网络实体始终不能析构。这个问题不取决于底层使用 UDP 还是共享内存：**我们需要区分“业务代码可以引用实体”与“谁决定实体应该继续存在”。**
 
-本章先实现一个缩小版实体运行时，再把每个 C++ 机制映射回 eCAL 的设计。没有注明上游身份的代码块都是教学/复刻示例；标为“固定提交源码摘录”的代码则直接取自源码，二者不会混用。固定版本为 commit `1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，其中 core 使用 C++17，本文教学示例也按此版本组织。
+先从一只只有一个 topic 的进程内 Publisher 开始，让它经历注册、发送、注销以及注销后的旧句柄调用；再一步步加入真实 eCAL 的 Gate、Impl、后台回调与全局关闭。源码基线为 `1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，下面的短程序是独立的 C++17 教学实现；介绍 `CPublisher`、`CPubGate` 等真实符号时会明确回到该固定版本。
+
+## 用一个可运行的弱句柄实验建立所有权模型
+
+如果只讲“`weak_ptr` 不增加引用计数”，读者很难知道它为什么出现在中间件公开 API 里。先让运行时的 `Gate` 真正拥有实现对象，而业务侧的 `Publisher` 只保存一只弱句柄。以下程序可用 `g++ -std=c++17 -Wall -Wextra -Werror -pedantic` 编译，它与 eCAL 的真实实现具有相同的关键所有权关系，但省略了传输和发现。
+
+~~~cpp
+#include <cassert>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <utility>
+
+struct Impl {
+    explicit Impl(std::string channel) : topic(std::move(channel)) {}
+    bool Write(const std::string& value) {
+        last = value;
+        return true;
+    }
+    std::string topic;
+    std::string last;
+};
+
+class Gate {
+public:
+    std::shared_ptr<Impl> Register(std::string name) {
+        auto impl = std::make_shared<Impl>(name);
+        registry_[std::move(name)] = impl;
+        return impl;
+    }
+
+    void Clear() { registry_.clear(); }
+
+private:
+    std::unordered_map<std::string, std::shared_ptr<Impl>> registry_;
+};
+
+class Publisher {
+public:
+    Publisher(Gate& gate, std::string topic)
+        : impl_(gate.Register(std::move(topic))) {}
+
+    bool Send(const std::string& bytes) {
+        auto alive = impl_.lock();
+        return alive && alive->Write(bytes);
+    }
+
+private:
+    std::weak_ptr<Impl> impl_;
+};
+
+int main() {
+    Gate gate;
+    Publisher camera(gate, "robot/camera");
+    assert(camera.Send("frame-1"));
+
+    gate.Clear();                 // Gate 放弃唯一的长期强引用
+    assert(!camera.Send("frame-2")); // 旧句柄安全地报告实体失效
+}
+~~~
+
+先画出强引用图。`Gate::registry_` 的 map value 是 `shared_ptr<Impl>`，每个实体都由它持有；`Publisher::impl_` 只是观察者，不让对象继续活着。`Gate::Register` 在函数内部还有一只临时强引用；返回给 `Publisher` 构造函数以后，它立刻被转换成 `weak_ptr`，表达式结束时临时强引用被销毁，留下 Gate 这个长期 owner。`Gate::Clear` 释放最后一个 map value 后，`Impl` 可以析构。随后 `weak_ptr::lock()` 失败，`Send` 返回 false，而不是对一个已经释放的地址调用 `Write`。
+
+`std::shared_ptr` 的控制块至少需要跟踪强引用、弱引用以及实际删除动作；`weak_ptr::lock` 必须在控制块上原子地尝试取得强引用，不能先检查 `expired()` 再从裸地址创建新 `shared_ptr`，否则检查与获取之间可能发生析构。成功取得 `alive` 的调用即使与 `Gate::Clear` 并发，当前 `Impl` 的**内存**也会保留到 `alive` 离开作用域。但这并不能保证网络连接仍然活跃：真实中间件还必须在 Impl 内部用明确的关闭状态和同步协议拒绝新发送，并等待在途回调。对象内存安全、业务上的“仍可发送”、线程已经静默，是三个不同的条件。
+
+这时再归纳模式才有意义：`Publisher` 作为 **Facade** 隐藏 Gate 和传输细节，`Gate` 是建立实体及其长期 owner 的 **Registry**，`weak_ptr` 则承载“可访问但不决定寿命”的句柄契约。它们各自解决不同的问题，不应因为代码里同时出现三种类，就给这张对象图套一个含混的“工厂模式”标签。
 
 ## 功能边界与对象关系
 
@@ -46,7 +111,6 @@ CPublisher::Send
 
 在解释 `weak_ptr` 之前先看公开句柄实际保存的成员。下面是固定提交中 `CPublisher` 的声明摘录：
 
-**固定提交源码摘录（`eclipse-ecal/ecal@1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，`CPublisher` 私有成员）：**
 
 ```cpp
 private:
@@ -55,7 +119,7 @@ private:
 
 `CPublisher` 的构造函数在本次调用栈中先创建一个 `shared_ptr<CPublisherImpl>`，把它赋给这个弱成员，再把同一个强指针交给 PubGate 注册：
 
-**固定提交源码摘录（同一提交，`CPublisher::CPublisher`）：**
+接着看 `CPublisher::CPublisher` 的真实实现：
 
 ```cpp
 CPublisher::CPublisher(const std::string& topic_name_, const SDataTypeInformation& data_type_info_, const Publisher::Configuration& config_)
@@ -182,7 +246,6 @@ class Publisher {
 
 固定提交的 `CPublisher::Send()` 正是这样建立本次调用的寿命租约，并把空订阅与真正写入分开：
 
-**固定提交源码摘录（同一提交，`CPublisher::Send` 的 payload-writer 重载）：**
 
 ```cpp
 bool CPublisher::Send(CPayloadWriter& payload_, long long time_)
@@ -284,7 +347,6 @@ class CreateRollback {
 
 固定 eCAL 的 PubGate 采用可重复 topic 的 `std::multimap`，map value 本身是 `shared_ptr`；这既允许同一 topic 上存在多个 PublisherImpl，也使 Gate 成为这些实现对象的强所有权根：
 
-**固定提交源码摘录（同一提交，`CPubGate` 索引成员声明和 `CPubGate::Register` 函数；两处源码摘录，中间其他声明省略）：**
 
 ```cpp
 using TopicNamePublisherMapT = std::multimap<std::string, std::shared_ptr<CPublisherImpl>>;
@@ -395,7 +457,6 @@ struct LayerState {
 
 这不是教学模型，而是实际源码里的三个独立原子摘要与 relaxed 更新。下面摘录展示一个层从连接变化到发送端读取摘要的完整接口：
 
-**固定提交源码摘录（同一提交，`SSendLayerConnectionCounters` 成员声明及 `Increment`、`UdpEnabled` 函数；多个源码摘录，中间的 `Decrement`、`Reset` 等函数省略）：**
 
 ```cpp
 struct SSendLayerConnectionCounters
@@ -441,7 +502,6 @@ bool CPublisherImpl::SSendLayerConnectionCounters::UdpEnabled() const
 
 还有一个比“两条 Send 同时写 staging vector”更早发生的边界：动态发现首次为 Publisher 创建某层 writer 时，registration 线程写入普通 `unique_ptr`，而业务线程读取同一成员。下面是固定提交中对应的两个源码落点；只保留相关语句，省略平台宏和日志，不改变它们的控制流：
 
-**固定提交源码摘录（同一提交，`CPublisherImpl::StartUdpLayer` 与 `CPublisherImpl::Write` 的 UDP 层读取片段）：**
 
 ```cpp
 bool CPublisherImpl::StartUdpLayer()
@@ -461,7 +521,6 @@ const bool udp_send_enabled = m_writer_udp && m_send_layer_connection_counters.U
 
 同一 writer 指针还会被周期快照线程读取。`CPubGate::GetRegistrations()` 持 Gate 的 shared lock 枚举 PublisherImpl 并调用 `GetRegistration()`；但 `StartUdpLayer()` 和 `GetRegistrations()` 也都是 shared-lock 读者，前者在锁下创建 `unique_ptr` 并不会因此与后者互斥。`GetRegistrationSample()` 随后读取 writer 指针、普通 active/enabled 字段并调用 writer 获取连接参数；业务 `Write()` 同时写 active 标志。下面把读写双方放在一个源码视野里：
 
-**固定提交源码摘录（非连续代码区段；eCAL `1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，`CPubGate::GetRegistrations`、`CPublisherImpl::GetRegistrationSample` 与 `CPublisherImpl::Write`）：**
 
 ```cpp
 void CPubGate::GetRegistrations(Registration::SampleList& reg_sample_list_)

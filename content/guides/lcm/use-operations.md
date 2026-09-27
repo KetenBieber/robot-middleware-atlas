@@ -8,7 +8,6 @@
 
 先把在线记录和离线回放放到两个不同的 multicast 地址，避免回放报文重新进入仍在运行的生产系统：
 
-**代码身份：教学命令示例。**
 
 ```bash
 LIVE_URL='udpm://239.255.76.67:7667?ttl=0'
@@ -99,7 +98,6 @@ experiment_042/
 
 播放器适合把事件重新注入总线；批量统计、数据转换和回归断言不需要网络，可直接遍历日志。下面保留了官方 `read_log.cpp` 的核心控制流，并加入 channel 筛选与严格解码检查：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 #include <cstdint>
@@ -189,7 +187,6 @@ LCM 自身不提供命令确认。关键命令应携带 command id，并在独�
 
 一个最小命令协议包含：`command_id`、发送者 id、目标、deadline、operation 和参数。接收端维护最近已完成 id 的有界缓存：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 void CommandHandler::onCommand(const command_t& command) {

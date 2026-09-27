@@ -43,7 +43,6 @@ LCM 适合以下系统：
 
 典型程序只需要几行：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 lcm::LCM bus;
@@ -88,7 +87,6 @@ LCM 的优势来自约束明确，而不是覆盖所有分布式系统问题。
 
 固定版本的 `lcm_t` 保存订阅、channel 匹配缓存、provider 接口和 handle 并发状态。它不是抽象图，而是核心实际持有的对象布局：
 
-**代码身份：固定提交源码摘录，来自 `lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864`，符号 `struct _lcm_t`，逐字连续定义。**
 
 ```c
 struct _lcm_t {
@@ -125,7 +123,6 @@ file://experiment.lcm
 
 LCM 不会自动选择业务 callback 线程。应用调用：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 lcm_handle(lcm);
@@ -133,7 +130,7 @@ lcm_handle(lcm);
 
 provider 取出一条完整消息，再由核心订阅表依次调用匹配 handler。回调执行完，`lcm_handle()` 才返回。调用边界如下；参数 `lcm` 是已创建句柄，返回值来自 provider 的一次 `handle` 操作。
 
-**代码身份：固定提交源码摘录，来自 `lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864`，符号 `lcm_handle()`，逐字连续函数体。**
+对应的上游实现如下：
 
 ```c
 int lcm_handle(lcm_t *lcm)
@@ -160,7 +157,7 @@ int lcm_handle(lcm_t *lcm)
 
 LCM 的核心用 C 编写。C++ 类 `lcm::LCM` 主要是 RAII 与模板适配层：
 
-**代码身份：固定提交源码摘录，来自 `lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864`，符号 `lcm_publish()`，逐字连续函数体。**
+对应的上游实现如下：
 
 ```cpp
 class LCM {
@@ -186,7 +183,6 @@ class LCM {
 
 `lcm_create(url)` 先建立 provider 描述列表：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 lcm_udpm_provider_init(providers);
@@ -206,7 +202,6 @@ lcm_memq_provider_init(providers);
 
 找到对应 `lcm_provider_info_t` 后，顶层对象保存它的 vtable，并调用 provider 的 `create`：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 lcm->vtable = info->vtable;
@@ -219,7 +214,6 @@ lcm->provider = info->vtable->create(lcm, network, args);
 
 顶层发布函数几乎只是一次间接调用：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 int lcm_publish(lcm_t *lcm, const char *channel,
@@ -272,7 +266,6 @@ Provider vtable 包含 `get_fileno`，`lcm_get_fileno()` 将其暴露给应用�
 
 应用可以把它放进 `select`、`poll` 或其他 reactor：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 int fd = lcm_get_fileno(lcm);
@@ -289,7 +282,6 @@ if (poll(&pfd, 1, timeout_ms) > 0) {
 
 `lcm_subscribe()` 将 channel 字符串编译成锚定正则：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 char *regexbuf = g_strdup_printf("^%s$", channel);
@@ -311,7 +303,6 @@ later messages on C:         average O(1) lookup + O(matching handlers)
 
 `lcm_subscription_t` 保存：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 int max_num_queued_messages;
@@ -328,7 +319,6 @@ int num_queued_messages;
 
 `lcm_dispatch_handlers()` 先在互斥区中把相关 subscription 标记为 `callback_scheduled`，再逐个释放全局 mutex 并调用用户代码：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 subscription->num_queued_messages--;
@@ -348,7 +338,6 @@ g_rec_mutex_lock(&lcm->mutex);
 - `mutex` 保护订阅表、计数和核心数据结构；
 - `handle_mutex` 保证同一实例只有一个线程进入 `lcm_handle()`。
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 g_rec_mutex_lock(&lcm->handle_mutex);

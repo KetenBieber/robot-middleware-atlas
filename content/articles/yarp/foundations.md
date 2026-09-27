@@ -41,7 +41,6 @@ YARP 把问题拆成三个决定：
 
 最小的发送端看起来很简单：
 
-**教学代码（使用 `Port` 的最小调用顺序，不是完整可编译示例）：**
 
 ```cpp
 yarp::os::Network yarp;
@@ -62,7 +61,6 @@ output.close();
 
 固定提交的 `Port` 类注释把它定位为维护动态输入、输出连接集合的“小型服务器”。一次 `Port::write()` 会把数据发送到所有输出连接，而不是天然只对应一个接收者。下面的公共声明摘录给出其边界：
 
-**固定提交源码摘录（`Port` 公共类声明，其他成员省略）：**
 
 ```cpp
 class YARP_os_API Port : public UnbufferedContactable
@@ -89,7 +87,6 @@ public:
 
 公开类 `Port` 故意保持小巧。它没有暴露连接表、监听线程和协议对象，而是通过内部实现转发到 `PortCoreAdapter`。固定提交中 `Port::needImplementation()` 的关键部分如下：
 
-**固定提交源码摘录（延迟创建实现对象，保留断言）：**
 
 ```cpp
 void* Port::needImplementation() const
@@ -141,7 +138,6 @@ PortCoreAdapter             把公开 API 适配到内部内核
 
 YARP 用 `Contact` 表示“怎样到达一个网络参与者”。固定提交的 `Contact` 构造函数声明已经揭示了它保存的信息：
 
-**固定提交源码摘录（`Contact` 构造函数声明）：**
 
 ```cpp
 Contact(const std::string& name = std::string(),
@@ -163,7 +159,6 @@ carrier      : tcp
 
 `Route` 表示的不是一个端点，而是两个端点之间的连接意图。它保存来源名字、目标名字、目标 `Contact` 和 Carrier 名。固定提交把公开对象压成 PImpl 指针，再由实现对象持有这些值：
 
-**固定提交源码摘录（`robotology/yarp@91710eb45baf5d9cb62dd5a0cb3c3a00f42481b9`，`Route::Private`）：**
 
 ```cpp
 class Route::Private
@@ -189,7 +184,7 @@ public:
 
 `Route` 的构造函数把输入名字复制到 PImpl 中，并将尚未解析的目标 `Contact` 初始化为空值：
 
-**固定提交源码摘录（同一提交，`Route::Route(const std::string&, const std::string&, const std::string&)`）：**
+接着看 `Route::Route(const std::string&, const std::string&, const std::string&)` 的真实实现：
 
 ```cpp
 Route::Route(const std::string& fromName,
@@ -205,7 +200,7 @@ Route::Route(const std::string& fromName,
 
 读取接口返回 PImpl 中字符串的 const 引用，不复制字符串，也不转移所有权：
 
-**固定提交源码摘录（同一提交，`Route::getFromName()`）：**
+接着看 `Route::getFromName()` 的真实实现：
 
 ```cpp
 const std::string& Route::getFromName() const
@@ -256,7 +251,6 @@ Port 不可能预先知道所有机器人消息类型。图像、关节状态、
 
 固定提交中 `PortWriter` 的核心契约是：
 
-**固定提交源码摘录（`PortWriter` 核心虚接口，后续成员省略）：**
 
 ```cpp
 class PortWriter
@@ -301,7 +295,6 @@ public:
 
 `Portable` 同时继承 `PortReader` 和 `PortWriter`。固定提交直接表达了这个关系：
 
-**固定提交源码摘录（`Portable` 重申的读写虚接口，其他成员省略）：**
 
 ```cpp
 class Portable : public PortReader, public PortWriter
@@ -371,7 +364,7 @@ Port::write(message)
   -> 端口进入 active 状态
 ```
 
-**固定提交源码摘录（`robotology/yarp@91710eb45baf5d9cb62dd5a0cb3c3a00f42481b9`，`Port::open(const Contact&, bool, const char*)` 从 core 初始化到 listen/start）：**
+接着看 `Port::open(const Contact&, bool, const char*)` 的真实实现：
 
 ```cpp
     PortCoreAdapter& core = IMPL();
@@ -480,7 +473,7 @@ Port::write(message)
 
 通信线程可能阻塞在读取、写入或等待确认上。只设置一个 `closing = true` 标志并不能唤醒这些线程，所以 YARP 把“打断阻塞”和“完成关闭”分成不同动作。
 
-**固定提交源码摘录（Port facade 的 close 与 interrupt）：**
+接下来对照固定版本的实际代码：
 
 ```cpp
 void Port::close()

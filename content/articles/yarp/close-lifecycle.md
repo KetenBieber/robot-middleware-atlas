@@ -42,7 +42,6 @@ Port::close()
 
 这里的状态图是固定版本调用顺序的摘要。`interrupt()` 主要设置标志并在特定条件下调用 reader；完整资源收口由 `close()` 的另一条路径完成。源码没有先把所有 Unit 复制成共享句柄、清空 registry，再统一锁外关闭的步骤，因此不能将这种常见的两阶段设计写成当前实现。
 
-**固定提交源码摘录（`robotology/yarp@91710eb45baf5d9cb62dd5a0cb3c3a00f42481b9`，`Port::close`）：**
 
 ```cpp
 void Port::close()
@@ -65,7 +64,7 @@ void Port::close()
 
 `Port` façade 先处理适配器上的读和写，再调用 PortCore 关闭并 join。`finishWriting()` 不持有 PortCore 的 Unit registry；其最多约三秒的轮询是 `PortCoreAdapter` 对仍在发送状态的等待策略。若一次机械臂状态广播卡在慢连接，调用者可观察到 close 先等待写状态变化，超时后记录错误并继续进入关闭流程。
 
-**固定提交源码摘录（`robotology/yarp@91710eb45baf5d9cb62dd5a0cb3c3a00f42481b9`，`PortCore::closeMain` 的入口与 finishing 状态）：**
+接着看 `PortCore::closeMain` 的真实实现：
 
 ```cpp
 void PortCore::closeMain()
@@ -96,7 +95,7 @@ void PortCore::closeMain()
 
 输入连接先请求对端协商断开，输出连接则从本地拆除。完成这些管理步骤之后，PortCore 才把 server thread 置为 closing，通过 listener 向自己的地址写入消息，使阻塞的 server loop 有机会返回；随后 join server thread。server thread 退出时设置 `m_finished`。只有这个状态成立后，`closeUnits()` 才逐个调用 Unit 的 close、join、delete。
 
-**固定提交源码摘录（`robotology/yarp@91710eb45baf5d9cb62dd5a0cb3c3a00f42481b9`，`PortCore::closeMain` 的 server thread 收口）：**
+接着看 `PortCore::closeMain` 的真实实现：
 
 ```cpp
     bool stopRunning = m_running.load();
@@ -127,7 +126,7 @@ void PortCore::closeMain()
 
 这里所谓 server “被唤醒”是向 listener 地址写入本地消息并让阻塞循环重新运行；它不等于 OS 已分配 CPU。`join()` 等待 server thread 结束，`closeUnits()` 再处理每条连接的 Unit。慢输入 Unit 或其用户 Reader 若迟迟不响应关闭，Unit join 会延长 Port close；这是连接线程退出协议的代价。
 
-**固定提交源码摘录（`robotology/yarp@91710eb45baf5d9cb62dd5a0cb3c3a00f42481b9`，`PortCore::closeUnits`）：**
+接着看 `PortCore::closeUnits` 的真实实现：
 
 ```cpp
 void PortCore::closeUnits()
@@ -158,7 +157,7 @@ void PortCore::closeUnits()
 
 这里的 raw pointer 由 PortCore 明确关闭、join 并 `delete`。不会因为 `vector` 清空自动析构 Unit。代码注释给出的安全前提是 server thread 已 finished 且此阶段无人再访问 Unit 表，所以线程汇合是裸指针回收前的关键边界。
 
-**固定提交源码摘录（`robotology/yarp@91710eb45baf5d9cb62dd5a0cb3c3a00f42481b9`，`PortCore::closeMain` 的 Face、Reader 与命名清理）：**
+接着看 `PortCore::closeMain` 的真实实现：
 
 ```cpp
     // There should be no other threads at this point and we
@@ -198,7 +197,6 @@ Face 在 server thread 结束后关闭和删除；Reader 收到空消息后被�
 
 PortCore 表里仍是需要显式删除的 `PortCoreUnit*`；OutputUnit 内部的协议成员 `op` 则是 `std::shared_ptr<OutputProtocol>`。固定版本的 `closeMain()` 会尝试取得一份局部 `shared_ptr` 并调用 interrupt，再置 closing、发 semaphore 并 join worker；`closeBasic()` 也会在局部副本上做断连、等待可选回复和 close，之后 reset 成员。这说明作者显式区分 Unit 管理与 Protocol 引用寿命，但它本身不能证明任意并发读同一 `shared_ptr` 成员与 reset 都安全；要判断并发是否可能，还必须核对每个调用点及其锁/线程序。
 
-**固定提交源码摘录（`robotology/yarp@91710eb45baf5d9cb62dd5a0cb3c3a00f42481b9`，`PortCoreOutputUnit::closeMain`）：**
 
 ```cpp
 void PortCoreOutputUnit::closeMain()
@@ -257,7 +255,6 @@ Name Server 不可用时，unregister 可能失败。PortCore 仍必须释放本
 
 ## 两阶段关闭的 C++ 骨架
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 void PortCore::Close() noexcept {
@@ -292,7 +289,6 @@ void PortCore::Close() noexcept {
 
 析构、网络错误和用户 close 可能同时取消后台写。完成回调可用原子门收敛：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 class Completion {

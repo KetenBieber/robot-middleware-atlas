@@ -3,7 +3,7 @@ SPHINXBUILD ?= $(PYTHON) -m sphinx
 SOURCEDIR = docs
 BUILDDIR = site
 
-.PHONY: html html-full package-site check-editorial check-baselines check-links clean
+.PHONY: html html-full package-site check-editorial check-baselines check-examples check-links clean
 
 html:
 	$(PYTHON) tools/build_sphinx_sources.py
@@ -15,6 +15,7 @@ html-full:
 	$(PYTHON) tools/build_sphinx_sources.py
 	$(PYTHON) tools/check_source_baselines.py
 	$(PYTHON) tools/check_editorial_language.py
+	$(PYTHON) tools/check_cpp_examples.py
 	$(SPHINXBUILD) -E -a -b html -W --keep-going $(SOURCEDIR) $(BUILDDIR)
 	$(PYTHON) tools/check_static_links.py $(BUILDDIR)
 
@@ -29,6 +30,9 @@ check-editorial:
 
 check-baselines:
 	$(PYTHON) tools/check_source_baselines.py
+
+check-examples:
+	$(PYTHON) tools/check_cpp_examples.py
 
 clean:
 	$(SPHINXBUILD) -M clean $(SOURCEDIR) $(BUILDDIR)

@@ -10,7 +10,7 @@
 
 每个 UDPM provider 都要保留接收 socket、两条 buffer 队列、ring buffer、接收线程、两条通知 pipe 和未完成分片表。notify_pipe 通知应用线程有完整消息可取；thread_msg_pipe 单独用于通知 receiver 退出。前者随 provider 建立，后者与接收资源一起延迟创建。它们的方向不同，不能合并成一个含糊的“事件 fd”。
 
-**代码身份：固定提交源码摘录，逐字连续定义。**
+对应的上游实现如下：
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：struct _lcm_provider_t
@@ -71,7 +71,7 @@ struct _lcm_provider_t {
 
 这个结构体本身不创建线程；它保存后来由 _setup_recv_parts() 建立的资源。进程提供地址空间和打开的资源，线程则是在这个进程里独立运行、会被内核调度的执行流。UDPM receiver 与调用 handle 的线程共享同一个 lcm_udpm_t、队列和内存，所以线程边界能隔离业务耗时，却不会自动复制这些对象；两条执行流访问共享队列时仍必须遵守同一把 mutex。两个队列里放的是 lcm_buf_t 描述符：inbufs_empty 提供可重用的空壳，inbufs_filled 暂存已经完整、等业务线程处理的消息。消息 payload 并不一定来自同一个分配器，因此描述符还要记录 ring buffer 所有者。
 
-**代码身份：固定提交源码摘录，摘自两个独立结构定义；代码逐字。**
+对应的上游实现如下：
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：lcm_buf_t 与 lcm_frag_buf_t
@@ -113,7 +113,6 @@ typedef struct _lcm_frag_buf {
 
 lcm_buf_t::next 让这些描述符连成单链表。队列不只是一个 head 指针：tail 保存“下一个可写入的位置”，初始指向 head，添加节点后改指向新节点的 next。下面是队列数据结构和实际入队/出队代码：
 
-**代码身份：固定提交源码摘录，包含一个结构定义和三个队列函数，语句逐字。**
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：lcm_buf_queue_t、lcm_buf_queue_new()、lcm_buf_dequeue()、lcm_buf_enqueue()
@@ -167,7 +166,6 @@ lcm_buf_t::buf 是一个裸指针，单看它并不能判断该调用 ring deall
 
 接收时先从 empty queue 取一个描述符，再给它分配最大 UDP datagram 区域。描述符池空了就补一批；ring 空间不够时，源码创建更大的新 ring，但把仍被旧消息使用的 ring 暂时留存，并在每个描述符上记录实际分配来源：
 
-**代码身份：固定提交源码摘录，逐字连续函数。**
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：lcm_buf_allocate_data()
@@ -225,7 +223,7 @@ lcm_buf_t *lcm_buf_allocate_data(lcm_buf_queue_t *inbufs_empty, lcm_ringbuf_t **
 
 GCond 是带条件谓词的等待机制。线程不能把“收到 signal”当成谓词已经成立，因为信号可能在检查之前发出，也可能发生虚假唤醒。正确的用法是：持有 mutex 检查共享状态；条件不满足时在循环中 wait；wait 原子地释放 mutex 并阻塞；醒来后重新取得 mutex，再检查谓词。LCM 用 creating_read_thread 表示创建过程是否结束，并用 thread-local 标记识别创建者的重入调用。
 
-**代码身份：固定提交源码摘录；控制语句逐字，原函数注释省略。**
+对应的上游实现如下：
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：_setup_recv_parts() 的并发初始化等待分支
@@ -269,7 +267,7 @@ thread-local 标记是每条 OS 线程各自的一份状态：创建者再次进
 
 接收线程不能只阻塞在 recvmsg()。若 destroy 只设置一个普通标志，线程仍可能睡在没有新报文的 socket 上，关闭操作便无法等它退出。LCM 用 select() 同时等待接收 socket 与独立的退出 pipe；pipe 字节进入内核缓冲区后，阻塞在 select() 的线程才会变为 runnable。
 
-**代码身份：固定提交源码摘录，逐字连续节选。**
+对应的上游实现如下：
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：udp_read_packet() 中等待输入与处理退出命令的循环
@@ -381,7 +379,6 @@ thread-local 标记是每条 OS 线程各自的一份状态：创建者再次进
 
 短消息不会长期占满 ring；在 udp_read_packet() 得到完整消息后，它把最后一次预分配收缩到实际 datagram 长度：
 
-**代码身份：固定提交源码摘录，逐字连续节选。**
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：udp_read_packet() 的 ring-buffer 收缩分支
@@ -402,7 +399,7 @@ select() 返回只表示 fd 已经可读，不表示 callback 开始运行。线
 
 接收线程处理好一条完整消息后，在同一把 lcm->mutex 下完成“检查队列是否为空、写入一个通知字节、把描述符入队”：
 
-**代码身份：固定提交源码摘录，逐字连续函数。**
+对应的上游实现如下：
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：recv_thread()
@@ -454,7 +451,6 @@ pipe 中不是“一条消息对应一个字节”的计数器。它表达的是
 
 下面是 _recv_message_fragment() 的固定源码。它也揭示了此版本的一个重要约束：字段 fragments_remaining 只减计数，没有按 fragment_no 设置 bitmap 去重。
 
-**代码身份：固定提交源码摘录；函数主体逐字，省略仅输出内核接收缓冲提示的条件编译块。**
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：_recv_message_fragment()
@@ -579,7 +575,7 @@ static int _recv_message_fragment(lcm_udpm_t *lcm, lcm_buf_t *lcmb, uint32_t sz)
 
 还有一个很具体的边界条件：lcm_frag_buf_store_add() 在插入之前检查当前总字节数和现有条目数，故达到阈值时再添加一个刚好合法的新消息后，账面用量可以越过阈值一项。新片的 data 在入表前已经 malloc(data_size)，因此淘汰旧项和新分配可能短暂同时占内存。
 
-**代码身份：固定提交源码摘录，逐字连续函数。**
+对应的上游实现如下：
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：lcm_frag_buf_store_add()
@@ -607,7 +603,6 @@ void lcm_frag_buf_store_add(lcm_frag_buf_store *store, lcm_frag_buf_t *fbuf)
 
 删除分片项还涉及值对象的生存期。固定提交创建 hash table 时把 value destroy callback 设为 lcm_frag_buf_destroy；移除 key 会同步销毁对应 fbuf。因此，在 data_size 不匹配的分支中，先 remove 再从 fbuf 读取剩余分片数，是一个条件性 use-after-free：只有启用了调试输出、并且 DBG_LCM 模式实际开启时，dbg 的参数表达式才会求值；这时读的是刚释放对象的字段。比如同一发送端的序号复用，但新消息长度改变，接收端会进入这个分支。正常构建也会丢弃旧消息重建；开启该诊断路径则可能打印错误数字或触发未定义行为。修复方式是先把 fragments_remaining 复制到局部变量再 remove，再打印局部值。
 
-**代码身份：固定提交源码摘录，来自同一文件中的三个独立所有权定义。**
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：lcm_frag_buf_store_new()、lcm_frag_buf_destroy()、lcm_frag_buf_store_remove()
@@ -633,7 +628,7 @@ void lcm_frag_buf_store_remove(lcm_frag_buf_store *store, lcm_frag_buf_t *fbuf)
 
 当最后一片让计数归零时，LCM 先确认至少一个匹配订阅仍有排队额度，然后释放当前 UDP datagram 的 ring 区域，再把 fbuf->data 指针交给 lcmb->buf。紧接着把源指针设成 NULL，使 lcm_frag_buf_store_remove() 销毁分片项时不会再释放 payload。随后该 lcm_buf_t 进入 filled queue，由 lcm_handle() 线程在 callback 返回后回收。
 
-**代码身份：固定提交源码摘录，逐字连续函数。**
+对应的上游实现如下：
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：lcm_udpm_handle()
@@ -702,7 +697,6 @@ static int lcm_udpm_handle(lcm_udpm_t *lcm)
 
 释放实现使用分配来源字段来选择 allocator：
 
-**代码身份：固定提交源码摘录，逐字连续函数。**
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：lcm_buf_free_data()
@@ -738,7 +732,6 @@ ring buffer 因容量用尽而被替换时，仍被未归还消息引用的旧 r
 
 正常关闭时 _destroy_recv_parts() 往退出 pipe 写一个字节，然后 g_thread_join() 等接收线程结束；只有 join 返回后，才关闭 socket 和 pipes、销毁分片表、释放两个队列和 ring。写字节会让 select() 的等待条件满足；线程实际执行退出分支后，join 才完成。
 
-**代码身份：固定提交源码摘录，两个相邻析构函数，逐字连续。**
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：_destroy_recv_parts() 与 lcm_udpm_destroy()
@@ -816,7 +809,6 @@ static void lcm_udpm_destroy(lcm_udpm_t *lcm)
 
 先别急着复刻 ring allocator。最小版本可以用两种明晰的数据对象：
 
-**代码身份：教学最小例子，不是 LCM 上游源码。**
 
 ~~~cpp
 struct Partial {

@@ -17,7 +17,6 @@ Carrier 名和 modifier 纳入部署清单。动态组合会改变 framing、ack
 
 ## 持久连接
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```bash
 yarp connect --persist /atlas/state:o /atlas/state:i tcp
@@ -41,7 +40,6 @@ actual connection disappears
 
 这一区分解释了两个常见现象：命令在端口尚未启动时也可能返回成功，因为保存意图已经成功；端口重启后连接重新出现，也不是旧 socket 复活，而是名字服务根据意图创建了新连接。可用以下命令完成完整生命周期，而不是只会“添加”：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```bash
 # 添加；两端尚不存在也可以登记成功
@@ -61,7 +59,6 @@ yarp disconnect --persist /atlas/state:o /atlas/state:i
 
 查看端口连接：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```bash
 echo "[list] [in]" | yarp admin rpc /atlas/state:i
@@ -90,7 +87,6 @@ Name Server 能解析但 connect 失败，重点查目标 listener 与 Carrier�
 
 ### 一份可以直接使用的连接事件快照
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 #include <array>
@@ -172,7 +168,6 @@ private:
 
 `PortInfo` 是回调参数的借用引用，回调返回后不能保存其地址。`RouteEvent` 逐字段复制，把生命周期从 YARP 连接线程转移到应用队列。`ConnectionReporter` 自身也不是由 Port 所有；调用 `port.setReporter(reporter)` 后，它必须活得比所有可能回调更久。安全的成员声明顺序是让 reporter 在 port 之后析构，并让它一直存活到连接线程全部关闭：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 port.interrupt();
@@ -212,7 +207,6 @@ port.resetReporter();  // 此时 reporter 仍然存活
 
 一个可复用的接收器外壳应把这个顺序固化：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 class Receiver {
@@ -252,7 +246,6 @@ private:
 
 还要理解 `read()` 返回值的所有权。`BufferedPort<T>::read()` 返回的 `T*` 指向端口内部缓冲对象，接收线程借用它完成当前处理即可；不要把裸指针塞进异步 worker 队列。若数据必须跨过下一次读取或 Port 关闭，应复制成自有对象，或者把需要的字段转换成业务 DTO：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 while (auto* message = port_.read()) {

@@ -12,7 +12,6 @@ Publisher 的公开声明会先建立本地实体；网络上的控制面消息�
 
 公开调用：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 let publisher = session
     .declare_publisher("robot/pose")
@@ -32,7 +31,6 @@ Builder 在局部保存 key expression、encoding、priority、express、reliabi
 
 下面这条路径对应固定提交 `eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5` 中的 `Session::declare_publisher_inner`：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 acquire SessionState write lock
   -> verify primitives exists, else SessionClosed
@@ -53,7 +51,6 @@ acquire SessionState write lock
 
 固定提交 `eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5` 中 `Session::declare_publisher_inner` 的核心区段如下：
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `Session::declare_publisher_inner`。**
 ```rust
         let mut state = zwrite!(self.0.state);
         if state.primitives.is_none() {
@@ -119,7 +116,6 @@ acquire SessionState write lock
 
 固定提交里协议模式的枚举把 Current、Future 和两者合并的 CurrentFuture 区分开：
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `InterestMode`。**
 ```rust
 pub enum InterestMode {
     Final,
@@ -141,7 +137,7 @@ impl InterestMode {
 
 协议说明用两方时间线区分短暂枚举当前状态与订阅当前加未来状态：
 
-**代码身份：固定提交源码文档摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `InterestMode::CurrentFuture`。**
+对应的上游实现如下：
 ````text
 A                   B
 |     INTEREST      |
@@ -180,7 +176,6 @@ A                   B
 
 Zenoh 可让 twin publishers 共享一个 remote id：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 Publisher local id 10 ----+
                           +-> one remote Interest id 7
@@ -195,7 +190,6 @@ Publisher local id 11 ----+
 
 固定提交中，`Publisher::undeclare_impl` 先撤销本句柄的 matching listener，再把实体 id 交给 Session；真正是否还需要远端 Interest 由 SessionState 中其他 Publisher 的 remote id 决定：
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `Session::undeclare_publisher_inner`。**
 ```rust
 pub(crate) fn undeclare_publisher_inner(&self, pid: Id) -> ZResult<()> {
     let mut state = zwrite!(self.0.state);
@@ -237,7 +231,6 @@ pub(crate) fn undeclare_publisher_inner(&self, pid: Id) -> ZResult<()> {
 
 配置可声明更宽的聚合 key expression。例如多个具体 Publisher：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 robot/arm/joint/1/state
 robot/arm/joint/2/state
@@ -246,7 +239,6 @@ robot/arm/joint/3/state
 
 可以由一个聚合表达式代表：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 robot/arm/joint/*/state
 ```
@@ -265,7 +257,6 @@ Publisher 通常持 WeakSession、local id 和默认发送策略。Drop/undeclar
 
 固定提交中 Session 的公开句柄计数与底层 Arc 引用数分开：
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `Session::downgrade`、`Session::clone`、`Session::drop`、`WeakSession`。**
 ```rust
 impl Session {
     #[cfg(not(feature = "internal"))]
@@ -323,7 +314,6 @@ impl Drop for WeakSession {
 
 固定提交 `eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5` 中的 `Publisher` 将声明状态放在对象里，并在 Drop 时走 undeclare：
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `Publisher` 与 `Drop::drop`。**
 ```rust
 pub struct Publisher<'a> {
     pub(crate) session: WeakSession,
@@ -358,7 +348,7 @@ impl Drop for Publisher<'_> {
 
 这里 `Drop::drop` 只负责进入关闭流程；下面的短摘录说明实体 id 怎样返回 Session。`undeclare_on_drop` 必须先置为 false，因为后续清 listener 或 Session 操作可能失败，析构不能在展开时再重复执行同一操作：
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `Publisher::undeclare_impl`。**
+对应的上游实现如下：
 ```rust
 fn undeclare_impl(&mut self) -> ZResult<()> {
     // set the flag first to avoid double panic if this function panics
@@ -375,7 +365,6 @@ fn undeclare_impl(&mut self) -> ZResult<()> {
 
 `publisher.put(payload)` 将调用时 payload 与 Publisher 默认策略组合成一条 Push；它的 body 是 Put 或 Delete：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 key expression
 payload bytes
@@ -391,7 +380,6 @@ reliability
 
 但一次本地 `put` 不必经过网络 Face 才能到达同 Session 订阅者。固定提交的 `Session::resolve_put` 先在 SessionState 读锁下取得 primitives 与匹配的本地 callback 列表，随后释放锁，再构造 Push。若目标包含 Remote，就把 Push 交给 primitives；若本地也有订阅者，则保留这份 Push 并同步调用本地 callback。下面两段均为 `eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5` 中 `Session::resolve_put` 的固定源码摘录；中间省略的是时间戳、QoS 与 Push 字段构造。
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `Session::resolve_put`。**
 ```rust
         let state = zread!(self.0.state);
         let primitives = state.primitives()?;
@@ -406,7 +394,7 @@ reliability
 
 读锁中的不变量很具体：从同一份 Session 状态取得尚可用的 primitives、把 key 编为本 Session 使用的 WireExpr、按目的范围收集本地订阅回调。`drop(state)` 在 Push 构造以及后续外部调用之前显式释放 guard；若 callback 重入 Session API，持有 guard 会造成自我等待；慢 callback 也会持续占用读锁，让需要写锁的实体声明/撤销被迫等待。
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `Session::resolve_put`。**
+对应的上游实现如下：
 ```rust
         let has_local_callbacks = !callbacks.is_empty();
         if destination != Locality::SessionLocal {
@@ -465,7 +453,6 @@ reliability
 
 远端路径再经过 Face 提供的 Primitives 实现进入同一个路由函数。固定提交 `eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5` 中 `Face::send_push_consume` 的关键调用是：
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `Face::send_push_consume`。**
 ```rust
     #[inline]
     fn send_push_consume(&self, msg: &mut Push, reliability: Reliability, consume: bool) {
@@ -488,7 +475,6 @@ reliability
 
 网络消息携带的 key 可能是完整字符串，也可能是 scope id + suffix。`route_data()` 先用 source Face 的 mapping 查 scope prefix：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 WireExpr(scope=17, suffix=/state)
 source_face.mapping[17] = robot/arm/joint/1
@@ -505,7 +491,6 @@ Scope 未知时不能猜测字符串，消息被记录错误并丢弃。Scope �
 
 固定提交中的结构和关键方法如下。`OnceCell` 让同一个 `RoutingExpr` 第一次需要 Resource 或完整 key 时执行初始化，此后复用结果；`Cow` 可以是从 Resource 借来的 key，也可以是在没有精确 Resource 时新构造的 owned key。
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `RoutingExpr::{new,resource,compute_key_expr,key_expr,get_best_key}`。**
 ```rust
 pub(crate) struct RoutingExpr<'a> {
     prefix: &'a Arc<Resource>,
@@ -590,7 +575,6 @@ impl<'a> RoutingExpr<'a> {
 
 接下来这段固定提交源码展示：WireExpr 已经由来源 Face 的 mapping 恢复成 `RoutingExpr` 后，先过 ingress filter，再取得路由。来源为 `eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5` 中的 `route_data`。
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `route_data`。**
 ```rust
     let rtables = zread!(tables_ref.tables);
     let tables = &*rtables;
@@ -636,7 +620,6 @@ impl<'a> RoutingExpr<'a> {
 
 接下来是同一函数中从非空 Route 到实际出口发送的固定源码摘录。前面的代码已完成 ingress 判定与 route 查询；下面保留出口过滤、释放 Tables guard、消息克隆/改写和 Face send 的完整分支。
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `route_data`。**
 ```rust
     if !route.is_empty() {
         treat_timestamp!(
@@ -737,7 +720,6 @@ Route 的“下一跳”是 `Direction.dst_face`，不是最终订阅机器人�
 
 对每个 Resource，数据路由缓存的映射键是来源 `Region` 与经过 routing-context 映射后的 `NodeId`；缓存对象自己的 `version` 还必须等于当前 topology version。Resource 本身由外层 resource tree 选中，不会再作为 `Routes` 内部哈希键。若表达式没有 Resource context，固定实现不走此缓存而直接计算。命中时克隆 `Arc<Route>`：复制的是 Arc 句柄，route vector 和每个 destination 仍由不可变快照共享。
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 lookup attached Resource's Routes cache
   -> cached version matches and (source Region, mapped NodeId) exists: clone Arc<Route>
@@ -749,7 +731,6 @@ lookup attached Resource's Routes cache
 
 下面摘录的是固定源码 `eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5` 中的 `get_data_route` 与 `get_hat_data_route`。它显示两个层次：先以 Resource 的合并缓存查整条 Route；miss 时再逐个 routing region 查询该 Resource 下的 HAT 缓存，合并并按目标 Face 去重。
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `get_hat_data_route` 与 `get_data_route`。**
 ```rust
 #[inline]
 fn get_hat_data_route(
@@ -819,7 +800,6 @@ fn get_data_route(
 
 下一层不是抽象的“找订阅者”，而是 HAT 按其拓扑规则选择出边。下面展示 router HAT 的完整固定方法：局部 helper 先把订阅节点索引映射成树方向，再验证方向、图节点和 Face；外层方法遍历表达式的相交 Resource 并合并出口。peer、client、broker 各有自己的 `compute_data_route`，不能把这个算法推广成全部模式的共同规则。
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `Hat::compute_data_route` 与其局部 helper `insert_faces_for_subs`。**
 ```rust
     fn compute_data_route(
         &self,
@@ -909,7 +889,6 @@ RouteBuilder 以 `face.id` 作为去重键；对同一出口不会重复发相�
 
 `RwLock` 是读写锁：只读查询可以共享读 guard，更新要取得独占写 guard；同一时刻写 guard 会排除该缓存的其他读者和写者。它是同步锁而不是 async mutex，调用线程拿不到 guard 时不能通过 `.await` 让出；标准库实现可能短暂自旋，也可能让线程进入阻塞等待，后者才由 OS 调度器切换去运行其他 runnable 线程。这里尤其要分清两把锁：`route_data` 在 `TablesLock.tables` 上持有读 guard，而 `get_or_set_route` 再对某个 Resource 的 route cache 取得独立写 guard。miss 时并没有拿 Tables 写锁，但 route compute 确实在 Resource cache 写锁内。
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `get_or_set_route`。**
 ```rust
 pub(crate) fn get_or_set_route<T: Clone>(
     routes: &RwLock<Routes<T>>,
@@ -941,7 +920,6 @@ pub(crate) fn get_or_set_route<T: Clone>(
 
 可以把 Route 理解为：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 struct RouteEntry {
     destination: Arc<FaceState>,
@@ -958,7 +936,6 @@ type Route = Vec<RouteEntry>;
 
 源码中的最小真实下一跳对象并不含教学例子中的 `RoutingContext` 字段，而是固定提交 `eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5` 中的 `Direction`：
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `Direction` 与 `Route`。**
 ```rust
 #[derive(Clone, Debug)]
 pub(crate) struct Direction {
@@ -978,7 +955,6 @@ pub(crate) type Route = Vec<Direction>;
 
 在修改前必须确认当前代码拥有 message，不能修改其他调用者共享的对象。实现通过 consume/ownership 标记判断是否需要 clone。
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 one destination + owned message
   -> mutate wire expr in place
@@ -994,7 +970,6 @@ Rust 所有权帮助编译器阻止多个可变引用，却仍需业务层知道
 
 不同 Face 对同一 key 的 scope mapping 可能不同：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 Face A: scope 5 + /state
 Face B: scope 91 + /joint/1/state
@@ -1032,7 +1007,6 @@ Route 选择后，每个出口还可经过 egress filter/interceptor。Ingress �
 
 拓扑级变化影响面广时，递增 `routes_version`：旧 cache 不必立即遍历删除，下一次 lookup 发现 version 不符后 lazy clear/recompute。
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 local declaration change -> invalidate resource + match neighbors
 face/topology change      -> routes_version += 1
@@ -1044,7 +1018,6 @@ face/topology change      -> routes_version += 1
 
 概念流程：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 Tables read lock
   -> resolve source scope
@@ -1067,7 +1040,6 @@ for destination in route
 
 Publisher 有几项相邻配置，但它们进入实现的路径不同。固定提交 `eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5` 中 `Session::resolve_put` 把 Priority、CongestionControl 和 Express 写入 Push 的 QoS 扩展：
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `Session::resolve_put`。**
 ```rust
         let ext_qos = push::ext::QoSType::new(priority.into(), congestion_control, is_express);
         let mut push = Push {
@@ -1104,7 +1076,6 @@ Publisher 有几项相邻配置，但它们进入实现的路径不同。固定�
 
 `Reliability` 则在该固定提交中是 unstable API 参数：在 `resolve_put` 调用 Primitives 时单独传入，之后 `route_data` 的 `send_push` 闭包再把它交给目标 Face 的 Primitives。Publisher builder 自己也明确记载，这个值本身不触发网络重传：
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，符号 `PublisherPutBuilder::reliability`。**
 ```rust
     /// Changes the [`Reliability`](crate::qos::Reliability) to apply when routing the data.
     ///
@@ -1127,7 +1098,6 @@ Publisher 有几项相邻配置，但它们进入实现的路径不同。固定�
 
 ### 热路径性能模型
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 Tput = Session/entity lookup
      + Push construction

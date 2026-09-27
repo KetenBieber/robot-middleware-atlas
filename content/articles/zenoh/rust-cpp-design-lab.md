@@ -4,7 +4,6 @@ Zenoh 核心使用 Rust，而许多机器人应用通过 C 或 C++ API 接入。
 
 先把语言名词放到一个具体场景里。假设 C++ 相机节点声明了一个 Publisher，连续发布图像，然后让 Publisher 离开作用域：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```cpp
 {
   Publisher camera = session.DeclarePublisher("robot/camera/front");
@@ -21,7 +20,6 @@ Zenoh 核心使用 Rust，而许多机器人应用通过 C 或 C++ API 接入。
 
 本章后面的 `Arc`、`Weak`、Builder、RAII 和 FFI 都是在回答这四个问题。第一次阅读时，可以先把对象分成四层，不必立刻记住所有 Rust 类型：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 C++ RAII handle       负责“这个应用实体何时结束”
         |
@@ -47,7 +45,6 @@ shared SessionInner   被多个 Publisher/Subscriber 和后台任务共同使用
 
 一条声明和一条数据写入不是同一种路径：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 declare publisher:
 Builder -> SessionInner entity table -> primitives declaration
@@ -62,7 +59,6 @@ Publisher -> Session primitives -> WireExpr/resource lookup
 
 ## 一次实体声明跨越哪些边界
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 C++ Publisher RAII object
   -> C ABI opaque handle
@@ -78,7 +74,6 @@ C++ Publisher RAII object
 
 ## `Arc` 只提供共享寿命，不提供可变性
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 struct Session {
     inner: Arc<SessionInner>,
@@ -105,7 +100,6 @@ impl Clone for Session {
 
 ### `Mutex<T>` 与 `RwLock<T>` 的 guard 是借用令牌
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 let mut entities = inner.entities.write().await;
 entities.insert(id, state);
@@ -118,7 +112,6 @@ guard 的析构释放锁，它同时携带对被保护 T 的借用，因此安�
 
 异步任务常需回到 Session，却不应因此把 Session 永久保活：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 let session = Arc::downgrade(&inner);
 runtime.spawn(async move {
@@ -136,7 +129,6 @@ Weak 常用于 parent 回指、缓存边和后台观察任务。它不是避免�
 
 Zenoh API 常返回 builder，最终通过 `.await` 或同步解析使操作生效：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 let publisher = session
     .declare_publisher("robot/arm/state")
@@ -152,7 +144,6 @@ Builder 通常消费自身并返回新类型或最终实体。消费 `self` 可�
 
 这三个写法先不要理解成语法表。它们回答的是“调用函数时，函数拿走对象、暂时查看对象，还是暂时独占修改对象”。用同一个 Builder 对照最容易看清：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 let builder = session.declare_publisher("robot/arm/state");
 let builder = builder.priority(Priority::DataHigh); // 旧值被 move，新值返回
@@ -175,7 +166,6 @@ Builder 的最终提交还需要事务：分配 entity ID、规范化 KeyExpr、
 
 一个直觉化的 C++ 包装如下：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```cpp
 class Publisher final {
  public:
@@ -212,7 +202,6 @@ class Publisher final {
 
 ### C++ Builder 的单次提交
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```cpp
 class PublisherBuilder final {
 public:
@@ -243,7 +232,6 @@ private:
 
 C ABI 不应暴露 Rust 结构体布局：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```c
 typedef struct z_owned_publisher_t z_owned_publisher_t;
 
@@ -258,7 +246,6 @@ FFI 函数应先校验空指针和长度，再用 `slice::from_raw_parts` 建立
 
 ### `unsafe` 应压缩在最小边界
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 #[no_mangle]
 pub unsafe extern "C" fn z_publisher_put(
@@ -311,7 +298,6 @@ Rust 编译器能验证纯 Rust 借用，跨入 C ABI 后这些保证消失。FF
 
 一个 query 可能同时等待多个 reply。调用方超时后，需要区分：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 停止等待结果
   != 远端已停止计算
@@ -321,7 +307,6 @@ Rust 编译器能验证纯 Rust 借用，跨入 C ABI 后这些保证消失。FF
 
 因此 query 状态常需唯一 ID、完成标志、接收端和超时任务。完成路径、超时路径、Session 关闭路径都可能争夺“谁负责最后清理”。可用原子状态机保证仅一次完成：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 enum QueryState { Open, Completed, Cancelled }
 ```
@@ -330,7 +315,6 @@ enum QueryState { Open, Completed, Cancelled }
 
 可以把终态竞争收敛到一个函数：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 fn finish_query(inner: &QueryInner, reason: FinishReason) -> Option<FinishPlan> {
     let mut state = inner.state.lock().unwrap();
@@ -357,7 +341,6 @@ Drop 不能 `.await`，所以异步撤销通常只能向 runtime 投递命令或
 
 ## 锁不能跨越 `.await`
 
-**代码身份：错误示例；不是上游源码。**
 ```rust
 // 危险形态：等待期间一直持有路由表锁
 let mut tables = self.tables.write().await;
@@ -373,7 +356,6 @@ tables.mark_sent();
 
 下面的缩小模型保留 Zenoh 最关键的关系：多个实体共享 SessionInner，声明由表唯一拥有元数据，句柄 Drop 发起撤销，数据路径使用不可变发送计划。
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 type EntityId = u64;
 
@@ -411,7 +393,6 @@ SessionState 把“closing、ID 分配、实体表和路由版本”放在同一
 
 ### 声明事务
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 impl SessionInner {
     async fn declare_publisher(
@@ -452,7 +433,6 @@ ID 使用 `checked_add`，不能让溢出静默复用仍在使用的 ID。KeyExp
 
 ### put 路径只借用不可变计划
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 impl Publisher {
     async fn put(&self, payload: Bytes) -> Result<()> {
@@ -477,7 +457,6 @@ impl Publisher {
 
 ### Drop 发起幂等撤销
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 impl Drop for Publisher {
     fn drop(&mut self) {
@@ -496,7 +475,6 @@ impl Drop for Publisher {
 
 可以让 C ABI 使用 out-parameter 创建，避免在错误时返回半初始化值：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```c
 int z_declare_publisher(const z_session_t *session,
                         const char *key, size_t key_len,

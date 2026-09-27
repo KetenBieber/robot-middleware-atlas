@@ -8,7 +8,6 @@
 
 下面的 `switch` 是**错误的教学示例**，不是固定提交源码：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 /* 错误示例：每个公共操作都要知道所有传输类型。 */
@@ -28,7 +27,6 @@ int publish(Bus *bus, const char *channel, const void *data, size_t size) {
 
 固定版本的 C 核心用以下方法表约定 provider 的操作：
 
-**代码身份：固定提交源码摘录，来自 `lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864`，符号 `_lcm_provider_vtable_t`，逐字连续定义。**
 
 ```c
 struct _lcm_provider_vtable_t {
@@ -42,29 +40,122 @@ struct _lcm_provider_vtable_t {
 };
 ```
 
-可以把它看作手写的接口类：
+如果第一次看到 `(*publish)(...)`，先不要把它当成“复杂 C 语法”。我们其实只需要解决两个问题：`publish` 的调用者不知道当前装的是 UDP 还是日志；不同实现又必须保留各自的 socket、文件句柄或队列。前者要求**统一操作签名**，后者要求**实例状态仍属于具体实现**。
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
+把这两件事分开，就得到 `(vtable, provider)` 这一对值。`vtable` 指向一组同签名的函数，`provider` 指向实际状态。调用时，核心把实例指针显式传回函数；这恰好对应 C++ 非静态成员函数隐含的 `this`：
 
-```cpp
-class Provider {
- public:
-  virtual ~Provider() = default;
-  virtual int Subscribe(std::string_view channel) = 0;
-  virtual int Publish(std::string_view channel,
-                      std::span<const std::byte> data) = 0;
-  virtual int HandleOne() = 0;
-  virtual int FileDescriptor() = 0;
+~~~c
+/* 教学缩写：展示 C API 的运行时分派，不是 LCM 逐字源码。 */
+int bus_publish(lcm_t *bus, const char *channel,
+                const void *bytes, unsigned int length) {
+    return bus->vtable->publish(bus->provider, channel, bytes, length);
+}
+~~~
+
+这里有两次间接访问，而不是把消息“复制进一个多态对象”：先从 `bus` 取方法表，再按 `publish` 的固定偏移拿到函数地址，最后把同一个 `bus->provider` 原样传进去。方法表本身可以放在静态存储区，每个 Bus 无需保存一份函数指针数组。真正的序列化已经在调用公共 `publish` 之前完成，函数指针这一跳不会因此再复制 payload。
+
+### 先写一个能运行的 C++17 缩小版
+
+C++ 的虚函数也能完成运行期分派，但如果只展示 `virtual Publish() = 0`，容易把**动态选择行为**和**负责对象寿命**混在一起。下面刻意保留 C 风格的函数表，并把资源所有权放进另一只 C++ 对象。它与 LCM 使用同一个设计原理，但它是独立的教学实现，不依赖 GLib 或 LCM。
+
+~~~cpp
+#include <cassert>
+#include <string>
+#include <string_view>
+#include <utility>
+
+// 方法表仅说明可以执行的动作，不拥有具体传输状态。
+struct Ops {
+    bool (*publish)(void*, std::string_view channel,
+                    std::string_view payload);
+    void (*destroy)(void*) noexcept;
 };
-```
 
-C 版本把对象指针与方法表分开保存。每个函数的第一个参数相当于 C++ 隐式的 `this`。
+struct MemoryProvider {
+    std::string last;
+};
 
+bool memory_publish(void* raw, std::string_view channel,
+                    std::string_view payload) {
+    auto& self = *static_cast<MemoryProvider*>(raw);
+    self.last = std::string(channel) + ":" + std::string(payload);
+    return true;
+}
+
+void memory_destroy(void* raw) noexcept {
+    delete static_cast<MemoryProvider*>(raw);
+}
+
+const Ops memory_ops{&memory_publish, &memory_destroy};
+
+class Bus {
+public:
+    Bus(void* state, const Ops* ops) noexcept
+        : state_(state), ops_(ops) {}
+
+    ~Bus() { reset(); }
+
+    Bus(const Bus&) = delete;
+    Bus& operator=(const Bus&) = delete;
+
+    Bus(Bus&& other) noexcept
+        : state_(std::exchange(other.state_, nullptr)),
+          ops_(std::exchange(other.ops_, nullptr)) {}
+
+    Bus& operator=(Bus&& other) noexcept {
+        if (this != &other) {
+            reset();
+            state_ = std::exchange(other.state_, nullptr);
+            ops_ = std::exchange(other.ops_, nullptr);
+        }
+        return *this;
+    }
+
+    bool publish(std::string_view channel, std::string_view payload) {
+        return state_ && ops_->publish(state_, channel, payload);
+    }
+
+private:
+    void reset() noexcept {
+        if (state_) ops_->destroy(state_);
+        state_ = nullptr;
+        ops_ = nullptr;
+    }
+
+    void* state_ = nullptr;      // 只有持有者负责交给 destroy
+    const Ops* ops_ = nullptr;   // 借用静态方法表
+};
+
+int main() {
+    auto* memory = new MemoryProvider;
+    Bus bus(memory, &memory_ops);
+    assert(bus.publish("ARM_STATE", "42"));
+    assert(memory->last == "ARM_STATE:42");
+
+    Bus next = std::move(bus);
+    assert(!bus.publish("ARM_STATE", "43"));  // 旧句柄已失效
+    assert(next.publish("ARM_STATE", "44"));
+}  // next 析构一次，memory_destroy 删除 MemoryProvider
+~~~
+
+这份代码可以直接使用 `g++ -std=c++17 -Wall -Wextra` 编译。先看最容易被忽略的四条对象不变量：
+
+1. `Bus` 是唯一 owner：禁用复制，允许移动。`std::move` **只把左值转换成可移动的值类别**，实际转移由移动构造里的 `std::exchange` 完成；它在取走源指针的同时把源句柄置空，保证只有新 owner 负责调用 `destroy`。
+2. `Ops` 不拥有 `MemoryProvider`；这里它是静态生存期的 `memory_ops`，所以 `Bus` 内保存 `const Ops*` 安全。如果把指向局部变量 `Ops local` 的地址塞给 Bus，再从函数返回，就会留下悬空方法表指针，即使 `state_` 仍然有效也无法调用。
+3. `void*` 是刻意进行的类型擦除：调用端不知道 `MemoryProvider` 的大小和成员；`memory_publish` 用 `static_cast` 恢复真实类型，但它**没有运行时类型检查**。若把另一类对象和这张方法表拼成一对，编译器不会发现，解引用就是未定义行为。因此“哪个 factory 返回的状态配哪张表”是必须由构造层守住的不变量。
+4. `std::string_view` 只借用消息内存；此处 `memory_publish` 立即复制成 `std::string`，所以调用方局部字符串可以在返回后销毁。若把 view 放进后台队列，它就可能在调用方销毁 payload 后悬空。LCM 的公共边界使用 `const void* + length`，同样不能凭参数类型推断异步传输是否已经取得独立 payload 所有权。
+
+这里 `destroy` 是普通函数指针而不是 C++ `virtual` 析构函数，所以不依赖对象内部的隐式 vptr；但整个 `Ops` 表格仍须按约定的布局编译。上述 C++ 玩具接口包含 `std::string_view`，**不应用作跨编译器的 C ABI**：它只是用来验证移动、类型擦除和析构；LCM 的实际边界使用 C 指针、整数和不透明类型。
+
+### 什么时候使用虚函数，什么时候保留显式方法表
+
+若运行时只在一个统一 C++ ABI 的进程里扩展传输，基类 `virtual publish` 加 `std::unique_ptr<Provider>` 更容易维护：对象的动态类型决定虚函数表，析构自动沿虚析构函数释放正确的派生类。但对外提供稳定 C ABI、需要 C/Python/Java 绑定，或希望核心完全隐藏各 provider 头文件时，`void*/lcm_provider_t*` 加显式函数表的边界更清楚。
+
+这一步才可以把设计归纳为 **Strategy**：同一个 Bus 可以通过不同 provider 满足同一组操作。URL 在创建时选择 `provider_info` 和方法表，又对应 **Factory**。两者并不等价：Factory 决定对象如何出生，Strategy 决定出生后 `publish` 如何执行，RAII 再决定什么时候安全销毁。LCM 的 provider 随 URL 创建后不会因每条消息自动切换；要替换它，应新建相应实例并协调旧实例的收尾，而不是在有活跃回调时直接重写 `lcm->vtable`。
 ## 不透明 provider 指针完成类型擦除
 
 核心层只声明：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 typedef struct _lcm_provider_t lcm_provider_t;
@@ -72,7 +163,6 @@ typedef struct _lcm_provider_t lcm_provider_t;
 
 它不知道结构体字段。UDPM 实现可以把自己的 `lcm_udpm_t*` 转成 `lcm_provider_t*` 返回，调用时再转回：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 static int lcm_udpm_publish(lcm_udpm_t *udpm, ...);
@@ -97,7 +187,6 @@ static lcm_provider_vtable_t udpm_vtable = {
 
 每个实现向临时数组加入一项：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 struct _lcm_provider_info_t {
@@ -136,7 +225,6 @@ UDPM 可以从 target 解析 multicast 地址和端口，从 args 读取 TTL、�
 
 公共函数：
 
-**代码身份：固定提交源码摘录，来自 `lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864`，符号 `lcm_publish()`，逐字连续函数体。**
 
 ```c
 return lcm->vtable->publish(
@@ -168,7 +256,6 @@ Provider `handle()` 不负责无限事件循环。一次调用通常消费一条
 
 这个粒度允许应用控制公平性：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 while (running) {
@@ -196,7 +283,6 @@ Windows 上没有完全相同的 POSIX pipe/select 语义，因此内部封装 `
 
 Provider 收到消息后需要使用核心订阅表，但不应知道 `handlers_map` 的布局。`lcm_internal.h` 暴露三个窄函数：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 int lcm_try_enqueue_message(lcm_t*, const char* channel);
@@ -273,7 +359,6 @@ C++ 虚基类提供更强语言支持，但跨共享库、跨编译器或跨语�
 
 若外部 provider 可以独立编译，直接在 vtable 中间插入字段会改变后续函数指针偏移。更稳健的设计通常加入：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 struct provider_vtable {
@@ -285,7 +370,6 @@ struct provider_vtable {
 
 新核心可以根据 `struct_size` 判断尾部方法是否存在；旧 provider 仍保持前缀兼容。也可以让 provider 导出单一入口：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 const provider_vtable* provider_get_api(uint32_t requested_version);
@@ -297,7 +381,6 @@ LCM 当前内建 provider 随同核心一起编译，版本错配风险较低。
 
 可以用以下结构实现最小 provider 层：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 typedef struct bus bus_t;

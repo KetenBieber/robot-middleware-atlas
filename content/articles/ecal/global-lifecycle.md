@@ -92,7 +92,6 @@ Gate 继续强持有 PublisherImpl/SubscriberImpl；Reader layer 强持有其 tr
 
 下面直接看固定提交中的 `CGlobals::Initialize()`。这是函数主体的连续源码摘录，保留可执行语句、略去原注释；它展示 gate、registration、reader layer 的创建，线程启动、`initialized` 发布和 TimeGate 创建顺序。平台编译开关决定部分分支是否参与当前构建：
 
-**固定提交源码摘录（eCAL `1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，`CGlobals::Initialize`）：**
 
 ```cpp
 bool CGlobals::Initialize(unsigned int components_)
@@ -290,7 +289,7 @@ SubGate `Stop()` 清空 topic multimap，释放 SubscriberImpl strong pointer。
 
 关闭顺序来自同一函数，而不是只靠上面的列表推测。以下摘录保留 `Finalize()` 的全部可执行语句，省去原注释：
 
-**固定提交源码摘录（eCAL `1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，`CGlobals::Finalize`）：**
+接着看 `CGlobals::Finalize` 的真实实现：
 
 ```cpp
 bool CGlobals::Finalize()
@@ -411,7 +410,6 @@ SHM observer、registration receiver、provider 周期线程和 TCP executor 都
 
 固定版本的 `CDataWriterTCP` 把 executor 放在静态 `shared_ptr` 中，并用静态 mutex 保护首次创建。第一个 TCP writer 的 `thread_pool_size` 决定这份 executor 的线程数；随后创建的 writer 复用同一个对象。相关连续源码摘录如下：
 
-**固定提交源码摘录（`CDataWriterTCP` 静态 executor 创建片段）：**
 
 ```cpp
 std::mutex                            CDataWriterTCP::g_tcp_writer_executor_mtx;
@@ -437,7 +435,6 @@ CDataWriterTCP::CDataWriterTCP(const eCAL::eCALWriter::TCP::SAttributes& attr_) 
 
 `tcp_pubsub` 固定子模块提交 `352e711b9ef10fec42ba7536bda244f43bf092cc` 中，公开 `Publisher` 析构会调用 `Publisher_Impl::cancel()`。后者关闭 acceptor、取消等待中的 accept，并在会话列表锁内复制 `shared_ptr<PublisherSession>` 快照，解锁后逐个取消 session：
 
-**固定提交源码摘录（tcp_pubsub@`352e711b9ef10fec42ba7536bda244f43bf092cc`，`Publisher_Impl::cancel()` 完整函数）：**
 
 ```cpp
 void Publisher_Impl::cancel()
@@ -484,7 +481,6 @@ executor:       handler runs -> session.start() -> append to sessions -> accept 
 
 executor 自己的关闭发生在它的析构函数里，而不是每个 eCAL `Finalize()` 里。其固定源码明确调用 `stop()`：
 
-**固定提交源码摘录（tcp_pubsub@`352e711b9ef10fec42ba7536bda244f43bf092cc`，`Executor::~Executor()` 完整函数）：**
 
 ```cpp
 Executor::~Executor()
@@ -495,7 +491,7 @@ Executor::~Executor()
 
 子模块中的 `Executor_Impl::stop()` 完整函数还会删除 work guard 并停止 `io_context`：
 
-**固定提交源码摘录（`Executor_Impl::stop()` 完整函数）：**
+接着看 `Executor_Impl::stop()` 的真实实现：
 
 ```cpp
 void Executor_Impl::stop()
@@ -514,7 +510,7 @@ void Executor_Impl::stop()
 
 worker 启动片段揭示了另一个所有权关系：每个线程捕获 `shared_from_this()`，因此 `Executor_Impl` 本体至少活到这些线程退出 `run()` 并释放捕获副本。下面是 `Executor_Impl::start()` 中创建线程的连续片段：
 
-**固定提交源码摘录（`Executor_Impl::start()` 中的线程创建语句）：**
+接着看 `Executor_Impl::start()` 的真实实现：
 
 ```cpp
 for (size_t i = 0; i < thread_count; i++)
@@ -550,7 +546,6 @@ for (size_t i = 0; i < thread_count; i++)
 
 固定版本的 `CSubscriberImpl::Read()` 对负 timeout 使用谓词 `m_read_buf_received` 永久等待；析构函数没有相应的 shutdown predicate/`notify_all`。同步 `Read()` 是 eCAL v5 兼容 facade 暴露的 `ReceiveBuffer()` 路径：facade 以 `shared_ptr` 成员持有 Impl，但调用 `Read()` 时没有先复制出一份局部强引用。因此，“Impl 一定因 Read 局部强引用而延迟析构”不是源码事实。能确定的是：只要 facade 仍持有 Impl，阻塞中的 `Read(-1)` 不会因 Gate 注销或 Runtime Finalize 被通知退出；若应用先 join 这个读取线程，且没有新样本，join 会一直等。若另一个线程同时在同一 facade 上调用 `Destroy()`，它会注销并 reset 该共享成员，而 facade 没有为 `ReceiveBuffer()` 与 `Destroy()` 建立互斥；调用方必须自行串行化生命周期，否则既可能悬挂，也不能证明在途 `Read()` 的 `this` 仍有效。下方同时展示 v5 facade 和 Impl 的真实等待/析构代码。
 
-**固定提交源码摘录（eCAL `1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，`CSubscriberImpl::~CSubscriberImpl` 与 `CSubscriberImpl::Read`）：**
 
 ```cpp
 CSubscriberImpl::~CSubscriberImpl()
@@ -602,7 +597,6 @@ bool CSubscriberImpl::Read(std::string& buf_, long long* time_, int rcv_timeout_
 
 v5 facade 的拥有关系和直接调用可由下面两段固定提交源码看出：
 
-**固定提交源码摘录（eCAL `1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，v5 `CSubscriber::Destroy`、`CSubscriber::ReceiveBuffer` 与 Impl 成员）：**
 
 ```cpp
 bool CSubscriber::Destroy()

@@ -4,7 +4,6 @@ Zenoh C++ API 是 header-only binding，但实际运行仍依赖 `zenoh-c` 或 `
 
 ## 先理解四层依赖
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 业务代码
   -> zenoh-cpp：C++17 类型、RAII 句柄、回调适配
@@ -17,7 +16,6 @@ Zenoh C++ API 是 header-only binding，但实际运行仍依赖 `zenoh-c` 或 `
 
 ## 安装关系
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 application
   -> zenoh-cpp headers
@@ -51,7 +49,6 @@ zenoh-pico 后端则查找 pico package 并链接 `zenohcxx::zenohpico`。配置
 
 建议工程固定以下结构：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 zenoh_demo/
 ├── CMakeLists.txt
@@ -99,7 +96,6 @@ z_get -s 'demo/**'
 
 ### 一个最小可审计拓扑
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 robot client --connect--> router tcp/10.0.0.10:7447 <--connect-- edge client
 ```
@@ -112,7 +108,6 @@ Router 使用 JSON5/YAML 配置文件启动，Client 明确 mode 与 connect end
 
 Session、Publisher、Subscriber 等句柄代表后端资源。它们通常应移动而非随意复制：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```cpp
 auto session = zenoh::Session::open(std::move(config));
 auto publisher = session.declare_publisher(zenoh::KeyExpr("robot/state"));
@@ -125,7 +120,6 @@ auto worker = PublisherWorker(std::move(publisher));
 
 Session 应在普通程序作用域内显式销毁，Publisher/Subscriber/Queryable 先于 Session 释放。避免把 Session 作为静态全局对象留到 `atexit`，因为 C++ binding 后端和 Rust runtime 的退出顺序可能已经拆除线程局部状态。
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 main scope
   Session

@@ -49,7 +49,6 @@ MQTT callback
 
 下面回到 `CheckYamlValidity()`。这段固定提交源码摘录覆盖整个校验函数，能同时看见三处容易被一行教学代码掩盖的状态问题。
 
-**固定提交源码摘录（`eclipse-ecal/ecal-mqtt-bridge@a377003d2a83f8c693b1284378b79070e001254a`，`CheckYamlValidity`）：**
 
 ```cpp
 bool CheckYamlValidity(std::map<std::string,Broker>& brokers,
@@ -167,7 +166,7 @@ bool CheckYamlValidity(std::map<std::string,Broker>& brokers,
 
 下面这段来自 `EcalTopic::CheckValidity`；`MqttTopic::CheckValidity` 与 `Broker::CheckValidity` 也使用同样的 QoS 条件。
 
-**固定提交源码摘录（`eclipse-ecal/ecal-mqtt-bridge@a377003d2a83f8c693b1284378b79070e001254a`，`EcalTopic::CheckValidity`）：**
+接着看 `EcalTopic::CheckValidity` 的真实实现：
 
 ```cpp
 bool EcalTopic::CheckValidity()
@@ -226,7 +225,7 @@ main
 
 下面把“mapping 变成运行时对象”的实际函数直接放在正文里。输入是构造函数保存在 Bridge 中的两组配置 vector；输出不是一个抽象 route，而是若干 Subscriber/Publisher、两类 callback 注册和全局 eCAL runtime。
 
-**固定提交源码摘录（`eclipse-ecal/ecal-mqtt-bridge@a377003d2a83f8c693b1284378b79070e001254a`，`Bridge::initEcal`）：**
+接着看 `Bridge::initEcal` 的真实实现：
 
 ```cpp
 bool Bridge::initEcal(int argc, char** argv)
@@ -284,7 +283,6 @@ bool Bridge::initEcal(int argc, char** argv)
 
 固定版本的 `Bridge::on_connect` 把连接成功分支完整写在 callback 里；真正的输入是 broker 返回码，副作用是逐项发起三类 MQTT subscription，最后才把 `is_connected_to_mqtt_broker` 发布为 true。
 
-**固定提交源码摘录（`eclipse-ecal/ecal-mqtt-bridge@a377003d2a83f8c693b1284378b79070e001254a`，`Bridge::on_connect`）：**
 
 ```cpp
 void Bridge::on_connect(int rc)
@@ -449,7 +447,7 @@ Mosquitto loop thread
 
 先沿 MQTT→eCAL 方向看完整 callback。它收到的 `message` 是 Mosquitto 回调参数；函数没有把整个消息放进 Bridge 自己的队列，而是当场扫描 route、更新类型元数据或调用 eCAL `Send()`。
 
-**固定提交源码摘录（`eclipse-ecal/ecal-mqtt-bridge@a377003d2a83f8c693b1284378b79070e001254a`，`Bridge::on_message`）：**
+接着看 `Bridge::on_message` 的真实实现：
 
 ```cpp
 void Bridge::on_message(const struct mosquitto_message* message)
@@ -535,7 +533,7 @@ void Bridge::on_message(const struct mosquitto_message* message)
 
 反方向的 callback 更短，也把另一个失败边界暴露得很清楚。
 
-**固定提交源码摘录（`eclipse-ecal/ecal-mqtt-bridge@a377003d2a83f8c693b1284378b79070e001254a`，`Bridge::ecalMessageReceived`）：**
+接着看 `Bridge::ecalMessageReceived` 的真实实现：
 
 ```cpp
 void Bridge::ecalMessageReceived(const char* topic_name_, const struct eCAL::SReceiveCallbackData* data_)
@@ -676,7 +674,6 @@ struct BridgeEnvelopeV1 {
 
 固定源码把字段声明顺序和启动位置写得很直接。下面展示同一条构造链：Bridge 声明 worker 与停止位，`Bridge::Bridge` 在成员初始化阶段启动线程，构造函数体随后才调用 `initialize()`。
 
-**固定提交源码摘录（`eclipse-ecal/ecal-mqtt-bridge@a377003d2a83f8c693b1284378b79070e001254a`，Bridge 成员与 `Bridge::Bridge`）：**
 
 ```cpp
 std::thread                               mqtt_desc_thread;
@@ -705,7 +702,7 @@ C++ 成员按**类声明顺序**初始化，不按初始化列表中的书写位
 
 线程进来后会先检查映射，再根据两个 atomic 决定是否发布 metadata；它在两把 mutex 的作用域里调用 MQTT `publish()`，每项之后 sleep 10 ms，外层最长每 100 ms 轮询一次停止位。完整函数揭示了锁域和实际等待方式。
 
-**固定提交源码摘录（`eclipse-ecal/ecal-mqtt-bridge@a377003d2a83f8c693b1284378b79070e001254a`，`Bridge::descriptorUpdateLoop`）：**
+接着看 `Bridge::descriptorUpdateLoop` 的真实实现：
 
 ```cpp
 void Bridge::descriptorUpdateLoop()
@@ -798,7 +795,6 @@ broker 断线时不能反复无界创建重连任务。需要单一连接状态�
 
 最后把源码实际析构顺序摊开。它先停止并 join descriptor worker，再停止 MQTT loop，随后清理 MQTT 全局库、逐个 delete eCAL 实体，最后 Finalize eCAL：
 
-**固定提交源码摘录（`eclipse-ecal/ecal-mqtt-bridge@a377003d2a83f8c693b1284378b79070e001254a`，`Bridge::~Bridge`）：**
 
 ```cpp
 Bridge::~Bridge(void)
@@ -827,7 +823,6 @@ Bridge::~Bridge(void)
 
 这里必须把桥接程序和 eCAL 库分开核验。桥接仓库说明它至少需要 eCAL 5.11.0，而固定提交的 CMake 声明只按包名查找依赖：
 
-**固定提交源码摘录（`eclipse-ecal/ecal-mqtt-bridge@a377003d2a83f8c693b1284378b79070e001254a`，eCAL 构建依赖声明）：**
 
 ```cmake
 find_package(eCAL REQUIRED)
@@ -835,7 +830,6 @@ find_package(eCAL REQUIRED)
 
 这行没有版本约束或 `EXACT`，所以桥接 commit 不能单独说明构建时选中了哪个 eCAL 补丁版。`delete CSubscriber*` 的内部同步语义也不能只靠桥接源码证明。为了看清 API 代际差别，下面对照另一个固定 eCAL commit：它同时包含 v6 公共 API 和 v5 兼容层。v6 `CSubscriber` 析构只从 SubGate 注销：
 
-**固定提交源码摘录（`eclipse-ecal/ecal@1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，v6 `CSubscriber::~CSubscriber`）：**
 
 ```cpp
 CSubscriber::~CSubscriber()
@@ -850,7 +844,7 @@ CSubscriber::~CSubscriber()
 
 同一 commit 的 v5 兼容 façade 走另一条销毁路径：它先移除 receive callback，再从 SubGate 注销 reader，最后释放实现对象：
 
-**固定提交源码摘录（同一 eCAL commit，v5 `CSubscriber::Destroy`）：**
+接着看 `CSubscriber::Destroy` 的真实实现：
 
 ```cpp
 bool CSubscriber::Destroy()
@@ -874,7 +868,7 @@ bool CSubscriber::Destroy()
 
 在该 eCAL commit 中，`CSubGate::ApplySample` 会先把匹配的 `shared_ptr<CSubscriberImpl>` 复制到局部 vector、释放 Gate 锁，再调用实现对象；Gate 注销不能撤销已经取得强引用的那次调用。`CSubscriberImpl::ApplySample` 则从函数入口持有 `m_receive_callback_mutex` 到用户 callback 返回。v5 `RemReceiveCallback()` 最终清空的正是这把锁保护的函数对象：
 
-**固定提交源码摘录（同一 eCAL commit，`CSubscriberImpl::ApplySample`）：**
+接着看 `CSubscriberImpl::ApplySample` 的真实实现：
 
 ```cpp
 size_t CSubscriberImpl::ApplySample(const Payload::TopicInfo& topic_info_, const char* payload_, size_t size_, long long id_, long long clock_, long long time_, size_t /*hash_*/, eTLayerType layer_)
@@ -981,7 +975,6 @@ size_t CSubscriberImpl::ApplySample(const Payload::TopicInfo& topic_info_, const
 
 源码表明 callback 使用的是 `payload_` 借用指针：`SReceiveCallbackData` 只把该地址与长度交给用户，不复制 payload；同步 callback 返回前它仍有效。更关键的是最外层 `lock` 在整个函数返回时才析构，callback 分支还会嵌套取得 `m_connection_map_mtx`。因此由另一个线程执行的 `RemoveReceiveCallback()` 要先等当前执行退出，再清空回调；后续样本拿到锁时会读到空函数对象。
 
-**固定提交源码摘录（同一 eCAL commit，`CSubscriber::RemReceiveCallback` 与 `CSubscriberImpl::RemoveReceiveCallback`）：**
 
 ```cpp
 bool CSubscriber::RemReceiveCallback()

@@ -8,7 +8,6 @@ Zenoh 没有把 Query 简化成一次 RPC。一个查询可以同时命中本进
 
 先把公开对象与内部状态放在一条链上：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 应用
   ├─ declare_queryable("robot/**")
@@ -37,7 +36,6 @@ nb_final == 0 ──────────────────────
 
 公开 API 使用 builder 收集配置：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 let queryable = session
     .declare_queryable("robot/**")
@@ -51,7 +49,6 @@ while let Ok(query) = queryable.recv_async().await {
 
 内部路径可缩写为：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 QueryableBuilder::wait / IntoFuture
   -> handler.into_handler()
@@ -72,7 +69,6 @@ QueryableBuilder::wait / IntoFuture
 
 核心状态近似如下：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 struct QueryableState {
     id: EntityId,
@@ -93,7 +89,6 @@ struct QueryableState {
 
 请求方的典型代码是：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 let replies = session
     .get("robot/arm/state")
@@ -112,7 +107,6 @@ while let Ok(reply) = replies.recv_async().await {
 
 内部建立顺序非常重要：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 Session::query(...)
   1. 规范化 selector、target、consolidation、timeout
@@ -133,7 +127,6 @@ Session::query(...)
 
 `QueryState` 可抽象为：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 struct QueryState {
     nb_final: usize,
@@ -205,14 +198,12 @@ timeout 分支用 `remove(&qid)` 争取唯一回收权，成功取得 QueryState
 
 当 `Locality::Any` 同时启用本地与远端分发时，`nb_final` 初始化为 2；只走一个方向时初始化为 1。
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 let nb_final = if destination == Locality::Any { 2 } else { 1 };
 ```
 
 这不是“最多等待两条 Reply”。每个方向都可以产生任意数量的 Reply，但必须恰好产生一个 Final：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 本地路径: Reply, Reply, Final ─┐
                                ├─ nb_final: 2 -> 1 -> 0 -> 完成
@@ -232,7 +223,6 @@ Final 因此是控制消息，不是空 Reply。少一个 Final，请求会一�
 
 实现不会在锁内直接调用 callback，而是克隆轻量的 `(entity_id, callback)` 列表：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 let callbacks = {
     let state = self.0.state.read();
@@ -278,7 +268,6 @@ let queryables = state
 
 每个匹配 callback 收到一个 `Query`，这些 Query 共享同一个 `Arc<QueryInner>`：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 pub struct Query {
     inner: Arc<QueryInner>,
@@ -299,7 +288,6 @@ impl Drop for QueryInner {
 
 该设计允许 callback 把 Query 移入异步任务：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 move |query: Query| {
     tokio::spawn(async move {
@@ -318,7 +306,6 @@ move |query: Query| {
 
 以下固定提交中的析构体展示完成信号从哪发出；它的调用时刻取决于最后一个 `Arc<QueryInner>` owner 何时释放。
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，`zenoh/src/api/queryable.rs`，`QueryInner::drop`，L151–L158。**
 ```rust
 impl Drop for QueryInner {
     fn drop(&mut self) {
@@ -370,7 +357,6 @@ fn send_response_final(&self, msg: &mut ResponseFinal) {
 
 源 Face 上的 `src_qid` 只在该 Face 的命名空间内唯一。路由节点向多个下游 Face 扇出时，为每个方向分配新的 `dst_qid`：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 来源 Face: Request(src_qid=7)
   -> key expression 解析与 query route 计算
@@ -381,7 +367,6 @@ fn send_response_final(&self, msg: &mut ResponseFinal) {
 
 返回路径执行逆映射：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 Face A: Response(dst_qid=41)
   -> pending_queries[41]
@@ -393,7 +378,6 @@ Face A: Response(dst_qid=41)
 
 扇出完成判定再次利用 `Arc`。所有 pending entry 共享一个 `Arc<Query>`；某方向收到 Final 后删除 entry 并取消该方向的清理任务。当最后一个方向完成时，`Arc::into_inner` 才能取得唯一所有权，并向来源发送唯一的上游 Final。
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 Arc<Query> strong refs
   来源临时引用       -- 路由建立后释放
@@ -559,4 +543,3 @@ Session 为每个 Query 启动 timeout task。到期后，它以 qid 从 `querie
 8. 最后实现 `Latest` 等 consolidation 策略。
 
 这条顺序先固定生命周期不变量，再增加路由和便利 API。Query 系统最难修复的错误通常不是匹配错一个 key，而是某条失败路径没有发 Final，导致状态永久留在 map 中。
-

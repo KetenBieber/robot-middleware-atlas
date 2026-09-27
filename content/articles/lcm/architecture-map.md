@@ -51,7 +51,6 @@ LCM 的强项是小而清晰，不是隐藏所有分布式问题。选择它时�
 
 从公共 API 进入可替换传输的最短路径是 `lcm_publish()`。调用者把 channel 与编码后的字节传入，核心持有当前 provider 和对应方法表；以下是固定提交中的完整函数。
 
-**代码身份：固定提交源码摘录，来自 `lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864`，符号 `lcm_publish()`，逐字连续函数体。**
 
 ```c
 int lcm_publish(lcm_t *lcm, const char *channel, const void *data, unsigned int datalen)

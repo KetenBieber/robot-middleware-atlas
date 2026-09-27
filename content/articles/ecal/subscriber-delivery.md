@@ -55,7 +55,6 @@ SubGate 是多层共同入口。它先得到 topic name，再查本进程所有�
 
 `CSubGate::ApplySample()` 在 shared lock 下只完成查找与 shared pointer 复制。下面是该函数从查找至返回的固定提交源码摘录：
 
-**固定提交源码摘录（`CSubGate::ApplySample()`）：**
 
 ```cpp
 bool CSubGate::ApplySample(const Payload::TopicInfo& topic_info_, const char* buf_, size_t len_, long long id_, long long clock_, long long time_, size_t hash_, eTLayerType layer_)
@@ -123,7 +122,6 @@ if (receive_callback) {
 
 下面是同一入口的固定提交连续源码摘录，输入是 reader layer 传来的 `TopicInfo`、借用 payload 指针及 publisher clock。保留完整 `CSubscriberImpl::ApplySample()` 控制流，省略范围为零。
 
-**固定提交源码摘录（`CSubscriberImpl::ApplySample()`）：**
 
 ```cpp
 size_t CSubscriberImpl::ApplySample(const Payload::TopicInfo& topic_info_, const char* payload_, size_t size_, long long id_, long long clock_, long long time_, size_t /*hash_*/, eTLayerType layer_)
@@ -350,7 +348,6 @@ Read     -> returns B
 
 固定提交的 `CSubscriberImpl::Read()` 实际使用 `m_read_buf_received` 作为唯一等待谓词。下面是源码摘录：
 
-**固定提交源码摘录（`CSubscriberImpl::Read()`）：**
 
 ```cpp
 bool CSubscriberImpl::Read(std::string& buf_, long long* time_ /* = nullptr */, int rcv_timeout_ms_ /* = 0 */)

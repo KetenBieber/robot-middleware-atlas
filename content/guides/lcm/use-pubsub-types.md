@@ -20,7 +20,6 @@ state_t object
 
 ## 类型定义
 
-**代码身份：教学用 `.lcm` schema 示例，不是仓库固定提交中的生成结果。**
 
 ```text
 package atlas;
@@ -36,7 +35,6 @@ struct state_t {
 
 生成 C++：
 
-**代码身份：教学命令示例。**
 
 ```bash
 lcm-gen -x state_t.lcm
@@ -46,7 +44,6 @@ lcm-gen -x state_t.lcm
 
 后续 Publisher 示例需要生成类型头文件和微秒时钟 helper：
 
-**代码身份：教学最小例子中的时间辅助函数。**
 
 ```cpp
 #include <chrono>
@@ -60,7 +57,6 @@ inline std::int64_t now_us() {
 
 `joint_count` 同时存在于 schema 和 C++ vector，是一种冗余不变量。把赋值封装起来，避免每个调用点各自维护：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 #include <cstdint>
@@ -90,7 +86,6 @@ atlas::state_t make_state(const std::vector<double>& joints,
 
 ## Publisher
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 #include <lcm/lcm-cpp.hpp>
@@ -118,7 +113,6 @@ int main() {
 
 ## Subscriber
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 #include <iostream>
@@ -155,7 +149,6 @@ int main() {
 
 `ReceiveBuffer*` 与生成消息指针是 LCM 在本次分发中提供的借用对象。回调返回后不能保存指针：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 void Handler::onState(const lcm::ReceiveBuffer*, const std::string&,
@@ -176,7 +169,6 @@ Handler 对象自身也必须比 subscription 活得更久。一个安全的声�
 
 LCM 的 callback 不由任意内部线程并发调用；哪个线程调用 `handle()`，哪个线程执行一个消息的 callback。`handleTimeout()` 只是把超时参数传入 C 核心，并不把 callback 投递到线程池。`LCM::handleTimeout()` 这给应用明确控制，也意味着同一实例上的慢 callback 会串行阻塞其他 channel。
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 std::atomic_bool stop{false};
@@ -197,7 +189,6 @@ while (!stop.load()) {
 
 订阅返回的 `Subscription*` 由 `lcm::LCM` 保存并管理；它用于配置每订阅的待处理计数和取消订阅。固定版本默认容量为 30，设为 0 或负数表示不限。它不是可靠性保证：核心只给仍低于额度的匹配 subscription 增加待处理计数；如果没有任何一个订阅能接收，UDPM provider 就丢弃这条消息。`setQueueCapacity()`、订阅容量默认值、`lcm_try_enqueue_message()`：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 auto* sub = lcm.subscribe("ATLAS_STATE", &Handler::onState, &handler);

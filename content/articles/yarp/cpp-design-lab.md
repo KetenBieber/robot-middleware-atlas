@@ -1,41 +1,111 @@
 # YARP C++ 设计实验：Port、虚接口与并发关闭
 
-对照基线为本地 YARP 提交 `91710eb45baf5d9cb62dd5a0cb3c3a00f42481b9`。本页按实现能力组织缩小版 C++ 练习；标明“教学代码”的部分不属于上游源码，真实的发送扇出、Reader 线程及关闭次序分别以[写入与扇出](write-fanout.md)、[读取与 RPC](read-rpc.md)和[关闭生命周期](close-lifecycle.md)的固定提交摘录为准。
+想象一台双臂机器人，一条状态消息要同时送给控制面板、可视化工具和远端记录器。三条连接可能使用不同的 Carrier：一种为低延迟本地传输，另一种按网络协议编码。最直接的 C++ 写法是在每一种状态消息中都加入 `sendUdp()`、`sendTcp()`，再让每一种 Carrier 都认识所有状态类型。假设有 `M` 种消息、`C` 种 Carrier，要维护的专用组合就逼近 `M × C`；新增一个 Carrier 时，会触碰本不该变化的关节状态类型。
 
-YARP 的 C++ 难点集中在三个边界：应用对象如何被不同 Carrier 编码，一条 Port 如何同时拥有多条连接，以及 close 如何与后台读写并发。下面从一个最小消息类型开始逐层拆解。
+正确的第一步不是记住某个模式名称，而是把变化拆成两次互不依赖的决定：**消息决定字段顺序和含义；Writer 决定这些字段怎样进入当前连接。** 本章先用一段完整的 C++17 小程序验证这个分离，再回到 YARP 的 `Portable`、`ConnectionWriter`、`PortCoreOutputUnit`，最后讨论跨线程时哪个对象拥有消息内存。所有实际行为以本地 YARP 提交 `91710eb45baf5d9cb62dd5a0cb3c3a00f42481b9` 为基准；这里独立编写的示例不是上游源代码。
 
-## `Portable` 建立稳定的序列化接口
+## 从 `M × C` 个专用函数走向两条动态分派边界
 
-**教学代码（不是固定提交源码摘录）：**
+先写出最可能的失败设计。设有 `JointState`、`CameraFrame` 两种消息，以及 UDP、文件两种输出；把 `sendUdp(JointState)`、`sendFile(JointState)` 等四组函数写在同一个业务目录里，看上去容易调用，但当接入第三种 Carrier 时，两个消息类都得重新理解网络细节。若后续允许插件动态装载一个未知消息类型，传输库甚至无法提前编译出它的所有重载。
 
-```cpp
+可以改为“字段生产者只调用一个抽象 Writer，抽象 Writer 不知道究竟是哪一种业务消息”。以下是独立、可编译的 C++17 教学程序，故意只保存两个整数来排除序列化格式干扰：
+
+~~~cpp
+#include <array>
+#include <cassert>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+struct Writer {
+    virtual ~Writer() = default;
+    virtual bool appendInt32(std::int32_t value) = 0;
+};
+
+struct InspectWriter final : Writer {
+    std::vector<std::int32_t> fields;
+    bool appendInt32(std::int32_t value) override {
+        fields.push_back(value);
+        return true;
+    }
+};
+
+struct RejectWriter final : Writer {
+    bool appendInt32(std::int32_t) override { return false; }
+};
+
+struct Message {
+    virtual ~Message() = default;
+    virtual bool write(Writer& writer) const = 0;
+};
+
+struct JointState final : Message {
+    std::array<std::int32_t, 2> q{12, 34};
+
+    bool write(Writer& writer) const override {
+        return writer.appendInt32(q[0]) &&
+               writer.appendInt32(q[1]);
+    }
+};
+
+bool encode(const Message& message, Writer& writer) {
+    return message.write(writer);
+}
+
+int main() {
+    JointState state;
+    InspectWriter inspect;
+    assert(encode(state, inspect));
+    assert((inspect.fields == std::vector<std::int32_t>{12, 34}));
+
+    RejectWriter reject;
+    assert(!encode(state, reject));
+}
+~~~
+
+现在像编译器一样逐句执行 `encode(state, inspect)`。`Message&` 指向 `JointState` 对象，但其静态类型并不包含 `q` 字段；第一个虚调用在运行时选择 `JointState::write()`。函数拿到的是抽象 `Writer&`，`writer.appendInt32` 再沿实际 `InspectWriter` 对象作第二次独立虚调用。成功路径产生两个字段，`RejectWriter` 则让第一次写入就失败，`&&` 短路阻止后续字段继续写入。
+
+这不是经典 Visitor 模式要求的“两种具体类型互相选择一组专用重载”；这里发生的是**两层彼此独立的虚接口分派**。它把 `M × C` 的静态组合约束降为 `M` 个消息实现加 `C` 个 Writer 实现，代价是接口冻结、虚调用和无法在这里直接跨方法优化。归纳为设计模式时，`Message` 是消息字段的多态接口，`Writer` 是编码/传输策略边界；“有两个虚调用”本身不能证明整个实现遵循 Visitor。
+
+### 回到固定源码：Portable 实际继承两个不同的契约
+
+YARP 没有让应用手动传上面这个玩具 `Message`。固定版本真正的 `Portable` 定义如下：
+
+~~~cpp
+class YARP_os_API Portable : public PortReader, public PortWriter
+{
+public:
+    // reiterate the key inherited virtual methods, just as a reminder
+    bool read(ConnectionReader& reader) override = 0;
+    bool write(ConnectionWriter& writer) const override = 0;
+
+    virtual Type getType() const;
+    static bool copyPortable(const PortWriter& writer, PortReader& reader);
+};
+~~~
+
+这里 `PortReader` 与 `PortWriter` 分别承诺解码和编码，`Portable` 把两者合在一个双向可传输对象里。`override = 0` 有两个作用：编译器检查它们确实覆盖了父类签名，同时让 Portable 自身保持抽象，强制具体业务类型给出字段实现。它不能自动证明 read 和 write 在所有错误路径上对称；需要消息开发者自己保证协议版本、字段顺序和边界校验一致。
+
+基于这个接口，我们可以写一个只保留类型关系的业务类。下面的声明用于教学，具体的 `read` 和 `write` 会在下一节逐字段实现：
+
+~~~cpp
 class State final : public yarp::os::Portable {
 public:
-  std::int64_t sequence{};
-  std::vector<double> joints;
+    std::int64_t sequence{};
+    std::vector<double> joints;
 
-  bool write(yarp::os::ConnectionWriter& writer) const override;
-  bool read(yarp::os::ConnectionReader& reader) override;
+    bool write(yarp::os::ConnectionWriter& writer) const override;
+    bool read(yarp::os::ConnectionReader& reader) override;
 };
-```
+~~~
 
-`Portable` 是非模板多态边界，PortCore 只需要调用虚函数，不需要知道 State 的字段。ConnectionWriter/Reader 又抽象具体 Carrier，因此消息类型和网络协议形成双分派：
+`public` 继承允许 `State&` 隐式转换成 `Portable&`，PortCore 只需调用抽象序列化接口，不必包含 `State` 的字段定义。`final` 阻止继续从 `State` 派生，却不能禁止开发者修改本类的字段和 wire 格式；真正的网络兼容还需显式版本和兼容策略。`override` 会捕获少了 `const` 或参数类型不同造成的假重写。`write(...) const` 约束单次调用不通过普通成员修改状态，但不阻止 `mutable`、指针间接修改或并发的另一个线程，因此它**不提供线程安全保证**。
 
-```text
-State::write chooses fields
-ConnectionWriter implementation chooses wire encoding
-```
+### 为什么不直接把 Writer 做成模板
 
-先逐项拆开这段声明。`public yarp::os::Portable` 是公有继承：`State*` 可以安全向上转换为 `Portable*`，PortCore 因而能只保存基类引用。`final` 禁止继续继承 `State`，避免后续子类再次改变 wire format，却仍被当成同一种消息。`override` 要求编译器确认签名确实覆盖基类虚函数；如果把 `const` 漏掉或参数写错，编译会失败，而不是悄悄产生一个从未被调用的新函数。
+`template<class Writer> bool write(Writer&)` 也能消除一部分虚调用，但调用点需要同时知道消息类型和 Writer 类型。两者以模板实例编译组合，插件装载未知新 Carrier 时还要重新构造可见的模板实例与链接边界。`Portable` 使用非模板虚接口的代价是调用间接性，换取消息模块与具体 Carrier 的独立编译。
 
-`write(...) const` 中的第二个 `const` 约束 `this`：函数内只能读取普通成员。参数没有按值传递，是因为 `ConnectionWriter` 往往包含 socket、缓冲区位置和错误状态，既不能廉价复制，也不应该复制。返回 `bool` 则把序列化失败留在调用边界，而不是让网络层猜测对象是否写完整。
-
-### 为什么这里不用 `template<class Writer>`
-
-模板也能把 `State` 写入不同 writer，而且可能消除虚调用。但模板要求调用点看到完整实现，并为每一种 Writer 实例化代码；插件和动态库之间也很难只靠一个稳定符号交换未知模板实例。虚接口把扩展轴放在运行时：新 Carrier 可以提供新的 `ConnectionWriter` 子类，而已有消息二进制无需重新了解它的具体类型。
-
-这是一种明确取舍：每次字段写入多一次间接调用，换取消息与传输的独立扩展。对于包含图像或数组的大报文，真正成本通常是拷贝、编码和系统调用；对于大量极小标量消息，虚调用与逐字段边界检查才可能进入热点，应通过批量写入或预编码降低次数。
-
+还有一层比虚调用更容易成为实际瓶颈：固定源码中的 `ConnectionWriter::appendExternalBlock(const char*, size_t)` 明确让当前连接借用外部字节块，调用者必须保证传输完成前那段内存不消失。相比之下，`appendBlock` 承担复制语义。即便消息接口上的 `write` 只有一次虚调用，跨线程的 buffer 借用、序列化次数和 socket I/O 才决定能否安全地进行多连接扇出。下一节先解释为什么 `const` 仍不是“可以随便把栈对象交给异步 Worker”的许可证。
 ## `const` 是可重复扇出的契约
 
 `write(...) const` 表示序列化不应修改逻辑消息。一个 PortWriter 可能被多个 OutputUnit 依次调用；若第一次 write 消耗内部 vector，第二条连接会收到空数据。
@@ -46,7 +116,6 @@ ConnectionWriter implementation chooses wire encoding
 
 不要边解析边修改现有对象后再返回 false：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 bool State::read(ConnectionReader& r) {
@@ -74,7 +143,6 @@ bool State::read(ConnectionReader& r) {
 
 若消息字段较多，可以把解析事务抽成纯函数：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 std::optional<State> decode_state(ConnectionReader& reader) {
@@ -89,7 +157,6 @@ std::optional<State> decode_state(ConnectionReader& reader) {
 
 ## `BufferedPort<T>` 的引用不是所有权
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 auto& slot = port.prepare();
@@ -105,7 +172,6 @@ port.write();
 
 `BufferedPort<State>` 让编译器知道缓冲元素是 `State`，从而省去运行时向下转换；它没有承诺返回引用永久有效。可把内部结构想成：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 template<class T>
@@ -123,7 +189,6 @@ class TinyBufferedPort {
 
 ## RAII Port owner
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 class StatePort {
@@ -165,7 +230,6 @@ private:
 
 YARP 公开类常用实现指针隐藏 PortCore 等内部类型：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 class Port {
@@ -184,7 +248,6 @@ private:
 
 典型定义方式如下：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 // Port.h
@@ -214,7 +277,6 @@ Port::~Port() = default;   // 此处 Impl 已完整
 
 Carrier registry 保存 prototype，再为每条连接 clone：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 class Carrier {
@@ -235,7 +297,6 @@ public:
 
 假设 OutputUnit 保存 `shared_ptr<Protocol> protocol_`。worker 与 close 可能并发：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 std::shared_ptr<Protocol> local;
@@ -259,7 +320,6 @@ shared_ptr 解决对象寿命，不解决 Protocol 内部并发；仍需规定�
 
 后台 write 通常有 tracker：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 class CompletionGuard {
@@ -287,7 +347,6 @@ private:
 
 下面的骨架不实现 YARP 协议，却保留最重要的设计关系：用户线程提交不可变消息，单一 worker 串行调用多个连接，关闭时拒绝新消息、唤醒等待并 join。
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 class IConnection {

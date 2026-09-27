@@ -37,7 +37,7 @@ PortWriter 的 `write()` 可能为每条连接调用一次。因此它应是可�
 
 `m_stateMutex` 不是只保护一份短暂快照：本提交在它仍然加锁时逐个调用 `unit->send()`。要理解慢连接的后果，必须沿这个锁看完整函数，而不能只看 `fan-out` 是 `O(C)`。
 
-**固定提交源码摘录：**
+接下来对照固定版本的实际代码：
 
 ```cpp
 bool PortCore::sendHelper(const PortWriter& writer,
@@ -120,7 +120,7 @@ bool PortCore::sendHelper(const PortWriter& writer,
 
 这个入口还有一个与慢连接不同的并发边界：它在获取 `m_stateMutex` 之前先读 `m_interrupted` 和 `m_finishing`。判断为 false 后，即使等待 state mutex 期间 Port 开始关闭，进入锁后也只重新检查 atomic `m_finished`，没有重新检查这两个早期标志。要判断这是否受锁保护，必须看所有写入点。
 
-**固定提交源码摘录：**
+接下来对照固定版本的实际代码：
 
 ```cpp
 void PortCore::resume()
@@ -153,7 +153,6 @@ void PortCore::interrupt()
 
 源码身份：固定提交中的 `PortCore::resume` 与 `PortCore::interrupt`，省去日志和解释性注释。运行期对 `m_interrupted` 的两处写入都发生在 `m_stateMutex` 外；`interrupt()` 之后锁住 state mutex 是为了更新阻塞中的 reader，不会保护之前写入的标志。
 
-**固定提交源码摘录：**
 
 ```cpp
 bool PortCore::isInterrupted() const
@@ -166,7 +165,7 @@ bool PortCore::isInterrupted() const
 
 `m_finishing` 的情况也需要分开看：`closeMain()` 第一次把它置为 true 时拿着 state mutex，但关闭流程末尾将它重置为 false 时没有重新加锁。下面摘录的是两个位置；中间的连接断开、server thread join 与 Unit 清理分支略去：
 
-**固定提交源码摘录：**
+接下来对照固定版本的实际代码：
 
 ```cpp
 {
@@ -184,7 +183,6 @@ m_finishing = false;
 
 源码身份：固定提交中的 `PortCore::closeMain`。
 
-**固定提交源码摘录（状态成员声明）：**
 
 ```cpp
 std::atomic<bool> m_finished {false};
@@ -198,7 +196,7 @@ bool m_interrupted {false};
 
 packet 中的数据并不是共享所有权。它存 `PortWriter*` 与 callback 指针、一个在 `m_packetMutex` 保护下递增/递减的整数；计数归零时调用完成接口：
 
-**固定提交源码摘录：**
+接下来对照固定版本的实际代码：
 
 ```cpp
 void setContent(const yarp::os::PortWriter* writable,
@@ -231,7 +229,6 @@ void complete()
 
 引用计数减到零之后，packet 管理器先调用 `complete()`，再把对象回收到空闲链表。这里 `m_packetMutex` 不是只保护 `ct` 的短锁：真实调用者在整个 `checkPacket()` 期间持有它。
 
-**固定提交源码摘录：**
 
 ```cpp
 bool PortCorePackets::checkPacket(PortCorePacket* packet)
@@ -251,7 +248,7 @@ bool PortCorePackets::checkPacket(PortCorePacket* packet)
 
 公开门面还有一条独立的失败分支：
 
-**固定提交源码摘录：**
+接下来对照固定版本的实际代码：
 
 ```cpp
     result = core.send(writer, nullptr, callback);
@@ -273,7 +270,7 @@ bool PortCorePackets::checkPacket(PortCorePacket* packet)
 
 下面是这条失败路径中 OutputUnit 真正调用 Writer 并判定连接已坏的代码。输入是 `cachedWriter`（同步时仍指向调用者传来的 Writer）；远端分支先将业务字段序列化到 `BufferedConnectionWriter`，再让当前连接的 Protocol 写出去。
 
-**固定提交源码摘录：**
+接下来对照固定版本的实际代码：
 
 ```cpp
 bool PortCoreOutputUnit::sendHelper()
@@ -400,7 +397,6 @@ Unit worker: semaphore wait ends -> serialize borrowed writer -> stream write
 
 固定实现的 `PortCorePacket::setContent(&writer, false, callback)` 明确将 Writer 设为非拥有；OutputUnit 的 `cachedWriter`、`cachedReader`、`cachedCallback` 也都是借用指针。应用必须让消息、reply reader 与 callback 存活且不被并发改写，直到完成通知。若 `write()` 返回后立即销毁局部消息，worker 随后读取 `cachedWriter` 就会访问已结束生命周期的对象，结果可以是崩溃、错误字段或被复用内存中的旧数据。一个最小安全做法是把消息作为应用对象成员保存，并在收到 completion 前不重用它；也可自行把消息复制进由任务共享持有的不可变 owner。YARP 普通 `Port::write` 后台路径不替应用做这份复制。
 
-**固定提交源码摘录（后台交接部分）：**
 
 ```cpp
     if ((!waitBefore) && waitAfter) {
@@ -442,7 +438,7 @@ Unit worker: semaphore wait ends -> serialize borrowed writer -> stream write
 
 这个通知经过几层才变成业务完成：`activate.post()` 更新 YARP Semaphore 的计数；其内部 mutex/condition_variable 唤醒一个阻塞等待者；该线程变为 runnable，但 Linux 调度器何时给它 CPU 仍由内核决定；线程运行到 `sendHelper()` 后才序列化和调用 stream；最后 packet 计数归零时才调用 `onCompletion()`。通知不是消息已送达，变为 runnable 不是线程已执行，stream 写完也不是对端业务回调已消费。
 
-**固定提交源码摘录（输出 worker 的等待与完成通知）：**
+接下来对照固定版本的实际代码：
 
 ```cpp
 void PortCoreOutputUnit::run()
@@ -533,7 +529,7 @@ T_write ≈ O(C) traversal
 
 扇出列表不是锁外创建的“快照”：`PortCore::sendHelper()` 持有 `m_stateMutex` 遍历 `m_units` 并调用每个 Unit。这样列表项不会在这段遍历中被另一条同锁的连接管理路径删除；代价是同步发送的慢 I/O 会延长锁持有时间。后台模式下，PortCore 返回后 Unit worker 仍可能持有自己的 Protocol 强引用并使用借来的消息对象，所以摘掉列表项之前必须先收束线程。
 
-**固定提交源码摘录：**
+接下来对照固定版本的实际代码：
 
 ```cpp
 void PortCoreOutputUnit::closeMain()
@@ -565,7 +561,7 @@ void PortCoreOutputUnit::closeMain()
 
 PortCore 只在 server thread 已结束的阶段集中删除 Unit。以下摘录保留这个销毁次序：
 
-**固定提交源码摘录：**
+接下来对照固定版本的实际代码：
 
 ```cpp
 void PortCore::closeUnits()

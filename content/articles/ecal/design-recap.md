@@ -149,7 +149,6 @@ CPublisher::Send(image)
 
 这条链的起点不是一个全局总线函数，而是公开句柄先验证实体是否仍可取得、再把写入交给当前 PublisherImpl。固定提交中的真实重载如下：
 
-**固定提交源码摘录（`eclipse-ecal/ecal@1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，`CPublisher::Send`）：**
 
 ```cpp
 bool CPublisher::Send(CPayloadWriter& payload_, long long time_)
@@ -171,7 +170,6 @@ bool CPublisher::Send(CPayloadWriter& payload_, long long time_)
 
 从 SHM、UDP、TCP 抵达的样本最后都要汇到本地 SubGate。以下固定源码说明它如何把“找 topic”与“执行用户逻辑”分成两个锁域：
 
-**固定提交源码摘录（同一提交，`CSubGate::ApplySample`）：**
 
 ```cpp
 bool CSubGate::ApplySample(const Payload::TopicInfo& topic_info_, const char* buf_, size_t len_, long long id_, long long clock_, long long time_, size_t hash_, eTLayerType layer_)

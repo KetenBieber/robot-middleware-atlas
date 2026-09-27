@@ -10,7 +10,6 @@
 
 先看固定提交中一个真实生成类型。它只有字符串 channel 和 16 位端口号，结构体里的 C 指针布局不是网络格式：32 位与 64 位进程的指针宽度不同，结构体对齐也可能不同，因而不能拿 sizeof(struct) 当消息长度直接发送。
 
-**代码身份：固定提交源码摘录，逐字连续节选。**
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：channel_to_port_t
@@ -32,7 +31,7 @@ struct _channel_to_port_t
 
 类型指纹是 wire 消息开头的 64 位 schema 标识。它不是整条消息内容的 checksum，也不是身份认证 MAC；它回答的是“这个 decoder 所期待的字段结构，是否与这段 bytes 声称的类型相同”。生成代码首先计算并缓存一个基于 schema 的值：
 
-**代码身份：固定提交源码摘录，逐字连续函数。**
+对应的上游实现如下：
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：__channel_to_port_t_hash_recursive() 与 __channel_to_port_t_get_hash()
@@ -75,7 +74,6 @@ int64_t __channel_to_port_t_get_hash(void)
 
 接着，生成 encoder 先把 hash 作为一个 64 位字段编码，再依次编码真实字段。每个字段编码器接收剩余容量，并在失败时向上传回负值：
 
-**代码身份：固定提交源码摘录，逐字连续函数。**
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：channel_to_port_t_encode()
@@ -99,7 +97,7 @@ int channel_to_port_t_encode(void *buf, int offset, int maxlen, const channel_to
 
 decode 先读出 fingerprint 并比较，再解码字段。新旧类型不匹配时它返回失败，而不是猜测“相似字段”或把旧字节塞进新 struct：
 
-**代码身份：固定提交源码摘录，逐字连续函数。**
+对应的上游实现如下：
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：channel_to_port_t_decode() 与 channel_to_port_t_decode_cleanup()
@@ -131,7 +129,6 @@ int channel_to_port_t_decode_cleanup(channel_to_port_t *p)
 
 字符串字段是动态内存。底层 string decoder 为它分配独立缓冲，生成的 cleanup 最终调用 free；因此调用者拿到的是有所有权的解码对象，而不是指向网络接收 buffer 的字符串视图。下面是实际通用 string decoder 的分配语句与释放函数：
 
-**代码身份：固定提交源码摘录，两个独立函数，语句逐字。**
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：__string_decode_array() 与 __string_decode_array_cleanup()
@@ -184,7 +181,6 @@ static inline int __string_decode_array_cleanup(char **s, int elements)
 
 固定提交的 C++ 模板发布路径把 typed message 编码成临时 byte array，调用底层 publish 后立即释放：
 
-**代码身份：固定提交源码摘录，逐字连续函数。**
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：LCM::publish<MessageType>()
@@ -204,7 +200,6 @@ inline int LCM::publish(const std::string &channel, const MessageType *msg)
 
 这里的模板类型在编译期决定 encoder；底层 provider 收到的仍是 bytes、channel 和长度。临时数组归发布调用栈拥有，publish 返回后释放，所以 provider 必须在调用期间消费或复制数据，不能异步保存 buf 指针。现有写法每次发布都会分配并释放一块数组。RAII 是让对象析构函数自动释放它拥有的资源：std::vector<uint8_t> 可以在函数返回时自动释放 bytes，少掉手写 delete[]；但复用同一 scratch buffer 时，两个发布线程仍不能同时改写它。
 
-**代码身份：教学推荐改写，不是固定提交源码。**
 
 ~~~cpp
 std::vector<std::uint8_t> buffer(msg->getEncodedSize());
@@ -220,7 +215,6 @@ event log 为每条事件存放同步 magic、递增 event number、时间戳、
 
 事件结构明确把两个长度定义成有符号 32 位：
 
-**代码身份：固定提交源码摘录，逐字连续定义。**
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：struct _lcm_eventlog_event_t
@@ -259,7 +253,6 @@ struct _lcm_eventlog_event_t {
 
 writer 按固定顺序写字段，然后原样写 channel 与 payload：
 
-**代码身份：固定提交源码摘录，逐字连续函数。**
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：lcm_eventlog_write_event()
@@ -294,7 +287,7 @@ int lcm_eventlog_write_event(lcm_eventlog_t *l, lcm_eventlog_event_t *le)
 
 eventnum 维护文件顺序；timestamp 记录事件时间，两者用途不同。即使两条事件具有相同时间戳，文件顺序仍能确定回放先后。eventlog 本身对 data 不做 decode/re-encode，所以日志忠实保留生成器输出的 fingerprint 与 payload bytes。文件 provider 组装待写 event 时从系统实时钟取得时间，并把 channel 与 payload 复制进一块连续分配：
 
-**代码身份：固定提交源码摘录，逐字连续函数。**
+对应的上游实现如下：
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：lcm_logprov_publish()
@@ -341,7 +334,6 @@ static int lcm_logprov_publish(lcm_logprov_t *lcm, const char *channel, const vo
 
 文件不是天然可信的。日志可能因断电截断、磁盘损坏或人工修改而带有错误长度。固定读取函数检查 channel 长度在 1 到 999 之间，并拒绝负的 data 长度；但它没有给非负 data 长度设置应用级上限，也没有在分配前确认剩余文件足够长。
 
-**代码身份：固定提交源码摘录，逐字连续函数。**
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：lcm_eventlog_read_next_event()
@@ -421,7 +413,6 @@ lcm_eventlog_event_t *lcm_eventlog_read_next_event(lcm_eventlog_t *l)
 
 读取函数为 event、channel 和 data 分别分配内存；成功返回后，调用者负责调用配对的 free 函数。它清理三个分配并释放 event 本身：
 
-**代码身份：固定提交源码摘录，逐字连续函数。**
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：lcm_eventlog_free_event()
@@ -440,7 +431,6 @@ void lcm_eventlog_free_event(lcm_eventlog_event_t *le)
 
 使用方式是逐条读取、处理、释放。若算法要把消息交给稍后运行的工作线程，工作项必须复制所需字段或接管完整 event 对象；保存 event->data 裸指针然后马上 free_event，会造成悬空访问。
 
-**代码身份：教学最小例子，不是固定提交源码。**
 
 ~~~c
 for (;;) {
@@ -455,7 +445,7 @@ for (;;) {
 
 file provider 也遵守这个寿命：handle 线程先用当前 event 的 data 同步 dispatch callback，等 callback 返回后才 load_next_event；后者首先释放旧 event，再读下一条。故 callback 内 bytes 可同步读取，callback 返回后不得保存旧 data 指针。
 
-**代码身份：固定提交源码摘录，逐字连续函数。**
+对应的上游实现如下：
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：load_next_event()
@@ -474,7 +464,7 @@ static int load_next_event(lcm_logprov_t *lr)
 }
 ~~~
 
-**代码身份：固定提交源码摘录，逐字连续函数。**
+对应的上游实现如下：
 
 仓库与提交：lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864  
 符号：lcm_logprov_handle()
@@ -558,7 +548,6 @@ timestamp 字段的文档语义是“消息被接收的 UNIX epoch 微秒时间�
 
 最小的教学实现可以先定义一个小消息和固定字段 wire 编码，再由日志层写 event header、channel 和 bytes：
 
-**代码身份：教学最小例子，不是 LCM 上游源码。**
 
 ~~~cpp
 struct Pose {

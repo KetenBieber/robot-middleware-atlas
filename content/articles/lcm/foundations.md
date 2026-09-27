@@ -44,7 +44,6 @@ UDP socket
 
 C 没有类，但可以用 `struct` 把数据放在一起：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 struct Message {
@@ -56,7 +55,6 @@ struct Message {
 
 它与简单 C++ 类的数据部分相似：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 class Message {
@@ -71,7 +69,6 @@ LCM 的 `lcm_t` 是公共运行时状态，UDPM 的 `lcm_udpm_t` 是 UDP provide
 
 ### 指针表示对象的位置
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 lcm_t *bus;
@@ -79,7 +76,6 @@ lcm_t *bus;
 
 可以先把它读成：“`bus` 保存一只 `lcm_t` 对象的地址。”箭头运算符访问该地址所指对象的成员：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 bus->provider
@@ -87,7 +83,6 @@ bus->provider
 
 等价于：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 (*bus).provider
@@ -103,7 +98,6 @@ bus->provider
 
 ### const 描述通过当前指针不能修改数据
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 const void *data
@@ -117,7 +111,6 @@ LCM callback 收到的 payload 就是只读借用：callback 可以读取和解�
 
 `void*` 是“某个地址，但此处不声明它指向哪种类型”：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 void *userdata;
@@ -125,7 +118,6 @@ void *userdata;
 
 订阅时，调用者可以把自己的状态地址交给 LCM：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 struct Controller controller;
@@ -134,7 +126,6 @@ lcm_subscribe(bus, "POSE", on_pose, &controller);
 
 回调再转回原类型：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 void on_pose(const lcm_recv_buf_t *buf,
@@ -158,7 +149,6 @@ LCM 只负责保存和传回地址，不会复制或释放 `controller`。因此
 
 普通函数：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 int send_message(const char *channel,
@@ -168,7 +158,6 @@ int send_message(const char *channel,
 
 对应的函数指针类型可以写成：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 int (*send_fn)(const char *, const void *, unsigned int);
@@ -176,7 +165,6 @@ int (*send_fn)(const char *, const void *, unsigned int);
 
 把函数地址赋给它后，可以间接调用：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 send_fn = send_message;
@@ -189,7 +177,6 @@ LCM provider vtable 正是一组函数指针。UDPM、TCPQ 和 MEMQ 分别把自
 
 先看一个极小版本：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 struct TransportOps {
@@ -208,7 +195,6 @@ struct Transport {
 
 调用时：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 transport.ops->publish(
@@ -219,7 +205,6 @@ transport.ops->publish(
 
 它对应 C++ 虚函数：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 class Transport {
@@ -235,7 +220,6 @@ class Transport {
 
 公共头文件可以只写：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 typedef struct _lcm_t lcm_t;
@@ -245,7 +229,6 @@ typedef struct _lcm_t lcm_t;
 
 真实定义留在 `lcm.c`：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 struct _lcm_t {
@@ -261,7 +244,6 @@ struct _lcm_t {
 
 应用把函数交给 LCM：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 lcm_subscribe(bus, "POSE", on_pose, userdata);
@@ -269,7 +251,6 @@ lcm_subscribe(bus, "POSE", on_pose, userdata);
 
 此时不会立刻执行 `on_pose`。当应用以后调用 `lcm_handle()`，且队列中有匹配消息时，框架才执行：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 subscription->handler(buffer,
@@ -287,7 +268,6 @@ subscription->handler(buffer,
 
 UDP socket 可以看作操作系统提供的网络收发句柄：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 int fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -317,7 +297,6 @@ pipe 只传递状态提示，payload 仍在内存队列中。固定版本在 POS
 
 两个线程同时操作同一队列时，需要 mutex：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 lock(queue_mutex);
@@ -327,7 +306,6 @@ unlock(queue_mutex);
 
 锁保护的不是某一行语句，而是“检查状态并修改状态”的完整事务：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 lock(mutex);
@@ -366,7 +344,6 @@ ring 中的一段空间要等 `lcm_udpm_handle()` 完成分发后才能归还。
 
 不同 CPU 可能用不同字节顺序保存多字节整数。协议发送前调用：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 header.magic = htonl(magic);
@@ -374,7 +351,6 @@ header.magic = htonl(magic);
 
 接收后调用：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 magic = ntohl(header.magic);
@@ -394,7 +370,6 @@ magic = ntohl(header.magic);
 
 `iovec` 允许描述原本分散的内存：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 struct iovec parts[3] = {

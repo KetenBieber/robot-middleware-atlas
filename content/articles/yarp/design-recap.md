@@ -64,7 +64,6 @@ Application -> Port -> PortCore --+
 
 ## 最小接口骨架
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 class Carrier {
@@ -134,7 +133,6 @@ Carrier 实例必须每连接独立，Protocol 的状态转换必须拒绝半握
 
 下面的骨架展示同步与后台发送都需要保留的边界：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 SendResult PortCore::send(std::shared_ptr<const Message> msg) {
@@ -161,7 +159,6 @@ SendResult PortCore::send(std::shared_ptr<const Message> msg) {
 
 后台写还需要一个有界所有权模型：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 struct PendingWrite {

@@ -94,7 +94,7 @@ CYBER_REGISTER_COMPONENT(PlanningComponent)
 
 注册宏 `CYBER_REGISTER_COMPONENT` 继续展开：
 
-**固定提交源码摘录：**
+接下来对照固定版本的实际代码：
 
 ```cpp
 #define CYBER_REGISTER_COMPONENT(name) \
@@ -351,7 +351,7 @@ Component -> task/reader -> callback -> Component
 
 Cyber RT 使用 `weak_ptr` 捕获，在调用前临时 `lock()`：
 
-**固定提交源码摘录（为教学排版压缩空白）：**
+接下来对照固定版本的实际代码：
 
 ```cpp
 std::weak_ptr<Component<M0>> self =

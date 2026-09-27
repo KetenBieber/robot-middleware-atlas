@@ -149,67 +149,22 @@ GUIDE_ORDER: dict[str, list[str]] = {
     "yarp": ["use-environment", "use-ports-rpc", "use-operations", "case-study-icub-navigation"],
 }
 
-LEARNING_PATHS = {
-    "cyber": {
-        "intro": "overview",
-        "map": "architecture-map",
-        "source": "dag-to-component",
-        "language": "cpp-type-runtime",
-        "recap": "design-recap",
-        "rebuild": "cpp-implementation-lab",
-        "guide": "use-environment",
-        "case": "case-study-apollo-planning",
-    },
-    "ecal": {
-        "intro": "foundations",
-        "map": "architecture-map",
-        "source": "registration-soft-state",
-        "language": "cpp-design-lab",
-        "recap": "design-recap",
-        "rebuild": "cpp-design-lab",
-        "guide": "use-environment",
-        "case": "case-study-mqtt-bridge",
-    },
-    "zenoh": {
-        "intro": "foundations",
-        "map": "architecture-map",
-        "source": "session-runtime",
-        "language": "rust-cpp-design-lab",
-        "recap": "design-recap",
-        "rebuild": "rust-cpp-design-lab",
-        "guide": "use-environment",
-        "case": "case-study-rmw-zenoh",
-    },
-    "lcm": {
-        "intro": "overview",
-        "map": "architecture-map",
-        "source": "provider-vtable",
-        "language": "foundations",
-        "recap": "design-recap",
-        "rebuild": "c-abi-cpp-design-lab",
-        "guide": "use-environment",
-        "case": "case-study-drake",
-    },
-    "orocos": {
-        "intro": "foundations",
-        "map": "architecture-map",
-        "source": "taskcontext-lifecycle",
-        "language": "cpp-design-lab",
-        "recap": "design-recap",
-        "rebuild": "cpp-design-lab",
-        "guide": "use-environment",
-        "case": "case-study-rtt-ros",
-    },
-    "yarp": {
-        "intro": "foundations",
-        "map": "architecture-map",
-        "source": "portcore-architecture",
-        "language": "cpp-design-lab",
-        "recap": "design-recap",
-        "rebuild": "cpp-design-lab",
-        "guide": "use-environment",
-        "case": "case-study-icub-navigation",
-    },
+PROJECT_STORIES = {
+    "ecal": """把问题收敛到一次相机消息：先在 :doc:`入门 <foundations>` 中分清发布端与订阅端，再读 :doc:`注册和软状态 <registration-soft-state>`，理解它们如何发现彼此。只有端点已经匹配，:doc:`Publisher 发送 <publisher-discovery-send>` 中的 SHM、UDP 和 TCP 选择才有实际意义。
+
+接着追 :doc:`共享内存与消息寿命 <shm-memory-protocol>`：同一帧何时被复制、哪一个槽位能被覆盖，为什么 zero-copy 不等于无条件零拷贝；最后沿 :doc:`Subscriber 交付 <subscriber-delivery>` 把网络线程与业务回调分开。写自己的版本之前，带着这些状态关系进入 :doc:`C++ 实现实验 <cpp-design-lab>` 和 :doc:`MQTT Bridge 案例 <case-study-mqtt-bridge>`。""",
+    "lcm": """从 :doc:`机械臂消息总线的最小问题 <overview>` 开始，只保留“给出 channel 和一串字节”的 API。随后进入 :doc:`Provider 设计 <provider-vtable>`：先亲手写一个会失控的 switch，再理解 C 函数指针如何隔离传输实现。
+
+再沿 :doc:`UDP 发送 <udpm-publish-protocol>`、:doc:`接收与分片重组 <receive-reassembly>` 和 :doc:`订阅分发 <subscription-dispatch>` 追踪同一条消息，找出谁在收包、谁在调用用户代码，以及取消订阅为何需要延迟回收。最后用 :doc:`C ABI 与 C++ 实验 <c-abi-cpp-design-lab>` 将设计压缩到可写、可测试的最小系统，再看 :doc:`Drake 集成 <case-study-drake>`。""",
+    "orocos": """先从 :doc:`1 ms 控制循环的失败 <foundations>` 出发：把设备、命令与日志塞进同一个线程为什么不够；然后沿 :doc:`TaskContext 生命周期 <taskcontext-lifecycle>` 给配置、启动、异常和释放划边界。
+
+接着进入 :doc:`Activity 与 ExecutionEngine <activity-execution-engine>`，区分“任务可以运行”和“哪个 OS 线程真正执行”；再读 :doc:`Port 与 Channel <ports-channels>` 及 :doc:`Operation 线程模型 <operation-threading>`，理解样本与控制命令的不同时间语义。最后通过 :doc:`C++ 实验 <cpp-design-lab>` 验证对象寿命、虚接口和并发关闭，再对照 :doc:`RTT/ROS 集成 <case-study-rtt-ros>`。""",
+    "yarp": """从 :doc:`为何需要带名字的 Port <foundations>` 开始：应用不应知道远端 socket 的每一个细节。进入 :doc:`PortCore 架构 <portcore-architecture>` 以后，先辨别 Port、连接 Unit、Protocol 和 Carrier 的所有权关系，再在 :doc:`Carrier 协议 <protocol-carrier>` 中追握手与 framing。
+
+一份消息怎样送往多条连接，读 :doc:`写入与扇出 <write-fanout>`；回调与 RPC 怎样在对端发生，读 :doc:`读取与 RPC <read-rpc>`；为什么异步发送不能把 Writer 栈地址长期借出，继续读 :doc:`关闭与生命周期 <close-lifecycle>`。把虚接口、RAII、模板与异步对象关系映射回 :doc:`C++ 设计实验 <cpp-design-lab>`，最后进入 :doc:`iCub 案例 <case-study-icub-navigation>`。""",
+    "zenoh": """先在 :doc:`Key Expression 入门 <foundations>` 中理解数据集合与单条消息，再沿 :doc:`Session 的建立 <session-runtime>` 追踪 API、内部实体和 Runtime；随后在 :doc:`Resource 与路由缓存 <resource-route-cache>` 中解释为什么通配匹配不应每帧重算。
+
+有了对象与路由模型，再走一次 :doc:`Publisher 到 Transport <publisher-routing>`，随后进入 :doc:`Query、Reply 和 Final <query-lifecycle>`，亲自模拟两路回复、一条超时和最后的回收。完成 :doc:`背压与关闭 <backpressure-close>` 的故障回放以后，再读 :doc:`Rust/C++ 设计实验 <rust-cpp-design-lab>` 以及 :doc:`rmw_zenoh 案例 <case-study-rmw-zenoh>`。""",
 }
 
 INTERNAL_ONLY_SLUGS = {"reconstruction"}
@@ -262,7 +217,7 @@ def normalize_page(block: str) -> tuple[str, str]:
         else:
             normalized.append(line)
     if not inserted_contents:
-        normalized[1:1] = ["", "```{contents} Contents", ":depth: 2", ":local:", "```", ""]
+        normalized[1:1] = ["", "```{contents} 本页目录", ":depth: 2", ":local:", "```", ""]
     return title, "\n".join(normalized).rstrip() + "\n"
 
 
@@ -328,7 +283,7 @@ def write_project_index(
 
 {PROJECT_OVERVIEWS[project]}
 
-阅读时从 public entry 出发，沿真实调用链标出对象所有权、线程切换、队列、锁和数据复制，再从关闭路径反向验证在途工作怎样收束。
+本专题从机器人部署里的实际延迟和丢帧问题开始，再沿缓存、通知、调度和对象寿命逐步深入。没有明确称为固定源码的短代码是帮助推导的教学示例；文字图只是为讨论运行时关系服务。
 
 {cyber_learning_path()}
 
@@ -373,22 +328,13 @@ def write_project_index(
 """
     if project == 'cyber':
         source_navigation = cyber_course_navigation()
-    path = LEARNING_PATHS[project]
     learning_path = f"""
-统一学习路径
-------------
+从一个具体故障开始
+------------------
 
-本专题按同一条工程认知链组织。先理解它解决的系统问题，再认识组件边界；随后沿真实源码调用链追踪数据、线程与所有权。读懂实现以后，再分别讨论语言机制、设计取舍、性能边界、可迁移思想和最小复刻。实际项目案例放在这八步之后，用来观察这些机制怎样进入完整机器人系统。
+{PROJECT_STORIES[project]}
 
-1. **功能介绍与需求分析**：:doc:`建立使用场景、核心保证与适用边界 <{path['intro']}>`。
-2. **组件地图**：:doc:`先看清公开入口、核心对象和控制流关系 <{path['map']}>`。
-3. **自顶向下源码实现**：:doc:`从第一条主调用链进入实现 <{path['source']}>`，再按下方源码目录顺序阅读后续模块。
-4. **C/C++ 或 Rust 机制**：:doc:`把所有权、模板、RAII、ABI 与并发原语映射回设计目的 <{path['language']}>`。
-5. **优秀设计与工程取舍**：:doc:`回看分层、接口和数据结构为什么这样组织 <{path['recap']}>`。
-6. **缺点与性能边界**：仍在 :doc:`设计总结 <{path['recap']}>` 中检查容量、复杂度、尾延迟、故障和不适用条件。
-7. **可迁移设计思想**：从 :doc:`设计总结 <{path['recap']}>` 提取能够带到其他运行时、驱动和机器人框架中的方法。
-8. **最小复刻**：进入 :doc:`实现练习 <{path['rebuild']}>`，按依赖顺序重建最小闭环，并用关闭、过载和竞态不变量判断实现是否完整。
-9. **实际开发与知名项目**：从 :doc:`环境与基础操作 <{path['guide']}>` 开始，最后进入 :doc:`真实项目案例 <{path['case']}>`。
+这些文章中的短代码用于一步步推导机制；只有上下文明确说明取自固定上游版本时，才是项目原始源码。文字图呈现概念或运行时关系，而不是从源码自动生成的类图。
 """
     text = f"""{name}
 {underline}

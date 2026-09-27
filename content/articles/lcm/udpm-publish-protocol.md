@@ -10,11 +10,12 @@ udpm://239.255.76.67:7667?ttl=0
 
 `lcm_publish()` 到达 UDPM provider 后，根据 channel 加 payload 的长度选择两种线格式：短消息使用单个 LC02 数据报，大消息使用多枚 LC03 分片。发送代码集中在 `lcm_udpm_publish()`。
 
+下面沿 LCM 的固定提交 `ad0c54cee0ec048ef12357c34349ec1443158864` 回放发送线程的完整分支：从长度检查与序号分配开始，一直追到 scatter-gather 系统调用以及错误返回，而不是把“支持分片”当成已经证明可靠交付。
+
 ## 发送函数的输入边界
 
 Provider 接收四个参数：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 static int lcm_udpm_publish(lcm_udpm_t *lcm,
@@ -26,7 +27,6 @@ static int lcm_udpm_publish(lcm_udpm_t *lcm,
 `data` 已经是生成式编码器产生的字节序列。UDPM 不理解消息字段，只负责把 channel 和 bytes 封装到协议中。
 下面先看固定提交中从输入到两个线格式分支的完整控制流。输入 `data` 与 `channel` 均由调用方提供；函数只在同步调用期间借用 payload。
 
-**代码身份：固定提交源码摘录，来自 `lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864`，符号 `lcm_udpm_publish()`，逐字连续函数体。**
 
 ```c
 static int lcm_udpm_publish(lcm_udpm_t *lcm, const char *channel, const void *data,
@@ -171,7 +171,6 @@ static int lcm_udpm_publish(lcm_udpm_t *lcm, const char *channel, const void *da
 
 函数先验证 channel 长度，并计算协议 payload：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 int channel_size = strlen(channel);
@@ -197,7 +196,6 @@ int payload_size = channel_size + 1 + datalen;
 
 发送代码构造两个 32 位字段：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 lcm2_header_short_t hdr;
@@ -213,7 +211,6 @@ Magic `0x4c433032` 对应 ASCII `LC02`。它同时承担协议识别和格式版
 
 短消息没有先分配 `header + channel + payload` 连续数组。实现建立三个 `iovec`：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 struct iovec sendbufs[3];
@@ -227,7 +224,6 @@ sendbufs[2].iov_len = datalen;
 
 再由一次 `sendmsg()` 发送：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 struct msghdr msg = {0};
@@ -247,7 +243,6 @@ scatter-gather I/O 的价值是避免额外用户态 memcpy。header 在栈上�
 
 整个短消息发送位于 `transmit_lock` 中：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 g_mutex_lock(&lcm->transmit_lock);
@@ -269,7 +264,6 @@ g_mutex_unlock(&lcm->transmit_lock);
 
 代码计算预期 packet size，并比较 `sendmsg()` 返回值：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 if (status == packet_size)
@@ -313,7 +307,6 @@ else
 
 代码用固定最大 fragment payload 计算数量：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 int fragment_size = LCM_FRAGMENT_MAX_PAYLOAD;
@@ -329,7 +322,6 @@ int nfragments = payload_size / fragment_size
 
 第一片为 channel 预留空间：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 int firstfrag_datasize = fragment_size - (channel_size + 1);
@@ -347,7 +339,6 @@ first_sendbufs[2] = first data slice;
 
 第一片发送后，offset 增加实际数据字节数。循环处理余下分片：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 for (uint16_t frag_no = 1;
@@ -461,7 +452,6 @@ overhead ratio ~= N * sizeof(long_header)
 
 复刻发送端时应先实现短消息：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 struct ShortHeader {
@@ -484,7 +474,6 @@ int PublishShort(int fd, sockaddr_in destination,
 
 随后加入 LC03，并把分片计划先表示成纯函数：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 std::vector<FragmentView> PlanFragments(

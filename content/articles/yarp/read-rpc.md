@@ -24,7 +24,7 @@ stream bytes
 
 `PortReader` 是 YARP 交给应用的动态分派边界。PortCore 不要求知道图像或关节消息的具体类型，只要求对象实现 `read(ConnectionReader&)`。
 
-**固定提交源码摘录（`robotology/yarp@91710eb45baf5d9cb62dd5a0cb3c3a00f42481b9`，`PortReader`）：**
+接着看 `PortReader` 的真实实现：
 
 ```cpp
 class YARP_os_API PortReader
@@ -66,7 +66,6 @@ InputUnit thread
 
 在固定实现中，InputUnit 线程每轮先取得 `ConnectionReader&`，再识别消息命令。普通数据命令 `d/D` 的分支会把同一个 reader 交给本地 reader 或 PortCore 的 reader 路径；下面摘录该 `switch` 分支。代码块从真实 switch 的 `case 'D'` 开始，省略前面的命令读取和后续其他 command cases。
 
-**固定提交源码摘录（`robotology/yarp@91710eb45baf5d9cb62dd5a0cb3c3a00f42481b9`，`PortCoreInputUnit::run` 的数据分支）：**
 
 ```cpp
 case 'D':
@@ -121,7 +120,7 @@ case 'd': {
 
 命令 switch 结束后，InputUnit 才在连接仍存在时结束当前 read。这个位置很重要：业务 Reader 的 bool 返回并不等于协议 ack 已发送。
 
-**固定提交源码摘录（同一提交，`PortCoreInputUnit::run` 的帧收尾）：**
+接着看 `PortCoreInputUnit::run` 的真实实现：
 
 ```cpp
         if (ip != nullptr) {
@@ -139,7 +138,6 @@ case 'd': {
 
 Protocol 负责消费 carrier-specific 的消息索引、调用 `respondToIndex()`，再把内部 `reader` 借给上层。下面是固定版本 `Protocol::beginRead()` 的完整函数体：
 
-**固定提交源码摘录（同一提交，`Protocol::beginRead`）：**
 
 ```cpp
 ConnectionReader& Protocol::beginRead()
@@ -168,7 +166,7 @@ ConnectionReader& Protocol::beginRead()
 
 其后 `endRead()` 刷新可能由 RPC reply 使用的 writer，再向 carrier 发送 ack：
 
-**固定提交源码摘录（同一提交，`Protocol::endRead`）：**
+接着看 `Protocol::endRead` 的真实实现：
 
 ```cpp
 void Protocol::endRead()
@@ -196,7 +194,6 @@ void Protocol::endRead()
 
 RPC server 的 Reader 解析请求后，通过 ConnectionReader 取得回复 writer：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 bool RpcHandler::read(ConnectionReader& request) {
@@ -216,7 +213,6 @@ bool RpcHandler::read(ConnectionReader& request) {
 
 发送方这一侧，`Protocol::write(SizedWriter&)` 会在请求写完后查看 `SizedWriter` 是否登记了 reply handler；如有，它把同一连接上的回复 reader 喂给该 handler，然后等待 carrier ack。下面是这个 reply 收取控制流的固定源码摘录。
 
-**固定提交源码摘录（同一提交，`Protocol::write` 的请求、回复与 ack）：**
 
 ```cpp
 bool Protocol::write(SizedWriter& writer)
@@ -274,7 +270,6 @@ InputUnit 可能阻塞在 stream read。仅设置 `closing=true` 不会让内核
 
 调用栈说明了 reader 为何不能跨回调保存：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 bool InputUnit::RunOne() {
@@ -289,7 +284,6 @@ C++ 引用不会自动携带生命周期检查。异步任务不能保存 `Conne
 
 解析建议采用“临时对象 + 成功提交”：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 bool JointState::read(ConnectionReader& in) {

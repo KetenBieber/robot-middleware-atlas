@@ -6,14 +6,12 @@ LCM 的核心运行时主要使用 C。它要在很小的依赖面上支持不�
 
 可以先把 C++ 写法和 C 写法并排看：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 // C++ 的直觉写法
 provider->publish(channel, bytes);
 ```
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 /* C 中把隐含的 this 显式写成第一个参数 */
@@ -53,7 +51,6 @@ socket -> provider receive/reassembly -> notification fd
 
 一个最小 provider 抽象由两部分组成：私有状态和操作表。
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 typedef struct lcm_provider lcm_provider_t;
@@ -80,7 +77,6 @@ typedef struct {
 
 典型具体实现会把公共基部放在首字段，或让外层单独保存 vtable 与私有指针：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 struct lcm_provider {
@@ -101,7 +97,6 @@ typedef struct {
 
 ### 函数指针调用如何发生
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 int lcm_publish(lcm_t *lcm, const char *channel,
@@ -116,7 +111,6 @@ int lcm_publish(lcm_t *lcm, const char *channel,
 
 ## 方法表为何应是只读静态对象
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 static const provider_vtable_t udpm_ops = {
@@ -134,7 +128,6 @@ static const provider_vtable_t udpm_ops = {
 
 一个可演进的表头可以写成：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 typedef struct {
@@ -155,7 +148,6 @@ C 指定初始化器在这里尤其重要。若只按位置初始化，尾部新
 
 C 没有析构函数，构造过程要显式维护“已经成功到哪一步”：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 static lcm_provider_t *udpm_create(const char *target) {
@@ -181,7 +173,6 @@ fail:
 
 ### destroy 必须接受每一种半构造状态
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 static void udpm_destroy(lcm_provider_t *base) {
@@ -207,7 +198,6 @@ static void udpm_destroy(lcm_provider_t *base) {
 
 C ABI 不能让 C++ 异常穿过边界。一个 C++ provider 回调若抛出异常并越过 C 栈帧，调用方没有对应的异常约定，行为不可移植。边界包装器必须捕获全部异常并转换：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 extern "C" int publish_bridge(lcm_provider_t* raw,
@@ -232,7 +222,6 @@ extern "C" int publish_bridge(lcm_provider_t* raw,
 
 公开 C API 通常提供 `create/destroy` 对。C++ 层可以把它转换成唯一所有权：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 struct LcmDeleter {
@@ -272,7 +261,6 @@ class Lcm final {
 
 外层类若还保存 Subscription 成员，成员声明顺序必须让 subscriptions 先析构、LCM handle 后析构：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 class Node {
@@ -287,7 +275,6 @@ class Node {
 
 C 回调不能直接保存捕获 lambda。常见桥接形式是函数指针加 `void* user`：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 class Subscription {
@@ -325,7 +312,6 @@ class Subscription {
 
 最后一种最容易把句柄对象移动与回调状态寿命解耦：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 struct CallbackState {
@@ -402,7 +388,6 @@ consumer lock:
 
 ### 与外部事件循环组合
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 pollfd descriptors[] = {
@@ -435,7 +420,6 @@ while (!stopping) {
 
 C 核心只认识 channel、byte pointer 和 size，类型安全由生成代码在边界外恢复。概念上的 C++ 发布包装如下：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 template<class Message>
@@ -460,7 +444,6 @@ int PublishTyped(lcm_t* lcm, std::string_view channel,
 
 接收方向先验证类型 hash 和长度，再 decode 到候选对象，成功后才提交给业务：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```cpp
 template<class Message>
@@ -482,7 +465,6 @@ bool Decode(const lcm_recv_buf_t& input, Message& output) {
 
 最小实现需要把 URL 解析、provider 选择、公共句柄和事件分发连接起来：
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 typedef struct provider_factory {
@@ -543,7 +525,6 @@ scheme 查找规模很小时线性扫描足够，成本只发生在 create；为
 
 ### handle 的可重入状态
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
 
 ```c
 int lcm_handle(lcm_t *ctx) {

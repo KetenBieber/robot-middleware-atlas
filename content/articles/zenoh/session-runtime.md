@@ -6,7 +6,6 @@
 
 ## Session 的主要对象图
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 Session
   `-- Arc<SessionInner>
@@ -34,7 +33,6 @@ Session state 管理应用实体；Runtime state 管网络、路由和拓扑。�
 
 公开 API 返回 builder：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 let session = zenoh::open(config).await?;
 ```
@@ -71,7 +69,6 @@ where
 
 把关键控制流缩到最短，固定提交 `Session::new` 的连续源码是：
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，`zenoh/src/api/session.rs`，`Session::new`，L1470–L1479。**
 ```rust
             let mut runtime = runtime.build().await?;
             let session = Self::init(
@@ -86,7 +83,6 @@ where
 
 先有 `Runtime`，再把 clone/转换后的 Runtime owner 交给 `Session::init`；`init` 返回 Session 后才 start listener、connect 和 scouting。若 `start` 返回错误，`?` 让错误向上返回，因此调用者拿不到半启动的 Session handle。由这一顺序可以推导出“先准备本地路由接收方、再开放网络入口”的设计理由；这是根据调用顺序作出的工程解释，不是提交中的作者注释。
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 RuntimeBuilder::build
   -> validate Config
@@ -110,7 +106,6 @@ Runtime::start
 
 [`Session::init`](https://github.com/eclipse-zenoh/zenoh/blob/9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5/zenoh/src/api/session.rs#L864-L904) 创建 SessionState 与 SessionInner，向 Runtime 注册 connectivity handler，再通过 Runtime/Gateway 创建一组指向本地 Session 的 primitives。`Session::new` 在随后才启动 listener/connect/scouting，因此网络入口打开时本地 Face 已经能承接早到的远端声明。
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 Runtime routing core
   <-> local Face
@@ -177,7 +172,6 @@ Runtime routing core
 
 整体顺序为：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 build Runtime objects
   -> init Session and local Face
@@ -216,7 +210,6 @@ Router 主要承担跨连接路由，通常启动 listener、连接已知 peer�
 
 ## Listener 与 Connect 是两类方向
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 listener: 等远端主动连接当前节点
 connector: 当前节点主动连接远端 endpoint
@@ -243,7 +236,6 @@ Runtime 内建 scouting task 可：
 
 直接 `tokio::spawn` 后丢掉 JoinHandle，会让关闭无法知道任务是否仍访问 state。这里的 task 是执行器管理的 Future；多个 task 可以轮流占用同一 OS 线程，task 进入等待后由执行器重新安排，而不是每个 task 都拥有一条线程。`TaskController` 通过 `TaskTracker` 和 `CancellationToken` 将任务归属到 owner，具体字段与 `spawn[_abortable]`/终止路径见 [固定提交的 `TaskController`](https://github.com/eclipse-zenoh/zenoh/blob/9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5/commons/zenoh-task/src/lib.rs#L30-L146)：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 Session TaskController
   -> query timeout
@@ -261,7 +253,6 @@ Owner close 时先禁止/取消新任务，再等待现有任务终止。Session
 
 TransportManager 的新 unicast transport callback 最终会到 [`Gateway::new_transport_unicast`](https://github.com/eclipse-zenoh/zenoh/blob/9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5/zenoh/src/net/routing/gateway.rs#L264-L355)：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 upgrade WeakRuntime
   -> notify optional transport handlers
@@ -280,7 +271,6 @@ Face 将一条 transport connection 纳入路由拓扑。它保存该邻居的 r
 
 最能说明锁边界的是函数末尾的固定提交代码：Face 和 routing hat 已经更新表之后，先释放 Tables 写锁与 control lock，再逐项发送累积的声明。
 
-**代码身份：固定提交源码摘录；eclipse-zenoh/zenoh@9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5，`zenoh/src/net/routing/gateway.rs`，`Gateway::new_transport_unicast`，L343–L347。**
 ```rust
         drop(wtables);
         drop(ctrl_lock);
@@ -299,7 +289,6 @@ Face 创建会修改多组路由状态。`ctrl_lock` 串行拓扑控制操作，
 
 通用模式为：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 let commands = {
     let _control = ctrl_lock.lock();
@@ -315,7 +304,6 @@ Mux 是 routing-to-transport：路由结果通过目标 Face 的 Mux 发送。
 
 DeMux 是 transport-to-routing：收到 wire message 时，根据消息类型调用声明、push、request、response 等路由入口。
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 remote transport
   -> RuntimeSession::handle_message
@@ -332,7 +320,6 @@ Link up/down 和 transport close 也会触发路由状态变更与 cache invalid
 
 原因是内部 callback/task 可能需要 Arc 保证内存安全，却不应因此阻止“最后一个用户 Session handle”触发 close。
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 Arc strong count = public handles + internal implementation refs
 logical counter  = public handles that own open session semantics
@@ -393,7 +380,6 @@ Open 返回成功的含义也取决于模式和配置：Runtime 对象已启动�
 
 第一版只实现 session-local routing：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```rust
 struct SessionInner {
     state: RwLock<SessionState>,

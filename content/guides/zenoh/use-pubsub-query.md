@@ -16,7 +16,6 @@ Key 不只是字符串标签。路由缓存、Queryable 选择、ACL 和存储�
 
 ## C++ Publisher
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```cpp
 #include <chrono>
 #include <thread>
@@ -44,7 +43,6 @@ zenoh-cpp 仍在演进，`Bytes`、callback 和 option 的精确名称应以所�
 
 业务协议至少写入 sequence、源时间戳和 schema/version：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 version:u16 | sequence:u64 | source_time_ns:i64 | payload...
 ```
@@ -53,7 +51,6 @@ version:u16 | sequence:u64 | source_time_ns:i64 | payload...
 
 ## Subscriber 与表达式
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```cpp
 auto subscriber = session.declare_subscriber(
     zenoh::KeyExpr("robot/*/state"),
@@ -67,7 +64,6 @@ auto subscriber = session.declare_subscriber(
 
 `Sample` 参数通常只保证在 callback 调用范围内有效。若 worker 在回调返回后继续处理，应把所需 key、时间和 payload 转成拥有型对象：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```cpp
 void on_sample(const zenoh::Sample& sample) {
   OwnedSample owned{
@@ -86,7 +82,6 @@ void on_sample(const zenoh::Sample& sample) {
 
 Queryable 不是普通 subscriber。它收到 Query 后可以返回零到多条 Reply：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 server: declare_queryable("robot/arm/config")
   on query:
@@ -103,7 +98,6 @@ client: session.get("robot/arm/config")
 
 ### Query 的完整状态机
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 Open
   -> Reply(0..N) -> Open
@@ -116,7 +110,6 @@ Reply 是数据，Final 是完成信号，两者不能用“收到一条回复�
 
 服务方若要把 Query 交给异步 worker，需要一个有界 pending 表：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```cpp
 struct PendingQuery {
   QueryHandle query;                 // 拥有回复能力
@@ -147,7 +140,6 @@ FIFO 的“阻塞”不是可靠交付的同义词；它可能把慢消费者反
 
 常见设备模式：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 robot/arm/state         高频实时发布
 robot/arm/config        Queryable 返回当前配置
@@ -167,7 +159,6 @@ robot/arm/alive         liveliness token
 
 ## C++ 与 Rust 的同一生命周期
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 C++ Subscriber RAII handle
   -> C opaque owned handle

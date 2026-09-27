@@ -108,7 +108,6 @@ Carrier 是 YARP 对具体传输方式的称呼，例如 TCP 或 UDP。Port 名�
 
 官方 README 推荐应用创建 `navigation2DClient`，再 view 为 `yarp::dev::INavigation2D`。典型 C++ 结构如下：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 yarp::os::Property options;
@@ -162,7 +161,6 @@ terminal navigation : goal_reached / aborted / failing / client timeout
 
 可把 `PolyDriver` 和接口借用封装成一个不可复制 owner。下面是根据接口关系整理的**推荐封装**，不是仓库逐字源码：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 class NavigationClient {
@@ -229,7 +227,6 @@ user application
 
 可以把理想的不变量写成：只有当控制线程初始化成功、RPC Port 打开、reader 安装完成时，device 才对外可见；任一步失败都必须逆序释放已经提交的资源。下面是突出事务边界的**教学等价代码**，不是固定提交中的原文：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 bool RobotGotoDevice::open(Searchable& config) {
@@ -322,7 +319,6 @@ IRangefinder2D::getLaserMeasurement -> m_laser_data
 
 控制循环应把“没有新消息”和“已有消息但过期”分开。可以维护最后接收时间：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 if (auto* pose = pose_port_.read(false)) {
@@ -339,7 +335,6 @@ if (yarp::os::Time::now() - last_pose_time_ > pose_timeout_) {
 
 固定提交采用失败次数 `m_loc_timeout_counter` 和 `m_las_timeout_counter`，成功时清零、失败时递增到 `TIMEOUT_MAX`。这种设计成本低，却把实际时间隐式绑定到调度周期：阈值 300 在稳定 10 ms 周期下约为 3 秒，周期超限或动态改频后就不再代表 3 秒。更清晰的状态应保存最后成功的单调时钟时间。下面的 `SensorSnapshot` 是**推荐数据结构**，固定提交并没有这个类型：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 struct SensorSnapshot {
@@ -452,7 +447,6 @@ gamma      = normalize(θ_g - θ_r)
 
 源码只有速度非零时才施加最小速度：正值限制到 `[min, max]`，负值限制到 `[-max, -min]`，零值保持零。这样可以克服电机静摩擦，又不会把“停车”提升成最小运动速度。对应结构是：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 double SaturateSigned(double value, double min_abs, double max_abs) {
@@ -551,7 +545,6 @@ NavigationDevice            对外实现 INavigation2D，拥有全部资源
 
 它们的所有权可以直接写进类型：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 class NavigationDevice final : public DeviceDriver,
@@ -575,7 +568,6 @@ class NavigationDevice final : public DeviceDriver,
 
 最小数据模型也应把命令、传感器和输出分开：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 struct SetGoal { Map2DLocation goal; std::uint64_t command_id; };
@@ -616,7 +608,6 @@ struct ControlOutput {
 
 第一步的纯核心不需要知道 YARP。它只接收一份值类型输入，因此可以写成普通 C++ 类：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 class ControllerCore {
@@ -643,7 +634,6 @@ class ControllerCore {
 
 第二步才让 worker 连接中间件：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 void GotoWorker::run() {

@@ -55,7 +55,6 @@ Zenoh 的能力来自统一数据空间，但也意味着“key 名字”同时�
 
 ## 端到端路径
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 Session::put/get
   -> Primitives / local Face
@@ -69,7 +68,6 @@ Query 在这条路径上额外建立 qid 映射、每方向 pending entry 和 Fi
 
 ### 声明路径与数据路径
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 声明：
 PublisherBuilder await
@@ -92,7 +90,6 @@ Publisher put
 
 ### Query 比 Pub/Sub 多出的状态
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 get(selector)
   -> 分配本地 qid / pending state
@@ -198,7 +195,6 @@ fn get_data_route(
 图上的“缓存命中”也不能理解为 transport 写出成功。获取 Route 以后还要遍历方向、检查 egress policy、按目标 Face 重写 WireExpr 并投递到 Mux/Transport；慢链路会产生另外一层有界队列和拥塞行为。完整的逐目标分支放在[Publisher 与数据路由](publisher-routing.md)，此处先固定两个边界：**来源 Face 决定消息怎样被解释，Route 版本决定旧的转发答案能不能继续使用。**
 ## 核心对象与所有权
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 Runtime
   |-- transport manager / task controller

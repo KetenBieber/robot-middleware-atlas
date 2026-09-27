@@ -14,7 +14,6 @@ RMW 层必须同时实现：ROS graph discovery、topic 数据、QoS、服务请
 
 官方仓库将实现放在 `rmw_zenoh_cpp`，Zenoh 依赖由 `zenoh_cpp_vendor` 管理，系统级行为测试位于 `test_rmw_zenoh_cpp`。阅读时不要从巨大的 RMW 导出函数列表逐个跳转，而应沿实体生命周期推进：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 rmw_init / context Data
   -> Zenoh Session + graph cache + wait infrastructure
@@ -45,7 +44,6 @@ Context 对应一个共享 Session，而不是每个 Node 建一条连接。Node
 
 ## 总体对象图
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 rcl/rclcpp
   -> rmw_zenoh_cpp
@@ -64,7 +62,6 @@ Router 主要用于发现和跨主机通信，并不意味着同主机数据都�
 
 ### Context 的依赖图
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 rmw_context_t
   -> ContextImpl
@@ -82,7 +79,6 @@ rmw_context_t
 
 RMW 对上暴露 C 结构体与函数。一个创建入口的结构可抽象为：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```cpp
 extern "C" rmw_publisher_t* rmw_create_publisher(
     const rmw_node_t* node,
@@ -111,7 +107,6 @@ extern "C" rmw_publisher_t* rmw_create_publisher(
 
 ### 创建 Publisher 是跨三层的提交事务
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 验证 node / type support / topic / QoS
   -> 规范化 ROS name 与 type hash
@@ -138,7 +133,6 @@ ROS Publisher 映射为 Zenoh publisher/put，Subscription 映射为 subscriber 
 
 官方设计给出的数据 key 形式是：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 <domain_id>/<fully_qualified_name>/<type_name>/<type_hash>
 ```
@@ -147,7 +141,6 @@ ROS Publisher 映射为 Zenoh publisher/put，Subscription 映射为 subscriber 
 
 Publish 除 CDR payload 外还携带 attachment：8 字节 sequence、8 字节源时间戳、1 字节 GID 长度以及当前 16 字节 GID。所有多字节字段使用明确的小端编码，不能 `memcpy` 整个 C++ struct，因为 padding、对齐和宿主端序不属于稳定 wire format。
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```cpp
 void EncodeI64LE(std::vector<std::byte>& out, std::int64_t value) {
   const auto bits = static_cast<std::uint64_t>(value);
@@ -161,7 +154,6 @@ void EncodeI64LE(std::vector<std::byte>& out, std::int64_t value) {
 
 ### Publish 的完整数据动作
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 ROS message
   -> rosidl typesupport serialize to CDR
@@ -181,7 +173,6 @@ sequence 分配是 PublisherData 的跨线程状态，应使用同一 mutex 或�
 
 `add_new_message()` 在 `mutex_` 下检查关闭状态、按 QoS depth 丢弃最旧元素、记录 publisher sequence、把唯一拥有 Message 的指针压入 deque。随后它同步触发 RMW 注册的新数据通知 callback，再锁 WaitSet 的 condition mutex、设置 `triggered` 并 `notify_one`。下面是该提交从入队之后的连续源码摘录：
 
-**代码身份：固定提交源码摘录；`ros2/rmw_zenoh` commit `3b5b9bf424443f9800dd148b5f1cc2053bbc37fe`，`rmw_zenoh_cpp/src/detail/rmw_subscription_data.cpp`，`add_new_message`，L1171-L1179。**
 ```cpp
 message_queue_.emplace_back(std::move(msg));
 
@@ -195,7 +186,6 @@ if (wait_set_data_ != nullptr) {
 
 源码位置：[`SubscriptionData::add_new_message`](https://github.com/ros2/rmw_zenoh/blob/3b5b9bf424443f9800dd148b5f1cc2053bbc37fe/rmw_zenoh_cpp/src/detail/rmw_subscription_data.cpp#L1114-L1180)。这段展示了一个需要认真阅读的锁边界：函数进入时已经持有订阅自己的 `mutex_`，因此实际代码在调用 `data_callback_mgr_.trigger_callback()` 时并没有先释放队列锁。`DataCallbackManager` 在自己的 `event_mutex_` 下同步调用注册的 `rmw_event_callback_t`，通常用于通知上层实体已就绪；它不是直接执行 ROS subscription 的业务消息回调。这个次序意味着通知 callback 应保持短小且不重入 `SubscriptionData` 操作，否则它可能等待自己当前持有的 `mutex_`。源码事实见 [`DataCallbackManager::trigger_callback`](https://github.com/ros2/rmw_zenoh/blob/3b5b9bf424443f9800dd148b5f1cc2053bbc37fe/rmw_zenoh_cpp/src/detail/event.cpp#L81-L90)。
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 Zenoh receive task
   -> validate key/attachment
@@ -221,7 +211,6 @@ ROS executor thread
 
 缩小模型如下：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```cpp
 bool SubscriptionData::AttachIfEmpty(WaitCondition& condition) {
   std::lock_guard lock(queue_mutex_);
@@ -245,7 +234,6 @@ void SubscriptionData::Add(Message message) {
 
 固定实现用一个被 `condition_mutex` 保护的 `triggered` 谓词补上“先检查/附加、后真正等待”之间的竞态。`rmw_wait` 先把标志清零，再检查并附加各类实体；如果期间有订阅变为 ready，生产回调会在同一 `condition_mutex` 下置 `triggered=true`。随后等待端持锁调用带谓词的 `condition_variable.wait`，谓词已为真时不睡，虚假唤醒时则重新检查。源码中这套协议的设计注释在 [`rmw_wait_set_data.hpp`](https://github.com/ros2/rmw_zenoh/blob/3b5b9bf424443f9800dd148b5f1cc2053bbc37fe/rmw_zenoh_cpp/src/detail/rmw_wait_set_data.hpp#L22-L52)，等待处在 [`rmw_wait`](https://github.com/ros2/rmw_zenoh/blob/3b5b9bf424443f9800dd148b5f1cc2053bbc37fe/rmw_zenoh_cpp/src/rmw_zenoh.cpp#L2235-L2273)。
 
-**代码身份：固定提交源码摘录；`ros2/rmw_zenoh` commit `3b5b9bf424443f9800dd148b5f1cc2053bbc37fe`，`rmw_zenoh_cpp/src/rmw_zenoh.cpp`，`rmw_wait`，L2260-L2264。**
 ```cpp
 wait_set_data->condition_variable.wait(
   lock, [wait_set_data]() { return wait_set_data->triggered; });
@@ -263,7 +251,6 @@ wait_set_data->condition_variable.wait(
 
 官方设计文档说明 Service Server 使用 `Session::declare_queryable`，Client 使用 `Session::get`。请求附件携带 sequence、时间戳和 client GID；回复把相同 sequence 带回，用于关联并发请求。
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 rmw_send_request
   -> allocate sequence
@@ -286,7 +273,6 @@ Server 端 `Query` 对象必须活到 `rmw_send_response`。如果 `rmw_take_req
 
 `rmw_take_request` 与 `rmw_send_response` 不是同一次函数调用。前者在 Executor 线程中取走请求，用户回调运行一段时间之后，后者才发送响应。因此，Server 不能只把反序列化后的 request 放进队列；它还必须保存能够向原 Query 回复的拥有型句柄。可以把队列元素理解为下面的结构等价代码：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```cpp
 struct RequestId {
   std::array<std::uint8_t, 16> client_gid;
@@ -307,7 +293,6 @@ struct PendingServerRequest {
 
 第一，`std::span<std::byte>` 只是一段借用视图，不能跨越 Zenoh callback 保存；入队对象要拥有 payload，或者持有能够延长底层 Sample 生命周期的 owning handle。第二，`steady_clock` 适合计算本地超时，因为系统时钟校准不会让时间倒退；wire attachment 里的 source timestamp 则属于跨进程可观察时间，二者不能混用。第三，`shared_ptr` 并非天然正确：它只解决对象寿命，不解决“只能回复一次”。唯一完成权仍要由状态机约束。
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 RECEIVED -> TAKEN -> REPLIED
     |          |        |
@@ -320,7 +305,6 @@ RECEIVED -> TAKEN -> REPLIED
 
 Client 不必为每个请求创建一条线程。更紧凑的结构是：一个原子 sequence 产生器、一张 in-flight 表、一个收到 Zenoh Reply 的 callback，以及由 `rmw_wait` 消费的 completed 队列。
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```cpp
 enum class Completion : std::uint8_t { waiting, reply_ready, timed_out, closed };
 
@@ -351,7 +335,6 @@ Graph cache 要支持两阶段初始化：先用 `liveliness_get` 获取当前�
 
 收到 token 后，GraphCache 通常不会只保存原始字符串。ROS API 会按 node、namespace、topic、type 查询，因此缓存需要把一次事件投影到多种索引：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 entity_id -> EntityInfo
 (node_name, namespace) -> entity_ids
@@ -363,7 +346,6 @@ service_name -> service_ids / client_ids / type_names
 
 Liveliness 事件还可能发生重排：删除通知可能先于本地观察到的创建通知，快照查询与持续订阅也可能重叠。因此 add/remove 操作必须幂等，不能把“删除未知实体”当作缓存损坏。最小规则如下：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 add(id, metadata): 不存在则插入；内容相同则无动作；内容变化则原子替换索引
 remove(id):        存在则删除全部索引；不存在则记诊断并无动作
@@ -419,7 +401,6 @@ RMW 是 C ABI，内部却使用 C++ RAII 对象。创建函数必须把部分构
 
 假设 `SubscriptionData` 拥有 Zenoh subscriber，而 subscriber 的 callback 又捕获 `shared_ptr<SubscriptionData>`，就形成强引用环：只有 callback 销毁才释放 Data，只有 Data 析构才 undeclare subscriber。解决方法通常是让 callback 捕获 `weak_ptr`，进入时临时 `lock()`：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```cpp
 std::weak_ptr<SubscriptionData> weak_self = self;
 auto callback = [weak_self](const zenoh::Sample& sample) {
@@ -457,7 +438,6 @@ Router-centric 默认拓扑减少 multicast 依赖、便于跨网段与 ACL；�
 
 单条消息从网络到用户回调的延迟可以粗分为：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 T = T_transport + T_validate + T_queue_wait + T_deserialize + T_executor_wait
 ```
@@ -488,7 +468,6 @@ Router-centric 默认部署减少了 multicast 依赖，却让 Router 的启动�
 
 这不是单独运行 Zenoh pub/sub 示例，而是让真实 ROS 2 节点经过 RMW。部署时先固定 ROS 发行版与对应 `rmw_zenoh` 分支，再使用该分支随附的 Router 和 JSON5 配置；不要混用 rolling 的二进制、旧发行版的配置与另一版本的 zenoh-cpp。
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 终端 A：启动该发行版提供的 rmw_zenoh router
 终端 B：设置 RMW_IMPLEMENTATION=rmw_zenoh_cpp，运行 talker
@@ -517,7 +496,6 @@ Router-centric 默认部署减少了 multicast 依赖，却让 Router 的启动�
 
 一个便于保持依赖方向的文件树可以是：
 
-**图示身份：概念、状态或调用链示意，不是源码。**
 ```text
 mini_rmw_zenoh/
   include/mini_rmw/
@@ -541,7 +519,6 @@ mini_rmw_zenoh/
 
 `context.hpp` 不应该反向依赖 C handle。内部核心先使用普通 C++ 类型表达所有权，最外层文件再负责类型擦除：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```cpp
 struct ContextData {
   std::shared_ptr<ZenohSession> session;
@@ -562,7 +539,6 @@ struct OwnedMessage {
 
 Subscription 的最小状态要把队列、关闭标志和 wait generation 放在同一同步边界：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```cpp
 class SubscriptionData {
  public:
@@ -585,7 +561,6 @@ class SubscriptionData {
 
 C ABI handle 只在内部对象完整构造后获得所有权：
 
-**代码身份：教学最小例子；非上游源码摘录。**
 ```cpp
 extern "C" rmw_subscription_t* mini_create_subscription(/* ... */) noexcept {
   try {

@@ -18,7 +18,6 @@ eCAL 将这些职责拆到 `CMemoryFile`、`CSyncMemoryFile`、`CDataWriterSHM` 
 
 因此，共享内存不是“把一个指针变成全局变量”，而是两个进程分别把同一个命名对象映射到自己的虚拟地址空间：Linux 固定实现用 `shm_open`/文件描述符找到对象，`ftruncate` 定容量，`mmap(..., MAP_SHARED, ...)` 建立映射；每个进程得到的虚拟地址可以不同，更新却对映射同一共享对象的进程可见。下面直接看 Linux memory-file backend 的分配与映射代码；`MAP_SHARED` 的操作系统语义可参考 [`mmap(2)`](https://man7.org/linux/man-pages/man2/mmap.2.html)。映射不等于所有页已预先加载：首次访问某页可能触发 page fault，严格实时路径要预触页并测量。
 
-**固定提交源码摘录（eCAL `1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，`memfile::os::AllocFile` 与 `memfile::os::MapFile`）：**
 
 ```cpp
 bool AllocFile(const std::string& name_, const bool create_, SMemFileInfo& mem_file_info_)
@@ -215,7 +214,6 @@ Linux send event 不是逐消息计数器：共享结构里是一个 `set` 字�
 
 Linux 实现把状态字节和 pthread 同步对象放在共享映射中。`PTHREAD_PROCESS_SHARED` 让不同进程映射到不同虚拟地址的线程也能使用同一把 mutex/condvar；真正等待时，pthread 在原子地释放 mutex 的同时把当前线程阻塞，返回前重新取得 mutex。固定提交的 event 原语如下：
 
-**固定提交源码摘录（eCAL `1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，Linux `named_event_initialize/set/wait`）：**
 
 ```cpp
 struct alignas(8) named_event
@@ -294,7 +292,7 @@ write #3 -> buffer 0
 
 先看 buffer 数量如何转化成实际文件对象，再看每个写调用怎样推进索引：
 
-**固定提交源码摘录（eCAL `1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，`CDataWriterSHM::SetBufferCount`、`PrepareWrite` 与 `Write`）：**
+接着看 `Write` 的真实实现：
 
 ```cpp
 bool CDataWriterSHM::PrepareWrite(const SWriterAttr& attr_)
@@ -386,7 +384,6 @@ Header 和 payload 必须在同一临界区提交，形成一条原子可见 sam
 
 写端真正拿到的是 `CPayloadWriter&`、消息元数据和 `force_full_write`。调用位置从 `CDataWriterSHM::Write` 选中的单个同步 memfile 进入；下面是固定提交 `1ec0ea2fe5e5e61e3e492be6128c27cc6026d717` 中 `CSyncMemoryFile::Write()` 的连续源码摘录，省略范围为零。
 
-**固定提交源码摘录（`CSyncMemoryFile::Write()`）：**
 
 ```cpp
 bool CSyncMemoryFile::Write(CPayloadWriter& payload_, const SWriterAttr& data_, bool force_full_write_/* = false*/)
@@ -530,7 +527,6 @@ Clock 去重用于避免重复 event 或同一 buffer 被多次观察。先确�
 
 等待线程真正如何分支，可以直接看固定提交的连续源码。输入是上一节写入并通知的 memfile；调用发生在 `CMemFileObserver::Start()` 创建的 observer `std::thread` 中。下面摘录从 wait/获取读锁一直到 callback、ACK 与循环退出；它保留了这段范围内的全部控制流。注意源码注释称 wait 为 20 ms，但传给 `gWaitForEvent` 的实参实际是 500 ms。
 
-**固定提交源码摘录（`CMemFileObserver::Observe()`）：**
 
 ```cpp
 void CMemFileObserver::Observe(const int timeout_)
@@ -697,7 +693,7 @@ Observer callback 的 C++ 捕获方式也决定关闭顺序。固定源码 `CSHM
 
 registration receiver 在拿到 publisher 发来的 memfile list 后进入 `CSHMReaderLayer::SetConnectionParameter()`。这个函数为每个 memfile event 创建 callback，再交给由 `CGlobals` 共享拥有的 pool；pool 按文件名复用已有 observer，或者建立并启动新 observer：
 
-**固定提交源码摘录（eCAL `1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，`CSHMReaderLayer::SetConnectionParameter` 与 `CMemFileThreadPool::ObserveFile`）：**
+接着看 `CMemFileThreadPool::ObserveFile` 的真实实现：
 
 ```cpp
 void CSHMReaderLayer::SetConnectionParameter(SReaderLayerPar& par_)
@@ -760,7 +756,7 @@ bool CMemFileThreadPool::ObserveFile(const std::string& memfile_name_,
 
 关闭代码把 worker 的线程边界闭合在 `join()`：
 
-**固定提交源码摘录（eCAL `1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`，`CMemFileObserver::Start/Stop` 与 `CMemFileThreadPool::Stop`）：**
+接着看 `CMemFileThreadPool::Stop` 的真实实现：
 
 ```cpp
 bool CMemFileObserver::Start(const int timeout_, const MemFileDataCallbackT& callback_)

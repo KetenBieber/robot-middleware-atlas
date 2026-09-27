@@ -23,7 +23,7 @@ Protocol
 
 Protocol 是一条连接的协调对象，Carrier 描述这条连接采用的线格式与握手规则，TwoWayStream 提供字节流。这里的所有权不是图上的抽象箭头：`Protocol` 构造时接管传入的 `TwoWayStream*`，内部 `ShiftStream` 持有它；关闭 Protocol 会关闭 stream，并释放它创建的 Carrier 对象。后文会回到析构代码核对这件事。
 
-**固定提交源码摘录：**
+接下来对照固定版本的实际代码：
 
 ```cpp
 Protocol::Protocol(TwoWayStream* stream) :
@@ -60,7 +60,6 @@ Protocol::~Protocol()
 
 Carrier 是有虚函数的基类：主动端需要从名称选出 Carrier，被动端需要先读固定长度的 header，再让各 Carrier 判别它。`create()` 为每条连接产生独立的运行实例。真实实现使用原始指针，因此还必须追查谁 delete；下面先看提交中的接口，而不是用智能指针示例代替它：
 
-**固定提交源码摘录：**
 
 ```cpp
 class Carrier : public Connection
@@ -107,7 +106,6 @@ Protocol::open(Route)
 
 主动端从 Route 的 carrier name 选择 Carrier；被动端读取协议标识后逐个询问 registry prototype。下面是两条入口在固定版 Protocol 中的真实分支：
 
-**固定提交源码摘录：**
 
 ```cpp
 bool Protocol::open(const std::string& name)
@@ -144,7 +142,6 @@ bool Protocol::open(const Route& route)
 
 握手状态最好显式表达：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 enum class ProtocolState {
@@ -166,7 +163,6 @@ enum class ProtocolState {
 
 主动端按名称查 prototype；被动端先读 8 字节，再按 header 逐个调用 `checkHeader()`。固定版 registry 内部实际是 `std::vector<Carrier*>`，按名称和按 header 都线性扫描；发现匹配项后返回 `create()` 新建的裸指针，而不是 prototype 本身：
 
-**固定提交源码摘录：**
 
 ```cpp
 Carrier* Carriers::Private::chooseCarrier(const std::string& name,
@@ -216,7 +212,7 @@ Carrier* Carriers::Private::chooseCarrier(const Bytes& header,
 
 Prototype 也有明确释放者。进程级 `Carriers` 清理时删除它注册的原型；单连接的 Protocol 清理时则删除 `create()` 产生的实例。这两层 raw pointer 的 owner 不能混淆：
 
-**固定提交源码摘录：**
+接下来对照固定版本的实际代码：
 
 ```cpp
 void Carriers::clear()
@@ -233,7 +229,7 @@ void Carriers::clear()
 
 TCP prototype 把每个实例需要的 ack 配置复制到新对象；握手 header 把 TCP 类型与 ack 位编码进去。下面的实现还说明 `checkHeader()` 是对已经读入的八字节做识别，并非先接收任意长度的协议数据：
 
-**固定提交源码摘录：**
+接下来对照固定版本的实际代码：
 
 ```cpp
 yarp::os::Carrier* yarp::os::impl::TcpCarrier::create() const
@@ -261,7 +257,6 @@ bool yarp::os::impl::TcpCarrier::checkHeader(const yarp::os::Bytes& header)
 
 TCP 只交付有序字节，没有“这一条机器人消息到此结束”的标记。YARP 因此让 Carrier 先解释连接上的 index，再由 Protocol 把解出的长度交给 `StreamConnectionReader`，最后由输入线程调用业务 Reader。固定源码中的顺序如下：
 
-**固定提交源码摘录：**
 
 ```cpp
 ConnectionReader& Protocol::beginRead()
@@ -293,7 +288,7 @@ void Protocol::endRead()
 
 Carrier 负责把输入 index 翻译成这次消息的 payload 长度。默认二进制实现先读 8 字节整数并要求其值为 10，再读 10 字节描述符及每个输入/输出 block 的长度，累加后写入 Protocol 的 `messageLen`：
 
-**固定提交源码摘录：**
+接下来对照固定版本的实际代码：
 
 ```cpp
 bool AbstractCarrier::defaultExpectIndex(ConnectionState& proto)
@@ -349,7 +344,6 @@ bool AbstractCarrier::defaultExpectIndex(ConnectionState& proto)
 
 这里必须区分“记下本帧还剩多少字节”和“拒绝越界读取”。固定提交的 `StreamConnectionReader::expectBlock()` 会在成功读入后扣减 `messageLen`，但没有先检查请求长度不超过它：
 
-**固定提交源码摘录：**
 
 ```cpp
 bool StreamConnectionReader::expectBlock(Bytes& b)
@@ -378,7 +372,6 @@ bool StreamConnectionReader::expectBlock(Bytes& b)
 
 一个有限 Reader 可以这样实现边界：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 class LimitedReader final : public ConnectionReader {
@@ -428,7 +421,7 @@ PortWriter dynamic type
 
 接下来是连接层真正发送这份编码 buffer 的入口。`SizedWriter` 包含一组已序列化的 block；Protocol 先让 Modifier 按需初始化，检查连接 active，再把“一条 packet”边界交给 Carrier。写完成后，它可以读取 RPC reply，最后执行 carrier-specific ack 等待：
 
-**固定提交源码摘录：**
+接下来对照固定版本的实际代码：
 
 ```cpp
 bool Protocol::write(SizedWriter& writer)
@@ -465,7 +458,7 @@ bool Protocol::write(SizedWriter& writer)
 
 Base Carrier 如何把 block 写到底层输出流，可从 `AbstractCarrier::write()` 看到：
 
-**固定提交源码摘录：**
+接下来对照固定版本的实际代码：
 
 ```cpp
 bool AbstractCarrier::write(ConnectionState& proto, SizedWriter& writer)
@@ -484,7 +477,6 @@ bool AbstractCarrier::write(ConnectionState& proto, SizedWriter& writer)
 
 默认 Carrier 的 index 也不是一个孤立的 payload 长度整数。它先标出固定 10 字节的描述区，其中记录业务 writer 的 block 数和一个输出 block；随后逐块写入 32 位长度，最后写入长度为 0 的回复块描述：
 
-**固定提交源码摘录：**
 
 ```cpp
 bool AbstractCarrier::defaultSendIndex(ConnectionState& proto, SizedWriter& writer)
@@ -516,7 +508,7 @@ Carrier name 可带 `send`/`recv` 参数。Protocol 将基础连接行为保存�
 
 `beginWrite()` 会延迟检查 sender qualifier。下列函数是实际的创建与失败处理：
 
-**固定提交源码摘录：**
+接下来对照固定版本的实际代码：
 
 ```cpp
 bool Protocol::getSendDelegate()
@@ -574,7 +566,7 @@ PortWriter -> sender delegate modifies outgoing data -> SizedWriter
 
 这里的“业务 Reader 返回”不是抽象推演。`PortCoreInputUnit::run()` 在当前 input worker 上将接收的 reader 交给 `PortCore::readBlock()`；后者在 callback 锁保护下同步调用应用 `PortReader::read()`，回到 input loop 后再调用 `ip->endRead()`。若应用 Reader 里等待马达动作完成，ACK 就会连带等待；若它只把 setpoint 放入内部队列，ACK 只确认这一段同步处理结束。
 
-**固定提交源码摘录：**
+接下来对照固定版本的实际代码：
 
 ```cpp
 if (ip->getReceiver().acceptIncomingData(br)) {
@@ -599,7 +591,6 @@ if (ip->getReceiver().acceptIncomingData(br)) {
 
 出处：YARP 固定提交中的 `PortCoreInputUnit::run` 的数据命令分支，略去 envelope 与其他 Port 命令分支。再往下一层：
 
-**固定提交源码摘录：**
 
 ```cpp
 if (m_reader != nullptr && !m_interrupted) {
@@ -628,7 +619,6 @@ return result;
 
 出处：同一固定提交中的 `PortCore::readBlock` 的核心分支，省去日志和 tracing。OS 线程从 socket stream 读到消息并不代表 callback 已开始；线程先解析命令和 index，再同步进入 Reader。Reader 卡住时，这一 input worker 无法开始读同一连接的下一帧；callback 锁还会阻止其他受同一 callback 锁串行化的调用。Reader 返回后，InputUnit 才执行 `endRead()`，Carrier 才有机会发 ACK。
 
-**固定提交源码摘录：**
 
 ```cpp
 bool AbstractCarrier::defaultSendAck(ConnectionState& proto)
@@ -667,7 +657,7 @@ ack 读取本身可能阻塞。`Protocol::setTimeout()` 将 timeout 设置到 ou
 
 中断与销毁是不同状态转换。Port 关闭时必须先让可能阻塞在 read/ack 上的 worker 有机会退出；`interrupt()` 尝试结束等待，但不释放 Carrier 对象。之后 `closeHelper()` 才关闭 owned stream 并 delete 基础 Carrier 和两个 modifier：
 
-**固定提交源码摘录：**
+接下来对照固定版本的实际代码：
 
 ```cpp
 void Protocol::interrupt()
@@ -709,7 +699,6 @@ void Protocol::closeHelper()
 
 出处：YARP 固定提交中的 `Protocol::interrupt` 与 `Protocol::closeHelper`。`interrupt()` 先处理 pending ack，然后打断输入 stream 并把 active 置 false；最终 close 负责关闭 stream 和销毁所拥有的三类 Carrier。`PortCoreOutputUnit::closeMain()` 的真实关停顺序如下：
 
-**固定提交源码摘录：**
 
 ```cpp
 void PortCoreOutputUnit::closeMain()
@@ -743,7 +732,6 @@ void PortCoreOutputUnit::closeMain()
 
 稳定协议不能直接发送 C++ struct：padding、`bool` 宽度、enum 底层类型和宿主端序都可能变化。固定字段应使用明确宽度与编码函数：
 
-**教学代码（不是固定提交源码摘录）：**
 
 ```cpp
 void WriteU32BE(OutputStream& out, std::uint32_t value) {
