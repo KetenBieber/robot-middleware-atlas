@@ -245,6 +245,21 @@ request_stop
 5. 回放过程中发送 SIGINT，验证日志关闭且文件仍可读取；
 6. 切换错误 Provider URL，确认启动日志足以解释为什么 spy 看不到数据。
 
+## 把日志、在线总线和命令确认看成三种不同可靠性
+
+LCM 很容易因为“都有 channel 和 bytes”让人把三种路径混在一起：
+
+| 路径 | 能保证什么 | 不能自动保证什么 |
+|---|---|---|
+| UDPM publish | 本地发送调用的有限状态 | 远端收到、远端 callback 已执行 |
+| EventLog write | 某条 event 的 header/channel/data 被写入文件 | schema、程序版本、外部世界也被保存 |
+| 应用 ACK | 对方业务代码对 command id 给出某种状态 | 物理系统已经达到目标，除非协议明确这样定义 |
+
+因此机器人命令最好把 `Accepted / Succeeded / Failed` 分开。`publish()==0` 不能直接变成 `Succeeded`；日志里出现一条 command 也不能证明执行器真的动作。回放时尤其要隔离副作用：把日志送到专用 replay bus 或仿真适配器，让命令只进入可观察的模型，不要让历史控制命令重新驱动真实硬件。
+
+当一次线上故障发生时，归档至少应包含 Provider URL、schema commit、应用构建版本、日志分片、sequence gap 指标以及关键配置。EventLog 只负责保存原始总线事件，不会替你归档这些上下文。
+
+
 ## 工程验收
 
 - 满负载下 sequence gap、重组失败和队列 drop 可区分；

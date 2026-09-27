@@ -215,6 +215,40 @@ runtime:
 
 应用启动时打印归一化后的非敏感配置，并将同一清单复制进日志归档。这样“两个程序看起来都用了默认值”不会成为排障依据。
 
+## 从“收不到消息”反推是哪一层坏了
+
+不要从应用 callback 一路向外盲猜。把链路按最早能观察到的证据切开：
+
+~~~text
+sender publish 返回
+   |
+   v
+本机是否真的有对应 UDP datagram
+   |
+   v
+另一台主机是否能抓到 multicast
+   |
+   v
+LCM provider 是否完成协议校验 / 重组
+   |
+   v
+notify fd 是否 readable
+   |
+   v
+应用是否及时调用 handle
+   |
+   v
+subscription regex / fingerprint / queue capacity
+   |
+   v
+user callback
+~~~
+
+如果 `lcm-spy` 和抓包都看不到 channel，优先查 URL、组播接口、TTL、交换机与 sender；如果 spy 能看到而业务程序没有，问题已经缩到应用侧：订阅表达式、生成类型、handle 频率和 callback。若短消息稳定、大消息明显更差，再查 MTU、LC03/IP 分片与接收缓冲，而不是继续增大 subscription capacity。
+
+这个排查顺序和源码结构是一一对应的：发送端见 [UDPM 协议](udpm-publish-protocol.md)，接收缓冲与通知见 [接收与重组](receive-reassembly.md)，应用准入与回调见 [订阅与分发](subscription-dispatch.md)。当现象能被定位到其中一层，才调整该层参数。
+
+
 ## 环境验收
 
 - `lcm.good()` 为真；

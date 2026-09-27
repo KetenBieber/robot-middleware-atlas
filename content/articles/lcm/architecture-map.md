@@ -10,6 +10,41 @@ LCM 适合受控网络中的机器人、车辆、仿真和实验系统：协议�
 
 它不提供端到端可靠交付、动态 QoS 协商或复杂全局发现。发布返回值的含义由 provider 决定：UDPM 短帧成功对应本机 `sendmsg()` 接受完整 datagram；固定版本的 UDPM 长帧即使 `sendmsg()` 失败也会返回 0；无论哪种路径，都不表示所有订阅者收到。应用必须决定丢包、旧数据、重复和消费者离线意味着什么。
 
+## 从一条真实广播，自己画出第一版架构
+
+控制器通过 `publish("JOINT_STATE", &state)` 发送时，容易把 C++ 消息、发送缓冲、UDP 数据报和接收端 callback 参数当作“同一条消息的四个名字”。实际上它们可能处于四块不同的内存，也不会自动拥有相同的寿命。
+
+~~~text
+控制线程                   网络侧                        应用线程
+state
+  | generated encode
+  v
+临时 wire bytes
+  | provider vtable
+  v
+LC02 / LC03 + sendmsg ──UDP──> recvmsg()
+                                   |
+                               校验、重组
+                                   |
+                              完整消息队列
+                                   | notify pipe
+                                   +───────────────> handle()
+                                                       |
+                                                    匹配订阅
+                                                       |
+                                               同步执行 callback
+                                                       |
+                                               归还消息描述符
+~~~
+
+第一次读源码，要先沿**同步调用边界**追：C++ 模板 `publish` 生成 bytes，`lcm_publish` 经函数表进入 `lcm_udpm_publish`；后者返回后，C++ 包装器就释放临时编码缓冲。底层若要异步留存 payload，必须自己复制，而不是借用已经释放的地址。
+
+接收时则沿**执行上下文边界**追：`recv_thread` 在网络线程读 socket、重组并给 `inbufs_filled` 入队；`lcm_handle` 在应用线程出队并同步调用匹配的 callback。网络线程和业务线程解耦，不能反过来推出消息无限缓存或自动具备实时性。
+
+再加一层容易混淆的状态：`inbufs_filled` 保存完整 payload 的**共享描述符**；`num_queued_messages` 则保存每个订阅者已经获得、尚未消费的**准入次数**。三个订阅者可以对同一块 payload 作出三种不同的丢帧决定，而不必各复制一份原始字节。等所有订阅都拒绝一条新消息时，接收端才有理由跳过其完整交付。
+
+一张架构图最好每次只回答一个新问题。等读到分片丢失，再在此图加入 LC03 暂存表；读到 callback 阻塞，再加入 ring 的旧代际和配额；读到动态取消订阅，再加入 `callback_scheduled` 与 `marked_for_deletion`。每一个后来出现的对象都应有具体的故障现象作来路。
+
 ## 功能域
 
 | 功能 | 核心实现 | 关键语义 |

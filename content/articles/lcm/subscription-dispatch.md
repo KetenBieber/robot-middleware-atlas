@@ -14,7 +14,7 @@
 
 ## subscription 的状态
 
-对应的上游实现如下：
+先看固定提交里的 `lcm_subscription_t`，把匹配、回调、配额和删除状态放在同一个对象里：
 
 ```c
 struct _lcm_subscription_t {
@@ -470,7 +470,7 @@ C++ 中可以用 `shared_ptr<Subscription>` 简化对象寿命，但仍需要定
 
 把一次 dispatch 从查表直到回收连起来看，才能看到锁保护的状态和对象何时安全释放。`lcm_udpm_handle()` 已从 provider 队列取出一条消息，然后在 provider 锁外调用核心 `lcm_dispatch_handlers()`；因此回调运行在线程调用 `lcm_handle()` 的调用栈中。下面从构造接收视图处摘取连续语句，输入 `lcmb` 是刚从 filled queue 取出的唯一完整消息 buffer。
 
-对应的上游实现如下：
+把 provider 队列中的完整消息交给核心前，`lcm_udpm_handle()` 先构造一个只在本次同步分发期间有效的接收视图：
 
 ```c
     lcm_recv_buf_t rbuf;

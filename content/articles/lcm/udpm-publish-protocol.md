@@ -1,186 +1,178 @@
-# UDPM 发送协议：LC02、LC03 与 scatter-gather I/O
+# UDPM 发送协议：一条控制消息为何能变成几十枚 IP 分片？
 
-假设移动机器人每 2 ms 发布一次 64 字节关节状态，另一个线程偶尔发布 900 KiB 点云。把两类数据直接拼进一个大 `struct` 再做一次 UDP `sendto()`，大数据报会超过常见链路 MTU，依赖 IP 层二次分片；任何一片丢失，整条 UDP 数据报都不可交付。LCM 的 UDPM provider 因此把短消息保持为一个 datagram，把较长 payload 切成带序号和偏移的应用层片段。这个协议能接收大 payload，却不提供大消息可靠交付。
+上一章我们已经知道：`lcm::LCM` 先把业务对象编码成连续字节，公共 `lcm_publish()` 再通过 provider 的函数表调用 `lcm_udpm_publish()`。现在换回使用者视角。你正在给机器人发送两类数据：一条每 2 ms 更新的 64 字节关节状态，以及一份偶尔更新、约 900 KiB 的点云。两者在业务代码里看起来只是两次相同的调用：
 
-LCM 的默认 URL 使用 UDP multicast：
+~~~cpp
+lcm::LCM bus("udpm://239.255.76.67:7667?ttl=1");
+bus.publish("JOINT_STATE", &joint_state);
+bus.publish("CLOUD", &point_cloud);
+~~~
 
-```text
-udpm://239.255.76.67:7667?ttl=0
-```
+为什么第一条通常很快发出去，第二条却可能占住另一条发布线程，而且抓包时你可能同时看见 **LCM 自己的分片**和**IP 层自己的分片**？如果只说“LCM 支持 UDP 应用层分片”，还远远不能解释这种行为。
 
-`lcm_publish()` 到达 UDPM provider 后，根据 channel 加 payload 的长度选择两种线格式：短消息使用单个 LC02 数据报，大消息使用多枚 LC03 分片。发送代码集中在 `lcm_udpm_publish()`。
+我们沿着发送端逐步追问：它究竟怎样判断该不该分片；为什么使用 `iovec`；两个线程如何争抢同一个序列号；一次本地发送成功为什么不能代表远端已经收到？全文以 `lcm-proj/lcm@ad0c54cee0ec048ef12357c34349ec1443158864` 为准。
 
-下面沿 LCM 的固定提交 `ad0c54cee0ec048ef12357c34349ec1443158864` 回放发送线程的完整分支：从长度检查与序号分配开始，一直追到 scatter-gather 系统调用以及错误返回，而不是把“支持分片”当成已经证明可靠交付。
+## 从用户的一个误判开始：LCM 分片和 IP 分片不是同一层
 
-## 发送函数的输入边界
+先回顾 IP 层的限制。以不带额外选项、MTU 为 1500 的普通 IPv4 以太网为例，一个不需要 IP 分片的 UDP 数据报最多容纳约 `1500 - 20 - 8 = 1472` 字节的 UDP payload。这只是便于理解的典型值；真实上限还取决于 IP 版本、报头选项、隧道和路径 MTU。
 
-Provider 接收四个参数：
+你可能猜想：LCM 会把所有超过 1472 字节的消息切成更小的 LC03 包，彻底避开 IP 分片。**固定版本的源码不支持这个普遍结论。** `udpm_util.h` 明确区分平台：
 
+~~~c
+#ifdef __APPLE__
+#define LCM_SHORT_MESSAGE_MAX_SIZE 1435
+#define LCM_FRAGMENT_MAX_PAYLOAD 1423
+#else
+#define LCM_SHORT_MESSAGE_MAX_SIZE 65499
+#define LCM_FRAGMENT_MAX_PAYLOAD 65487
+#endif
+~~~
 
-```c
-static int lcm_udpm_publish(lcm_udpm_t *lcm,
-                            const char *channel,
-                            const void *data,
-                            unsigned int datalen);
-```
+这两个宏定义有一个很容易忽略的含义：LCM 判断的是 `channel + '\0' + 已编码的 payload`，而不是加上 LCM header 后的总 UDP 长度。短包的 LC02 header 占 8 字节；长包的 LC03 header 占 20 字节，所以非 Apple 的两个最大值分别加上对应 header，恰好都是 65,507 字节——IPv4 UDP payload 的理论上限，而不是普通以太网“不发生 IP 分片”的上限。
 
-`data` 已经是生成式编码器产生的字节序列。UDPM 不理解消息字段，只负责把 channel 和 bytes 封装到协议中。
-下面先看固定提交中从输入到两个线格式分支的完整控制流。输入 `data` 与 `channel` 均由调用方提供；函数只在同步调用期间借用 payload。
+<escape>**例子：**</escape> 假设 channel 为 `"POSE"`（5 字节，包括末尾 NUL），编码 payload 有 5000 字节。
 
+| 构建配置 | LCM 的判断 | 交给 socket 的 UDP 数据报 |
+|---|---|---|
+| 非 Apple，短包阈值 65499 | `5005 ≤ 65499`，使用 LC02 | 一枚 `8 + 5 + 5000 = 5013` 字节的 UDP payload |
+| Apple，短包阈值 1435 | `5005 > 1435`，使用 LC03 | 4 枚分别包含不同数据切片的 UDP 数据报 |
 
-```c
-static int lcm_udpm_publish(lcm_udpm_t *lcm, const char *channel, const void *data,
-                            unsigned int datalen)
-{
-    int channel_size = strlen(channel);
-    if (channel_size > LCM_MAX_CHANNEL_NAME_LENGTH) {
-        fprintf(stderr, "LCM Error: channel name too long [%s]\n", channel);
-        return -1;
-    }
+在上述 MTU 1500 的普通 IPv4 链路上，非 Apple 配置发送的那一枚 5013 字节 UDP 数据报仍可能被 IP 层分成多枚 IP fragments。Apple 配置的 LC03 包，每枚约 1443 字节或更短，才与这种链路的常见 MTU 更匹配。这里比较的是**固定版本的编译分支**，不是声称所有 Apple 设备或所有 Linux 网络都一定使用同一种 MTU。
 
-    int payload_size = channel_size + 1 + datalen;
-    if (payload_size <= LCM_SHORT_MESSAGE_MAX_SIZE) {
-        // message is short.  send in a single packet
+由此我们得到第一个设计判断：**LC03 解决的是 LCM 如何跨多个 UDP 数据报重组一条业务消息；它是否同时避免 IP 分片，取决于编译时的常量与实际网络 MTU。**
 
-        g_mutex_lock(&lcm->transmit_lock);
+## 第二问：如果我们自己写发送端，应该先写什么？
 
-        lcm2_header_short_t hdr;
-        hdr.magic = htonl(LCM2_MAGIC_SHORT);
-        hdr.msg_seqno = htonl(lcm->msg_seqno);
+最直接的实现只有一次系统调用：
 
-        struct iovec sendbufs[3];
-        sendbufs[0].iov_base = (char *) &hdr;
-        sendbufs[0].iov_len = sizeof(hdr);
-        sendbufs[1].iov_base = (char *) channel;
-        sendbufs[1].iov_len = channel_size + 1;
-        sendbufs[2].iov_base = (char *) data;
-        sendbufs[2].iov_len = datalen;
+~~~cpp
+// 教学伪代码：此时还没有 LCM wire header。
+sendto(socket, bytes, size, 0, &destination, address_length);
+~~~
 
-        // transmit
-        int packet_size = datalen + sizeof(hdr) + channel_size + 1;
-        dbg(DBG_LCM_MSG, "transmitting %d byte [%s] payload (%d byte pkt)\n", datalen, channel,
-            packet_size);
+当消息足够短，它完全合理。但当一条消息大到超出 UDP 单报文最大长度时，内核甚至无法接受这一整份 payload；即使没有超出最大长度，经过小 MTU 链路也可能有较大的 IP 重组失败风险。
 
-        //        int status = writev (lcm->sendfd, sendbufs, 3);
-        struct msghdr msg;
-        msg.msg_name = (struct sockaddr *) &lcm->dest_addr;
-        msg.msg_namelen = sizeof(lcm->dest_addr);
-        msg.msg_iov = sendbufs;
-        msg.msg_iovlen = 3;
-        msg.msg_control = NULL;
-        msg.msg_controllen = 0;
-        msg.msg_flags = 0;
-        int status = sendmsg(lcm->sendfd, &msg, 0);
+因此我们需要在真正调用 socket 之前，先做一个**与操作系统无关的纯计算**：确定走 LC02 还是 LC03；如果是 LC03，第几片放哪一段数据？先算明白，再把每段交给 `sendmsg()`。这样传输失败与分片下标错误就不会被混在同一团代码中。
 
-        lcm->msg_seqno++;
-        g_mutex_unlock(&lcm->transmit_lock);
+固定源码 `lcm_udpm_publish()` 的入口先检查 channel 长度，然后选择分支，核心条件只有：
 
-        if (status == packet_size)
-            return 0;
-        else
-            return status;
-    } else {
-        // message is large.  fragment into multiple packets
-
-        int fragment_size = LCM_FRAGMENT_MAX_PAYLOAD;
-        int nfragments = payload_size / fragment_size + !!(payload_size % fragment_size);
-
-        if (nfragments > 65535) {
-            fprintf(stderr, "LCM error: too much data for a single message\n");
-            return -1;
-        }
-
-        // acquire transmit lock so that all fragments are transmitted
-        // together, and so that no other message uses the same sequence number
-        // (at least until the sequence # rolls over)
-        g_mutex_lock(&lcm->transmit_lock);
-        dbg(DBG_LCM_MSG, "transmitting %d byte [%s] payload in %d fragments\n", payload_size,
-            channel, nfragments);
-
-        uint32_t fragment_offset = 0;
-
-        lcm2_header_long_t hdr;
-        hdr.magic = htonl(LCM2_MAGIC_LONG);
-        hdr.msg_seqno = htonl(lcm->msg_seqno);
-        hdr.msg_size = htonl(datalen);
-        hdr.fragment_offset = 0;
-        hdr.fragment_no = 0;
-        hdr.fragments_in_msg = htons(nfragments);
-
-        // first fragment is special.  insert channel before data
-        int firstfrag_datasize = fragment_size - (channel_size + 1);
-        assert(firstfrag_datasize <= datalen);
-
-        struct iovec first_sendbufs[3];
-        first_sendbufs[0].iov_base = (char *) &hdr;
-        first_sendbufs[0].iov_len = sizeof(hdr);
-        first_sendbufs[1].iov_base = (char *) channel;
-        first_sendbufs[1].iov_len = channel_size + 1;
-        first_sendbufs[2].iov_base = (char *) data;
-        first_sendbufs[2].iov_len = firstfrag_datasize;
-
-        int packet_size = sizeof(hdr) + channel_size + 1 + firstfrag_datasize;
-        fragment_offset += firstfrag_datasize;
-        //        int status = writev (lcm->sendfd, first_sendbufs, 3);
-        struct msghdr msg;
-        msg.msg_name = (struct sockaddr *) &lcm->dest_addr;
-        msg.msg_namelen = sizeof(lcm->dest_addr);
-        msg.msg_iov = first_sendbufs;
-        msg.msg_iovlen = 3;
-        msg.msg_control = NULL;
-        msg.msg_controllen = 0;
-        msg.msg_flags = 0;
-        int status = sendmsg(lcm->sendfd, &msg, 0);
-
-        // transmit the rest of the fragments
-        for (uint16_t frag_no = 1; packet_size == status && frag_no < nfragments; frag_no++) {
-            hdr.fragment_offset = htonl(fragment_offset);
-            hdr.fragment_no = htons(frag_no);
-
-            int fraglen = MIN(fragment_size, datalen - fragment_offset);
-
-            struct iovec sendbufs[2];
-            sendbufs[0].iov_base = (char *) &hdr;
-            sendbufs[0].iov_len = sizeof(hdr);
-            sendbufs[1].iov_base = (char *) ((char *) data + fragment_offset);
-            sendbufs[1].iov_len = fraglen;
-
-            //            status = writev (lcm->sendfd, sendbufs, 2);
-            msg.msg_iov = sendbufs;
-            msg.msg_iovlen = 2;
-            status = sendmsg(lcm->sendfd, &msg, 0);
-
-            fragment_offset += fraglen;
-            packet_size = sizeof(hdr) + fraglen;
-        }
-
-        // sanity check
-        if (0 == status) {
-            assert(fragment_offset == datalen);
-        }
-
-        lcm->msg_seqno++;
-        g_mutex_unlock(&lcm->transmit_lock);
-    }
-
-    return 0;
-}
-```
-
-短帧和长帧共用调用线程中的 `transmit_lock`。短帧构造 LC02 header 和三个 iovec，调用一次 `sendmsg()` 后推进序号并检查返回长度；长帧先计算片数，再持锁发送第一片和其余片。payload 不在 provider 中转为新的连续副本，片段 iovec 直接引用调用方 data。长帧循环在失败后停止，但函数仍走到末尾返回 0；源码没有实现 ACK 或重传，调用者也不能把返回 0 当成远端收到。
-
-函数先验证 channel 长度，并计算协议 payload：
-
-
-```c
+~~~c
 int channel_size = strlen(channel);
 int payload_size = channel_size + 1 + datalen;
-```
 
-`+1` 是 channel 末尾的 `\0`。线格式没有单独 channel-length 字段，接收端通过 NUL 终止符找到消息数据起点。
+if (payload_size <= LCM_SHORT_MESSAGE_MAX_SIZE) {
+    /* LC02：一个 UDP 数据报 */
+} else {
+    /* LC03：多个 UDP 数据报 */
+}
+~~~
 
-这要求 channel 本身不能包含 NUL，并必须受最大长度限制。解析端也必须在当前数据报边界内搜索终止符，不能用无界 `strlen()` 读取不可信网络数据。
+这是根据真实代码改写的**教学骨架**，不是一段可独立编译的原函数。下面我们先只复刻其中的分片算术，随后再回到 header、锁和 socket。
 
+### 用独立 C++17 实验预测每一片的 offset
+
+编译命令：`g++ -std=c++17 -Wall -Wextra -Werror -pedantic planner.cpp -o planner`。这份程序不打开 socket；它专门验证“相同消息在两种编译常量下，实际会形成多少片、每片从原始 payload 取哪些字节”。
+
+~~~cpp
+#include <cassert>
+#include <cstddef>
+#include <iostream>
+#include <limits>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+struct Fragment {
+    std::size_t number;
+    std::size_t offset;    // 在原始 data 中的起点，不包括 channel
+    std::size_t length;    // 当前分片内的 data 字节数
+    bool has_channel;      // 只有第一片携带 channel
+};
+
+struct Plan {
+    bool short_message;
+    std::vector<Fragment> fragments;
+};
+
+Plan plan(std::size_t data_size, const std::string& channel,
+          std::size_t short_limit, std::size_t fragment_payload) {
+    const std::size_t channel_bytes = channel.size() + 1; // 包括 '\0'
+    if (channel_bytes > short_limit || channel_bytes > fragment_payload)
+        throw std::invalid_argument("channel exceeds packet budget");
+    if (data_size > std::numeric_limits<std::size_t>::max() - channel_bytes)
+        throw std::overflow_error("payload size overflow");
+    const std::size_t total = channel_bytes + data_size;
+
+    if (total <= short_limit)
+        return {true, {{0, 0, data_size, true}}};
+
+    // 与 LCM 的整数除法 + !!余数完全同义，避免向上取整时溢出。
+    const std::size_t count = total / fragment_payload
+                            + (total % fragment_payload != 0);
+    if (count > 65535)
+        throw std::length_error("fragment counter cannot represent count");
+
+    const std::size_t first = fragment_payload - channel_bytes;
+    if (first > data_size)
+        throw std::logic_error("invalid first fragment");
+
+    Plan result{false, {{0, 0, first, true}}};
+    result.fragments.reserve(count);
+    std::size_t offset = first;
+    while (offset < data_size) {
+        const std::size_t remaining = data_size - offset;
+        const std::size_t length =
+            remaining < fragment_payload ? remaining : fragment_payload;
+        result.fragments.push_back(
+            {result.fragments.size(), offset, length, false});
+        offset += length;
+    }
+    assert(offset == data_size);
+    assert(result.fragments.size() == count);
+    return result;
+}
+
+int main() {
+    const Plan apple = plan(5000, "POSE", 1435, 1423);
+    assert(!apple.short_message && apple.fragments.size() == 4);
+    assert(apple.fragments[0].length == 1418);
+    assert(apple.fragments[1].offset == 1418);
+    assert(apple.fragments[3].length == 736);
+
+    const Plan other = plan(5000, "POSE", 65499, 65487);
+    assert(other.short_message && other.fragments.size() == 1);
+
+    const Plan other_big = plan(70000, "POSE", 65499, 65487);
+    assert(!other_big.short_message && other_big.fragments.size() == 2);
+    assert(other_big.fragments[0].length == 65482);
+    assert(other_big.fragments[1].offset == 65482);
+    assert(other_big.fragments[1].length == 4518);
+
+    std::cout << "apple=" << apple.fragments.size()
+              << " non_apple=" << other.fragments.size()
+              << " non_apple_big=" << other_big.fragments.size() << '\n';
+}
+~~~
+
+预期输出为 `apple=4 non_apple=1 non_apple_big=2`。注意实验里 `Fragment` 只描述 payload 在原始数据中的**切片视图**，它没有为每片复制一个新的 `vector<byte>`。第一片还要额外插入 channel，后续片不再重复它；这正是为什么 `offset` 不应把 header 或 channel 的长度也算进去。
+
+把第一个 5000 字节样本展开：
+
+~~~text
+Apple profile: LC03，fragment_payload = 1423，channel_bytes = 5
+
+分片 0: [20 字节 LC03 header][5 字节 channel][data 0 .. 1417]
+分片 1: [20 字节 LC03 header][data 1418 .. 2840]
+分片 2: [20 字节 LC03 header][data 2841 .. 4263]
+分片 3: [20 字节 LC03 header][data 4264 .. 4999]
+
+单个 UDP payload 长度：1443、1443、1443、756 字节
+原始 data 长度：      1418 + 1423 + 1423 + 736 = 5000 字节
+~~~
+
+如果第一片没收到，接收端即使拿到其余三个片段，也没有这条消息的 channel，不能直接交付给按 channel 注册的订阅者。反过来，如果你把 `fragment_offset` 错误地算成包含 channel 的偏移，重组后的字节序列就会整体错位：**我们要保护的不是某个 C++ 类型，而是“每个原始字节在重组后的位置不变”这个不变量。**
+
+到这里，分片算术已经确定。下一步再去看真实 LC02/LC03 header、分散内存的 `iovec`、跨线程的 `transmit_lock`，读者才知道每个字段和每把锁是在保护什么。
 ## LC02 短消息布局
 
 短消息 header 定义在 `udpm_util.h`：
@@ -256,9 +248,9 @@ g_mutex_unlock(&lcm->transmit_lock);
 - 两个发布线程不会读取同一 `msg_seqno`；
 - header 中的序列号和递增动作形成原子事务；
 - 大消息的全部 LC03 分片不会被同一 provider 的另一条消息穿插；
-- 共享 `msghdr` 相关局部协议状态保持一致。
+- 同一个 provider 的发送线程不能把另一条短消息的发送调用插进正在发送的长消息分片序列。
 
-短消息系统调用本身是线程安全的，但去掉这把锁会破坏 LCM 层序列语义。并发安全必须围绕跨字段不变量设计，不能只看单个 API 是否 thread-safe。
+`msghdr`、`iovec` 和短消息 header 都是每次调用各自的栈上局部变量，**不是这把锁保护的共享对象**。锁维护的是 provider 级序列号和一整条应用层分片消息的发送事务；它不保证 IP/网络层的到达顺序，也不跨不同 LCM 实例串行化发送。
 
 ## 短消息返回值语义
 
@@ -398,10 +390,25 @@ N = 200  -> about 81.9%
 因此 LC03 是“让超过单报文阈值的数据能够传输”的机制，不是可靠大消息协议。它没有 ACK、NACK、重传窗口或前向纠错。
 
 ## 应用分片与 IP 分片的关系
+LCM 的两层分片必须分别讨论。**应用层 LC03 分片**将一条大消息拆成多个有序号、有字节偏移的 UDP 数据报；而**IP 分片**是网络栈在单枚 UDP 数据报超过链路允许的 IP 包大小时，再把它拆成多个 IP packets。这两层互不等价，也不自动互相替代。
 
-LCM 主动把大消息切成受控大小的 UDP 数据报，目的是避免依赖 IP 层把一个超大数据报再次分片。IP 分片中任一 fragment 丢失同样会使整个 UDP datagram 作废，而且中间设备处理更不稳定。
+回到固定版本：非 Apple 构建下，`LCM_SHORT_MESSAGE_MAX_SIZE=65499`、`LCM_FRAGMENT_MAX_PAYLOAD=65487`。因此 LC02 单报文和一枚 LC03 数据报的 UDP payload 都可能接近 65 KiB。普通 MTU 1500 的 IPv4 以太网可能再次将它们分割成多个 IP fragments。Apple 分支的 1435/1423 阈值能让单枚 LCM 数据报控制在约 1443 字节，但也不能脱离 VPN、隧道或具体路径 MTU 宣称“永不产生 IP 分片”。
 
-应用层分片让 LCM 能识别消息并跟踪偏移；接收侧通过 fragment store 在新项到来时按 LRU 压力淘汰，但固定版本没有独立的重组超时扫描。每个 LCM fragment 仍应低于路径 MTU 的安全 payload。若设置过大，底层 IP 仍可能二次分片，形成两层失败放大。
+~~~text
+一条 70000 字节的业务 payload，非 Apple 固定配置：
+
+LCM 自己的分片：
+    LC03 #0：65482 字节 data + 5 字节 channel + 20 字节 header
+    LC03 #1：4518  字节 data + 20 字节 header
+
+IP 层对每一枚 UDP 数据报再作自己的判断：
+    若可承载整枚报文  -> 直接发出
+    若超过该路径 MTU  -> 产生 IP fragments
+~~~
+
+两层各有一个失败边界。任意一枚 UDP 数据报丢掉某个 IP fragment，该枚 UDP 数据报就不能交付到 LCM；任意一枚 LC03 数据报无法交付，整条业务消息就不能通过完整重组。开头看到的“发送端调用两次 sendmsg，抓包却有几十枚数据包”正是这两层叠加的结果，而不代表 `sendmsg` 在用户态被重复调用了几十次。
+
+LC03 的直接收益是让 LCM 自己识别同一条业务消息的序号、总片数和数据偏移，而不是单纯代替 IP 重组。接收侧用 fragment store 记录还没收齐的业务消息，并在资源压力下淘汰旧项；固定版本没有单独的重组超时扫描。实际部署时，应该结合 MTU、路由、隧道和丢包模式验证配置，不应只看 LCM header 的最大可表示长度。
 
 ## 序列号回绕
 
@@ -489,3 +496,147 @@ std::vector<FragmentView> PlanFragments(
 LCM UDPM 的发送侧以很少的机制换取明确性能：短消息用一次 scatter-gather 系统调用，大消息用显式应用层分片，单把 mutex 维护序列号和分片事务。
 
 它的优点是代码路径短、没有隐藏后台发送队列、buffer 生命周期简单。缺点是大消息锁占用、UDP 不可靠和缺少拥塞控制同样直接暴露。机器人系统应据此安排数据：小而新鲜的状态适合 UDPM，大而必须完整的数据需要更合适的传输策略。
+
+
+## 附录：固定版本 `lcm_udpm_publish()` 的完整控制流
+
+下面保留本章前面逐步拆过的原始函数，方便读者从 `channel_size` 一路走到最后的 `return`。它来自本文固定版本的 UDPM 实现，并非教学复刻。请特别留意 LC02 与 LC03 在错误返回上的差异，以及 `transmit_lock` 的加锁范围。
+
+```c
+static int lcm_udpm_publish(lcm_udpm_t *lcm, const char *channel, const void *data,
+                            unsigned int datalen)
+{
+    int channel_size = strlen(channel);
+    if (channel_size > LCM_MAX_CHANNEL_NAME_LENGTH) {
+        fprintf(stderr, "LCM Error: channel name too long [%s]\n", channel);
+        return -1;
+    }
+
+    int payload_size = channel_size + 1 + datalen;
+    if (payload_size <= LCM_SHORT_MESSAGE_MAX_SIZE) {
+        // message is short.  send in a single packet
+
+        g_mutex_lock(&lcm->transmit_lock);
+
+        lcm2_header_short_t hdr;
+        hdr.magic = htonl(LCM2_MAGIC_SHORT);
+        hdr.msg_seqno = htonl(lcm->msg_seqno);
+
+        struct iovec sendbufs[3];
+        sendbufs[0].iov_base = (char *) &hdr;
+        sendbufs[0].iov_len = sizeof(hdr);
+        sendbufs[1].iov_base = (char *) channel;
+        sendbufs[1].iov_len = channel_size + 1;
+        sendbufs[2].iov_base = (char *) data;
+        sendbufs[2].iov_len = datalen;
+
+        // transmit
+        int packet_size = datalen + sizeof(hdr) + channel_size + 1;
+        dbg(DBG_LCM_MSG, "transmitting %d byte [%s] payload (%d byte pkt)\n", datalen, channel,
+            packet_size);
+
+        //        int status = writev (lcm->sendfd, sendbufs, 3);
+        struct msghdr msg;
+        msg.msg_name = (struct sockaddr *) &lcm->dest_addr;
+        msg.msg_namelen = sizeof(lcm->dest_addr);
+        msg.msg_iov = sendbufs;
+        msg.msg_iovlen = 3;
+        msg.msg_control = NULL;
+        msg.msg_controllen = 0;
+        msg.msg_flags = 0;
+        int status = sendmsg(lcm->sendfd, &msg, 0);
+
+        lcm->msg_seqno++;
+        g_mutex_unlock(&lcm->transmit_lock);
+
+        if (status == packet_size)
+            return 0;
+        else
+            return status;
+    } else {
+        // message is large.  fragment into multiple packets
+
+        int fragment_size = LCM_FRAGMENT_MAX_PAYLOAD;
+        int nfragments = payload_size / fragment_size + !!(payload_size % fragment_size);
+
+        if (nfragments > 65535) {
+            fprintf(stderr, "LCM error: too much data for a single message\n");
+            return -1;
+        }
+
+        // acquire transmit lock so that all fragments are transmitted
+        // together, and so that no other message uses the same sequence number
+        // (at least until the sequence # rolls over)
+        g_mutex_lock(&lcm->transmit_lock);
+        dbg(DBG_LCM_MSG, "transmitting %d byte [%s] payload in %d fragments\n", payload_size,
+            channel, nfragments);
+
+        uint32_t fragment_offset = 0;
+
+        lcm2_header_long_t hdr;
+        hdr.magic = htonl(LCM2_MAGIC_LONG);
+        hdr.msg_seqno = htonl(lcm->msg_seqno);
+        hdr.msg_size = htonl(datalen);
+        hdr.fragment_offset = 0;
+        hdr.fragment_no = 0;
+        hdr.fragments_in_msg = htons(nfragments);
+
+        // first fragment is special.  insert channel before data
+        int firstfrag_datasize = fragment_size - (channel_size + 1);
+        assert(firstfrag_datasize <= datalen);
+
+        struct iovec first_sendbufs[3];
+        first_sendbufs[0].iov_base = (char *) &hdr;
+        first_sendbufs[0].iov_len = sizeof(hdr);
+        first_sendbufs[1].iov_base = (char *) channel;
+        first_sendbufs[1].iov_len = channel_size + 1;
+        first_sendbufs[2].iov_base = (char *) data;
+        first_sendbufs[2].iov_len = firstfrag_datasize;
+
+        int packet_size = sizeof(hdr) + channel_size + 1 + firstfrag_datasize;
+        fragment_offset += firstfrag_datasize;
+        //        int status = writev (lcm->sendfd, first_sendbufs, 3);
+        struct msghdr msg;
+        msg.msg_name = (struct sockaddr *) &lcm->dest_addr;
+        msg.msg_namelen = sizeof(lcm->dest_addr);
+        msg.msg_iov = first_sendbufs;
+        msg.msg_iovlen = 3;
+        msg.msg_control = NULL;
+        msg.msg_controllen = 0;
+        msg.msg_flags = 0;
+        int status = sendmsg(lcm->sendfd, &msg, 0);
+
+        // transmit the rest of the fragments
+        for (uint16_t frag_no = 1; packet_size == status && frag_no < nfragments; frag_no++) {
+            hdr.fragment_offset = htonl(fragment_offset);
+            hdr.fragment_no = htons(frag_no);
+
+            int fraglen = MIN(fragment_size, datalen - fragment_offset);
+
+            struct iovec sendbufs[2];
+            sendbufs[0].iov_base = (char *) &hdr;
+            sendbufs[0].iov_len = sizeof(hdr);
+            sendbufs[1].iov_base = (char *) ((char *) data + fragment_offset);
+            sendbufs[1].iov_len = fraglen;
+
+            //            status = writev (lcm->sendfd, sendbufs, 2);
+            msg.msg_iov = sendbufs;
+            msg.msg_iovlen = 2;
+            status = sendmsg(lcm->sendfd, &msg, 0);
+
+            fragment_offset += fraglen;
+            packet_size = sizeof(hdr) + fraglen;
+        }
+
+        // sanity check
+        if (0 == status) {
+            assert(fragment_offset == datalen);
+        }
+
+        lcm->msg_seqno++;
+        g_mutex_unlock(&lcm->transmit_lock);
+    }
+
+    return 0;
+}
+```

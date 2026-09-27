@@ -141,6 +141,93 @@ LCM 只负责保存和传回地址，不会复制或释放 `controller`。因此
 
 这是一种运行时类型擦除：不同应用状态都能放进同一 callback 接口，代价是 cast 正确性由程序员保证。
 
+## 动手搭第一座桥：C callback 怎样再次找到 C++ 对象？
+
+你已经注册了一个成员函数：
+
+~~~cpp
+bus.subscribe("POSE", &Handler::onPose, &handler);
+~~~
+
+读到 C 核心时却发现，它只保存普通 C 函数指针和一个 `void* userdata`。这是语言边界逼出来的结构：普通 C 函数没有隐含 `this`，C++ 成员函数指针却必须绑定具体对象，二者不能直接互换。
+
+### 一个能运行的 callback trampoline 实验
+
+下面是一份**完整可独立编译的 C++17 教学程序**。它不依赖 LCM，只复刻“C callback + userdata + trampoline”这一个机制：
+
+~~~cpp
+#include <cassert>
+#include <cstddef>
+#include <string>
+
+using CCallback = void(*)(const char*, const void*, std::size_t, void*);
+
+struct CSubscription {
+    CCallback callback = nullptr;
+    void* userdata = nullptr;
+};
+
+void dispatch(CSubscription subscription, const char* channel,
+              const void* bytes, std::size_t size) {
+    subscription.callback(channel, bytes, size, subscription.userdata);
+}
+
+class Receiver {
+public:
+    void onMessage(const char* channel, const void* bytes, std::size_t n) {
+        latest_.assign(static_cast<const char*>(bytes), n);
+        last_channel_ = channel;
+    }
+
+    static void trampoline(const char* channel, const void* bytes,
+                           std::size_t n, void* context) {
+        auto* self = static_cast<Receiver*>(context);
+        self->onMessage(channel, bytes, n);
+    }
+
+    CSubscription subscribe() { return {&trampoline, this}; }
+    const std::string& latest() const { return latest_; }
+    const std::string& channel() const { return last_channel_; }
+
+private:
+    std::string latest_;
+    std::string last_channel_;
+};
+
+int main() {
+    Receiver receiver;
+    CSubscription subscription = receiver.subscribe();
+    const char bytes[] = {'4', '2'};
+    dispatch(subscription, "JOINT", bytes, sizeof(bytes));
+    assert(receiver.channel() == "JOINT");
+    assert(receiver.latest() == "42");
+}
+~~~
+
+运行链是：
+
+~~~text
+dispatch()
+   |
+   v
+Receiver::trampoline()      // 普通静态函数，满足 C callback 形状
+   |
+   | static_cast<Receiver*>(userdata)
+   v
+原来的 Receiver 对象
+   |
+   v
+Receiver::onMessage()
+~~~
+
+这里真正需要掌握的不是“static_cast 怎么写”，而是三条寿命约束。
+
+第一，`userdata` 只是借用地址，**不会延长 Receiver 的寿命**。若 Receiver 已经析构，trampoline 仍把旧地址当成有效对象，后果是未定义行为。第二，`bytes` 只在当前同步调用中借用；真实 LCM 中的 `rbuf->data` 也不能被 callback 原样保存到后台线程长期使用。第三，`static_cast` 不做运行时类型检查，注册时把错误对象地址放进 userdata，就破坏了整个约定。
+
+回到固定版本 LCM，`LCMMHSubscription<MessageType, MessageHandlerClass>` 做的事情比这个教学程序多两步：它把 `userdata` 恢复成 subscription 适配对象；然后用 `MessageType::decode()` 从 wire bytes 构造临时消息，最后通过保存的成员函数指针调用用户 Handler。也就是说，真正的桥梁同时跨过了**C callback ABI**和**无类型 bytes → C++ typed message**两层边界。
+
+后面的[C ABI 与 C++ 设计实验](c-abi-cpp-design-lab.md)会进一步解释为什么适配对象必须有稳定地址、为什么 C++ wrapper 拥有适配对象但不拥有用户 Handler，以及 unsubscribe 为什么必须与 callback 生命周期协调。
+
 ## 接口与回调把行为延迟到合适的时刻
 
 对象只回答“状态放在哪里”，还没有回答“不同 provider 怎样提供同一组操作”以及“用户函数何时执行”。LCM 使用函数指针表达可替换行为，再用 callback 把应用逻辑交还给调用 `lcm_handle()` 的线程。

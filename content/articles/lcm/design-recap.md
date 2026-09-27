@@ -175,6 +175,56 @@ class MemoryBus {
 
 日志直接保存 wire payload，不 decode。回放 provider 逐条读取事件并通过同一 BusCore 分发。先支持尽快回放，再加入单调时钟定时、倍率、seek 与暂停；同时归档 schema 版本，避免日志字节与新生成类型失配。
 
+## 把一次 15 ms 卡顿当成架构设计评审
+
+假设 1 kHz 的关节状态和 10 Hz 的点云共用一个 LCM 实例，可视化 callback 偶尔为了截图阻塞 15 ms。这个很普通的故障足以把整套运行时的层次全部暴露出来：
+
+~~~text
+t=0 ms   JOINT #1 到达，应用开始 callback
+t=1 ms   JOINT #2 到达，receiver 仍可 recv
+t=2 ms   JOINT #3 到达，filled queue / subscription 准入继续变化
+...
+t=15 ms  callback 返回，应用线程重新处理积压消息
+~~~
+
+这里的时间只是教学时序，不是固定仓库的测量结果。真正需要检查的是：**发送成功、内核接收、provider 重组完成、subscription 获得准入、业务 callback 完成**是五个不同事件。任何一个“success”都不能替代另外四个。
+
+从这一个故障往回看，前面的所有机制就不再是孤立模块：
+
+| 机制 | 它解决的具体失败 | 它没有替你解决什么 |
+|---|---|---|
+| generated codec | 本机对象布局不能直接当 wire format | schema 演进策略 |
+| provider vtable | transport 变化不应污染公共 API | 不同 provider 语义完全一致 |
+| LC02 / LC03 | 单 UDP 报文大小有限 | 可靠交付与重传 |
+| receiver thread | 慢 callback 不直接卡 socket recv | 应用侧持续过载 |
+| per-subscription quota | 慢订阅者可独立拒绝新消息 | 历史消息补发 |
+| ring / descriptor reuse | 减少频繁分配并维持 payload 寿命 | 固定内存上限 |
+| deferred unsubscribe | callback 遍历期不释放正在引用的节点 | 跨线程随意析构用户对象 |
+| EventLog | 保存原始总线字节以便回放 | 保存完整程序、schema 与外部世界状态 |
+
+### 设计模式应当最后命名
+
+当我们发现“公共 publish/subscribe/handle 稳定，而具体 transport 独立变化”时，才需要 `(provider state, vtable)`；把这个结构命名为 C 风格 Strategy 只是总结。URL scheme 找到对应 vtable 并调用 `create()`，承担的是 Factory。两者解释的是“如何选择和构造 transport”，不能顺手解释 callback 生命周期、队列配额、ring 回收或线程通知；那些是独立约束。
+
+同样地，`get_fileno()` 也不是“为了支持 epoll 的技巧”。它解决的是另一个变化轴：**LCM 不应该强迫应用接受自己的主循环。** GUI、控制器、仿真器可以拥有自己的 event loop，只把 LCM ready fd 当作其中一个事件源。代价是应用必须自己决定什么时候 handle、一次处理多少、停止时如何唤醒阻塞等待。
+
+### 如果从零实现，先写不变量再写类
+
+在创建任何 `Bus`、`Provider`、`Subscription` 之前，先把这些约束写成测试：
+
+1. typed decode 不依赖 C++ `sizeof`，fingerprint 不匹配必须失败；
+2. provider 的状态对象与方法表必须严格成对；
+3. callback 返回前 payload 有效，返回后不得再借用；
+4. 核心锁不能覆盖用户 callback；
+5. 一个订阅满了不能让另一个订阅的计数一起失真；
+6. 旧 ring 仍被消息引用时不能提前释放；
+7. callback 内取消订阅不能让当前遍历使用悬空对象；
+8. shutdown 必须先停止接纳新工作，再让 receiver/handle 退出，最后销毁业务对象；
+9. UDPM `publish()==0` 不能被解释为远端已经处理；
+10. 日志回放的事件时间不能自动等同传感器采样时间。
+
+能用测试和状态图证明这些不变量，才算真正复刻了 LCM 的核心结构；“两个进程能互相打印字符串”只证明 happy path 能跑。
+
 ## 完成标准由不变量决定
 
 一个“能跑”的演示还不是完整消息总线。最小复刻至少要证明：

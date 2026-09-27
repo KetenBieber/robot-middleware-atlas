@@ -16,12 +16,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = {
+    "content/articles/lcm/foundations.md": "### 一个能运行的 callback trampoline 实验",
     "content/articles/lcm/provider-vtable.md": "### 先写一个能运行的 C++17 缩小版",
+    "content/articles/lcm/udpm-publish-protocol.md":
+        "### 用独立 C++17 实验预测每一片的 offset",
     "content/articles/lcm/subscription-dispatch.md": "### 可以编译运行的订阅删除实验",
     "content/articles/yarp/cpp-design-lab.md": "## 从 `M × C` 个专用函数走向两条动态分派边界",
     "content/articles/ecal/cpp-design-lab.md": "## 用一个可运行的弱句柄实验建立所有权模型",
 }
 C_EXAMPLES = {
+    "content/articles/lcm/receive-reassembly.md":
+        "### 追问：为什么队列尾巴不是普通指针，而是二级指针？",
     "content/articles/lcm/provider-vtable.md":
         "### 我们先用 C 写一个最小运行时分派，而不是背 vtable 的定义",
 }

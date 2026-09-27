@@ -209,6 +209,27 @@ LCM 类型指纹能检测不兼容定义。修改字段会产生新指纹；滚�
 
 桥接进程同时订阅 `ATLAS_STATE_V1`、发布 `ATLAS_STATE_V2`，显式完成单位、默认值和字段映射。这样兼容策略有可测试代码，而不是依赖二进制解析“碰巧没有失败”。
 
+## 把 typed pub/sub 的生命周期完整走一遍
+
+一条 typed 消息真正经过的是：
+
+~~~text
+state_t object
+  -> getEncodedSize / encode
+  -> 临时 byte buffer
+  -> provider.publish
+  -> 网络 / provider queue
+  -> lcm_recv_buf_t
+  -> typed trampoline decode
+  -> callback 中的临时 state_t
+  -> callback 返回，临时对象与借用视图失效
+~~~
+
+这条链上有三个最容易写出偶发 bug 的地方。第一，`publish()` 返回以后不要继续假设 provider 仍借用 C++ wrapper 生成的临时编码缓冲；固定 wrapper 会立即 `delete[]`。第二，callback 的 `ReceiveBuffer*` 和 `MessageType*` 都是同步调用期间的借用视图，后台线程要使用数据时必须复制业务需要的字段。第三，用户 Handler 的寿命必须长于所有相关 subscription 与 callback；最简单的关闭方式是先停止并 join 唯一 handle 线程，再 unsubscribe，最后销毁 Handler 和 `lcm::LCM`。
+
+若你的应用需要把重活丢给 worker，推荐 callback 只做验证、复制/移动到**自己拥有**的有界队列，然后立即返回。worker 队列也必须有容量和溢出策略；把 LCM 的有限队列换成另一个无限 `std::queue` 并没有解决背压问题，只是把 OOM 推迟到自己的进程。
+
+
 ## 验收
 
 - C++ 与另一语言生成代码互通；

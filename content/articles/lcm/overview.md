@@ -652,6 +652,37 @@ LCM 自身没有复杂路由计算，最容易主导尾延迟的是：应用多�
 - regex 订阅和 channel cache 增加动态管理复杂度；
 - provider 语义不同，统一 API 不能保证统一阻塞行为。
 
+## 真正学完 LCM 的一条路线：每次使用都带出下一层问题
+
+读完总览以后，不要把所有源码文件同时打开。选自己的机器人里最普通的一条 `JOINT_STATE`，依次完成这些实验：
+
+~~~text
+同机：生成类型 publish / subscribe
+   | 结构体的内存布局为什么不是网络协议？
+   v
+切换：不改业务 publish，只改 provider URL
+   | 公共层怎么保存不同 provider 的私有状态？
+   v
+压测：大点云和 1 kHz 小状态共享一个实例
+   | LC03 / IP 分片分别在哪层？发送锁阻塞谁？
+   v
+停顿：让应用 callback 阻塞 15 ms
+   | receiver、完整消息队列、各订阅准入计数怎么变化？
+   v
+故障：在一个 callback 里取消另一个订阅
+   | 遍历边界、删除标志和 userdata 寿命怎样协调？
+   v
+回放：记录一次运行，到另一 multicast 地址播放
+   | 日志时间、传感器时间和墙钟回放时间相同吗？
+   v
+集成：把同一输入接入仿真控制图
+   | 网络 callback 为什么不能随意修改仿真状态？
+~~~
+
+这些问题分别进入[类型编码与日志](types-and-eventlog.md)、[Provider](provider-vtable.md)、[UDPM 分片](udpm-publish-protocol.md)、[接收与缓冲](receive-reassembly.md)、[订阅与分发](subscription-dispatch.md)、[C ABI/C++ 对象设计](c-abi-cpp-design-lab.md)与[设计复盘](design-recap.md)。对应的实际操作则见[安装与网络](use-environment.md)、[类型与收发](use-pubsub-types.md)、[日志与故障演练](use-operations.md)和[Drake 仿真](case-study-drake.md)。
+
+每完成一环，都试着不用背类名回答四个问题：**字节现在在哪里、由谁拥有、下一次执行在哪条线程、发生丢弃或关闭后谁负责释放。** 这四个答案能把“会用 LCM”与“能从零设计同类运行时”真正连起来。
+
 ## 源码阅读路线
 
 建议按一条消息的真实生命周期阅读以下固定版本符号：

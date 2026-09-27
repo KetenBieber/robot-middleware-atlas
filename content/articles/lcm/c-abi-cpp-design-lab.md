@@ -271,6 +271,70 @@ class Node {
 
 否则 subscription deleter 会拿已经销毁的 lcm_t 调用 unsubscribe。更清楚的方式是显式 `Close()`：先停止 handle loop，清订阅，再销毁 LCM。
 
+### 真实模板为什么要为每一组消息类型和接收类实例化 trampoline？
+
+C API 只接受一个普通函数指针和一个 `void* userdata`；C++ 用户写的却可能是：
+
+~~~cpp
+void Handler::onState(const ReceiveBuffer*,
+                      const std::string&,
+                      const state_t*);
+~~~
+
+成员函数指针需要一个具体 `this`，不能直接塞进普通 C callback 槽位。固定版本 `LCMMHSubscription<MessageType, MessageHandlerClass>` 的关键代码如下：
+
+~~~cpp
+MessageHandlerClass *handler;
+void (MessageHandlerClass::*handlerMethod)(const ReceiveBuffer *rbuf,
+                                           const std::string &channel,
+                                           const MessageType *msg);
+
+static void cb_func(const lcm_recv_buf_t *rbuf,
+                    const char *channel,
+                    void *user_data)
+{
+    LCMMHSubscription<MessageType, MessageHandlerClass> *subs =
+        static_cast<LCMMHSubscription<MessageType, MessageHandlerClass> *>(
+            user_data);
+
+    MessageType msg;
+    int status = msg.decode(rbuf->data, 0, rbuf->data_size);
+    if (status < 0) {
+        fprintf(stderr, "error %d decoding %s!!!\n",
+                status, MessageType::getTypeName());
+        return;
+    }
+
+    const ReceiveBuffer rb = {
+        rbuf->data, rbuf->data_size, rbuf->recv_utime
+    };
+    subs->channel_buf = channel;
+    (subs->handler->*subs->handlerMethod)(
+        &rb, subs->channel_buf, &msg);
+}
+~~~
+
+模板参数解决的是**编译期类型**问题：每一组 `<MessageType, MessageHandlerClass>` 都能生成一个知道该调用哪种 `decode()`、哪种成员函数签名的静态 trampoline。运行时 `userdata` 恢复出的不是用户 Handler 本体，而是一个 C++ subscription 适配对象；这个对象再保存用户 Handler 的非拥有指针和成员函数指针。
+
+~~~text
+LCM wrapper
+   |
+   | owns
+   v
+LCMMHSubscription<state_t, Handler>
+   |-- owns channel_buf
+   |-- borrows Handler*
+   |-- stores member-function pointer
+   +-- address is stored by C runtime as userdata
+~~~
+
+这里有一个很重要的地址稳定性问题。C++ wrapper 的 `subscriptions` 容器保存的是 `Subscription*`，适配对象本体由 `new` 单独分配；即使 vector 扩容，vector 移动的是指针值，不会搬迁适配对象本身。C runtime 里已经保存的 userdata 因而仍然指向原地址。若把适配对象按值塞进会搬迁元素的 vector，扩容就可能让 C runtime 持有悬空地址。
+
+取消订阅时还要区分两层生命周期。C `lcm_unsubscribe()` 在当前 dispatch 正在使用 subscription 时可以设置延迟删除标志；C++ wrapper 随后还要从自己的 vector 擦除并 `delete` 适配对象。固定代码并没有把“另一线程正在执行 callback”自动变成跨线程安全的引用计数协议。工程上更容易证明的关闭顺序是：**先停止唯一 handle 循环并 join，再取消剩余订阅，最后销毁 Handler 与 LCM wrapper。**
+
+同理，`MessageType msg` 只是 trampoline 栈上的临时对象；用户 callback 拿到的 `msg*` 只在该回调期间有效。若后台 worker 还要使用字段，应在 callback 内复制业务需要的数据，不能把这根指针直接保存起来。
+
+最后，解码失败和业务失败属于不同边界。固定 trampoline 在 `decode()<0` 时打印错误并返回，不调用用户 Handler；而用户 Handler 如果抛出 C++ 异常，固定代码没有 catch 将其转换为 C 错误码。应用最好在自身回调边界捕获异常并转成明确的停止/降级状态，而不是依赖异常跨越 C runtime 和资源回收路径传播。
 ## 回调桥接需要上下文指针
 
 C 回调不能直接保存捕获 lambda。常见桥接形式是函数指针加 `void* user`：
