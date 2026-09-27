@@ -1,0 +1,29 @@
+PYTHON ?= .venv/Scripts/python.exe
+SPHINXBUILD ?= $(PYTHON) -m sphinx
+SOURCEDIR = docs
+BUILDDIR = site
+
+.PHONY: html html-full package-site check-editorial check-links clean
+
+html:
+	$(PYTHON) tools/build_sphinx_sources.py
+	$(PYTHON) tools/check_editorial_language.py
+	$(SPHINXBUILD) -b html -W --keep-going $(SOURCEDIR) $(BUILDDIR)
+
+html-full:
+	$(PYTHON) tools/build_sphinx_sources.py
+	$(PYTHON) tools/check_editorial_language.py
+	$(SPHINXBUILD) -E -a -b html -W --keep-going $(SOURCEDIR) $(BUILDDIR)
+	$(PYTHON) tools/check_static_links.py $(BUILDDIR)
+
+check-links:
+	$(PYTHON) tools/check_static_links.py $(BUILDDIR)
+
+package-site:
+	$(PYTHON) tools/package_site.py
+
+check-editorial:
+	$(PYTHON) tools/check_editorial_language.py
+
+clean:
+	$(SPHINXBUILD) -M clean $(SOURCEDIR) $(BUILDDIR)

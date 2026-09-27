@@ -1,0 +1,7 @@
+Sphinx==8.2.3
+docutils==0.21.2
+sphinx-rtd-theme==3.0.2
+sphinx-copybutton==0.5.2
+sphinxcontrib-mermaid==2.1.1
+myst-parser==4.0.1
+Pygments==2.19.2

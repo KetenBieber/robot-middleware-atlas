@@ -1,0 +1,25 @@
+# Local environment
+.venv/
+.local/
+__pycache__/
+*.pyc
+
+# Internal research, review, experiments, QA and archives
+.internal/
+.qa-*/
+.qa-profile-path
+preview*.png
+
+# Downloaded upstream middleware repositories: read locally, never republish
+source-audit/
+
+# Sphinx output (all generated pages are recreated from content/ by the builder)
+docs/generated/
+site/
+
+# Sphinx transient output
+docs/_build/
+.doctrees/
+
+# Compiled deployment bundle (generated on demand)
+dist/
