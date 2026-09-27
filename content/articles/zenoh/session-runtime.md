@@ -43,6 +43,28 @@ let session = zenoh::open(config).await?;
 
 因此 `.await` 是统一 API 外形，不足以证明初始化工作不会阻塞调用线程。阅读 async Rust 必须继续查看 Future 构造方式，而不是只看调用处有 `.await`。
 
+### 固定源码：`IntoFuture` 为什么仍然可能阻塞当前线程
+
+只看到 `zenoh::open(config).await`，很容易把它与“把连接过程交给异步执行器，当前线程会立即让出”画上等号。实际上，是否让出取决于返回的 Future 如何构造和轮询。固定提交中 `OpenBuilder` 的完整 `IntoFuture` 实现如下：
+
+~~~rust
+impl<TryIntoConfig> IntoFuture for OpenBuilder<TryIntoConfig>
+where
+    TryIntoConfig: std::convert::TryInto<crate::config::Config> + Send + 'static,
+    <TryIntoConfig as std::convert::TryInto<crate::config::Config>>::Error: std::fmt::Debug,
+{
+    type Output = <Self as Resolvable>::To;
+    type IntoFuture = Ready<<Self as Resolvable>::To>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        std::future::ready(self.wait())
+    }
+}
+~~~
+
+`type IntoFuture = Ready<...>` 直接规定返回的是立即就绪的 Future；`into_future()` 内先执行 `self.wait()`，再将其结果封装进 `std::future::ready`。因此，`Session::new(...).wait()` 中真实发生的同步等待是由这条调用线程承担的，`.await` 在这里主要提供统一 API 写法，并不凭空把初始化变成非阻塞。对托管多个控制任务的 async executor，若在关键工作线程上直接执行此调用，打开 Session 的连接、配置与等待开销可能推迟其他 Future 的轮询。
+
+教学版可以用 `std::future::ready(do_blocking_open())` 复刻这一区别：创建 Ready 以前 `do_blocking_open()` 已经运行。若要把同步打开过程移出执行器线程，需要显式选择线程池或 `spawn_blocking` 一类隔离手段，但这是应用架构选择，而不是固定版本 `IntoFuture` 自带的保证。
 ## Runtime Build 与 Start 分离
 
 `Session::new` 先调用 `RuntimeBuilder::build().await`，再调用 `Session::init(...).await`，最后才执行 `runtime.start().await`；对应调用顺序位于 [`Session::new`](https://github.com/eclipse-zenoh/zenoh/blob/9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5/zenoh/src/api/session.rs#L1451-L1480)。`RuntimeBuilder::build` 装配 Gateway、TransportManager 和 RuntimeState，`Runtime::start` 再按节点角色启动网络编排。概念顺序如下：
@@ -100,6 +122,57 @@ Runtime routing core
 
 `WeakSession` 这个名字容易造成错误直觉：固定提交里它不是 `std::sync::Weak`。它内部用 `ManuallyDrop<Session>` 持有同一份 `Arc<SessionInner>`，但不增加“公开 Session handle”专用的 `strong_counter`；因此它不阻止最后一个公开 Session 触发 close，却仍会让 Arc 内存暂时存活。源码注释说明 primitives 需要在 close 操作期间可用，所以实现容许 Session 内部存在引用环，再由 [`Session::close`](https://github.com/eclipse-zenoh/zenoh/blob/9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5/zenoh/src/api/session.rs#L3704-L3763) 清理该环。具体布局、drop 与设计注释见 [`WeakSession`](https://github.com/eclipse-zenoh/zenoh/blob/9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5/zenoh/src/api/session.rs#L801-L847)。这里必须分开“何时认为 Session 应关闭”和“Arc 何时能回收内存”。
 
+### 固定源码：先把本地路由消费者装好，再开放网络入口
+
+`Session::new` 规定 Runtime 的 build、Session 的 init、Runtime 的 start 这个顺序；真正解释其中因果的是 `Session::init` 如何构造并公布本地 Face。固定源码如下：
+
+~~~rust
+    pub(crate) fn init(
+        runtime: GenericRuntime,
+        aggregated_subscribers: Vec<OwnedKeyExpr>,
+        aggregated_publishers: Vec<OwnedKeyExpr>,
+    ) -> impl Resolve<Session> {
+        ResolveClosure::new(move || {
+            let publisher_qos = runtime
+                .get_config()
+                .get_typed::<PublisherQoSConfList>("qos/publication")
+                .unwrap();
+            let state = RwLock::new(SessionState::new(
+                aggregated_subscribers,
+                aggregated_publishers,
+                publisher_qos.into(),
+                &runtime,
+            ));
+            let session = Session(Arc::new(SessionInner {
+                strong_counter: AtomicUsize::new(1),
+                runtime: runtime.clone(),
+                state,
+                id: runtime.next_id(),
+                task_controller: TaskController::default(),
+                face_id: OnceCell::new(),
+                callbacks_drop_sync_group: SyncGroup::default(),
+            }));
+
+            // Register connectivity handler
+            runtime.new_handler(Arc::new(connectivity::ConnectivityHandler::new(
+                session.downgrade(),
+            )));
+
+            let (_face_id, primitives) = runtime.new_primitives(Arc::new(session.downgrade()));
+
+            zwrite!(session.0.state).primitives = Some(primitives);
+            session.0.face_id.set(_face_id).unwrap(); // this is the only attempt to set value
+
+            admin::init(session.downgrade());
+
+            session
+        })
+    }
+~~~
+
+先在 `RwLock<SessionState>` 内建立 Publisher、Subscriber 和 Queryable 等实体状态的存储，再创建持有 Runtime、任务控制器、`strong_counter` 和回调退出同步组的 `SessionInner`。随后通过 `runtime.new_handler` 注册连通性事件处理者，并使用 `runtime.new_primitives(Arc::new(session.downgrade()))` 在 Runtime 路由系统中建立本地 Face。最后把新建的 primitives 存入 SessionState，同时设置 `face_id`。这时本地 Session 的控制入口已经可以承接路由事件，外层调用才会启动网络监听、主动连接和 scouting。
+
+这里的 `session.downgrade()` 不是普通 `std::sync::Weak`；它在内部保留 Arc 存储但不增加“业务公开 Session handle”的逻辑计数。回调和本地 primitives 在关闭期间仍可能被使用，所以内部对象内存寿命不能与最后一个用户句柄的关闭时机混成一个引用计数。可以借鉴的构造原则是：先准备存储和事件消费者、再向上层路由注册、最后才允许远端消息真正进入。
 ## 启动顺序保护早到网络事件
 
 整体顺序为：
@@ -269,6 +342,32 @@ logical counter  = public handles that own open session semantics
 
 这与 C++ 插件中“对象引用计数”和“库租约计数”类似：一个引用计数无法表达两种不同业务含义。
 
+### 两层引用计数：一个决定“何时关闭”，另一个决定“何时释放”
+
+`Session` 表面是 `Arc<SessionInner>` 的轻量句柄，但内部的回调和 primitives 也可能克隆同一 Arc。假如纯粹用 `Arc::strong_count()==1` 判断“最后一个用户已离开”，内部引用环就会让关闭永远不触发；反过来如果强行把内部 Arc 当作普通 Rust Weak，在关闭流程本身仍需调用 primitives 时，又可能拿不到需要执行清理的对象。固定提交使用额外逻辑强计数来回答第一个问题：
+
+~~~rust
+impl Clone for Session {
+    fn clone(&self) -> Self {
+        self.0.strong_counter.fetch_add(1, Ordering::Relaxed);
+        Self(self.0.clone())
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        if self.0.strong_counter.fetch_sub(1, Ordering::Relaxed) == 1 {
+            if let Err(error) = self.close().wait() {
+                tracing::error!(error)
+            }
+        }
+    }
+}
+~~~
+
+用户克隆 `Session` 时，逻辑计数与 Arc 计数都增长；`Session::downgrade` 创建内部 `WeakSession` 时，只增长 Arc 强引用而不增长逻辑计数。最后一个公开 `Session` 的 `Drop` 通过 `fetch_sub(1, Ordering::Relaxed)==1` 判断是否该调用 `close().wait()`。这里 Relaxed 原子操作只负责计数与“谁是最后一个公开句柄”的判定；实体表的读写仍由 `RwLock` 管理，Arc 自身仍负责对象内存的最终回收。
+
+这一设计故意允许内部环在 Session 正式关闭前存在，因此关闭路径必须显式清理 callback-bearing maps 和本地 primitives，使内部 Arc 环能够断开。没有这一步，额外逻辑计数只会解决“何时调用 close”，并不能自动消除内存泄漏。分析异步中间件生命周期时，必须同时画出公开 API 句柄和内部任务/回调引用两张不同的所有权图。
 ## 启动失败的清理
 
 可能失败的阶段包括配置解析、listener bind、peer connect、scout socket、plugin/admin init 和 start condition timeout。

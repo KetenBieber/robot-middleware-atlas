@@ -48,6 +48,109 @@ OutputPort 的 endpoint 多连接写入时持有 outputs_lock，并按连接逐�
 
 ConnFactory::buildDataStorage() 根据 ConnPolicy 决定创建 DATA 或 FIFO storage。DATA 生成 DataObjectLockFree/Locked/UnSync，再包装为 ChannelDataElement；BUFFER 与 CIRCULAR_BUFFER 生成 BufferLockFree/Locked/UnSync，再包装为 ChannelBufferElement。LOCK_FREE 也会按编译配置回退到 LOCKED，不能只看部署策略字符串就认定运行二进制真的无锁。源码见 [ConnFactory::buildDataStorage](https://github.com/orocos-toolchain/rtt/blob/600102e8be9c81905b20930e32d43b28244ab173/rtt/internal/ConnFactory.hpp#L150-L205)。
 
+### 直接读 FIFO 的写入与三态读取
+
+单纯把 BUFFER 称作“队列”，还不足以分析数据年龄。固定提交的 `ChannelBufferElement<T>` 把队列 Push/Pop 和上次样本指针 `last_sample_p` 分别管理：
+
+~~~cpp
+        virtual WriteStatus write(param_t sample)
+        {
+            if (!buffer->Push(sample)) return WriteFailure;
+            return this->signal() ? WriteSuccess : NotConnected;
+        }
+
+        /** Pops and returns the first element of the FIFO
+         *
+         * @return false if the FIFO was empty, and true otherwise
+         */
+        virtual FlowStatus read(reference_t sample, bool copy_old_data)
+        {
+            value_t *new_sample_p;
+            if ( (new_sample_p = buffer->PopWithoutRelease()) ) {
+                if(last_sample_p)
+                    buffer->Release(last_sample_p);
+
+                sample = *new_sample_p;
+
+                // In the PerOutputPort or Shared buffer policy case this buffer element may be read by multiple readers.
+                // ==> We cannot store the last_sample and release immediately.
+                // ==> WriteShared buffer connections will never return OldData.
+                if (policy.buffer_policy != PerOutputPort && policy.buffer_policy != Shared)
+                    last_sample_p = new_sample_p;
+                else
+                    buffer->Release(new_sample_p);
+
+                return NewData;
+            }
+            if (last_sample_p) {
+                if(copy_old_data)
+                    sample = *(last_sample_p);
+                return OldData;
+            }
+            return NoData;
+        }
+~~~
+
+`write(sample)` 先调用底层 buffer 的 `Push`；若缓冲区已满且底层策略不接收，本层直接返回 `WriteFailure`。写入成功还须调用 `signal()`，由连接链通知下游读端；若连接已断开，则返回 `NotConnected`。所以 `WriteSuccess` 既不是“对端已经读取”，也不是“业务计算完成”，它只表达这次连接链写入和信号成功。
+
+`read(sample, copy_old_data)` 先通过 `PopWithoutRelease()` 得到新样本指针。成功时归还上一份保留指针、复制样本数据，并视连接策略决定是自己保存这一份供下次报告 `OldData`，还是马上释放。`PerOutputPort` 和 `Shared` 情况允许多个读者共享 buffer，固定实现选择立即释放本次样本；这些连接因而不会通过此 `last_sample_p` 返回 OldData。若当前没有新样本但仍保留历史指针，则返回 OldData；`copy_old_data=false` 时可以只返回状态而不覆盖输出参数。没有历史指针才是 NoData。控制器若忽略这三个结果的区别，会把传感器停更后的旧样本误当最新观测。
+
+### `ConnPolicy` 决定保存一份值还是一段历史
+
+在建立连接时，`ConnFactory::buildDataStorage` 按 `ConnPolicy::DATA` 与 `BUFFER/CIRCULAR_BUFFER` 选择不同存储对象，再在各自分支依据 `lock_policy` 选择实现。下面是固定版本真实模板函数：
+
+~~~cpp
+        static base::ChannelElement<T>* buildDataStorage(ConnPolicy const& policy, const T& initial_value = T())
+        {
+            if (policy.type == ConnPolicy::DATA)
+            {
+                typename base::DataObjectInterface<T>::shared_ptr data_object;
+                switch (policy.lock_policy)
+                {
+#ifndef OROBLD_OS_NO_ASM
+                case ConnPolicy::LOCK_FREE:
+                    data_object.reset( new base::DataObjectLockFree<T>(initial_value, policy) );
+                    break;
+#else
+                case ConnPolicy::LOCK_FREE:
+                    RTT::log(Warning) << "lock free connection policy is unavailable on this system, defaulting to LOCKED" << RTT::endlog();
+#endif
+                case ConnPolicy::LOCKED:
+                    data_object.reset( new base::DataObjectLocked<T>(initial_value) );
+                    break;
+                case ConnPolicy::UNSYNC:
+                    data_object.reset( new base::DataObjectUnSync<T>(initial_value) );
+                    break;
+                }
+                return new ChannelDataElement<T>(data_object, policy);
+            }
+            else if (policy.type == ConnPolicy::BUFFER || policy.type == ConnPolicy::CIRCULAR_BUFFER)
+            {
+                typename base::BufferInterface<T>::shared_ptr buffer_object;
+                switch (policy.lock_policy)
+                {
+#ifndef OROBLD_OS_NO_ASM
+                case ConnPolicy::LOCK_FREE:
+                    buffer_object.reset(new base::BufferLockFree<T>(policy.size, initial_value, policy));
+                    break;
+#else
+                case ConnPolicy::LOCK_FREE:
+                    RTT::log(Warning) << "lock free connection policy is unavailable on this system, defaulting to LOCKED" << RTT::endlog();
+#endif
+                case ConnPolicy::LOCKED:
+                    buffer_object.reset(new base::BufferLocked<T>(policy.size, initial_value, policy));
+                    break;
+                case ConnPolicy::UNSYNC:
+                    buffer_object.reset(new base::BufferUnSync<T>(policy.size, initial_value, policy));
+                    break;
+                }
+                return new ChannelBufferElement<T>(buffer_object, policy);
+            }
+            return NULL;
+        }
+~~~
+
+DATA 创建 `ChannelDataElement<T>`，只保留当前样本；BUFFER/CIRCULAR_BUFFER 则创建 `ChannelBufferElement<T>`，按 `policy.size` 分配所需存储。`LOCK_FREE`、`LOCKED` 和 `UNSYNC` 是与“单槽还是多槽”正交的另一个维度，并且不支持汇编原子操作的构建会把 LOCK_FREE 退回带锁方案。`LOCK_FREE` 不代表赋值任意 `T` 都有固定执行时间；对含 `std::vector` 或堆所有权成员的类型，复制与析构仍可能进入 allocator。做 1 kHz 关节状态闭环前，应同时定义队列深度、过载处理、读旧值的行为和实际样本复制成本，而非只选择一个写着 lock-free 的枚举。
 ## DATA 与 BUFFER 在负载下表现不同
 
 如果 2 kHz 发布关节状态，1 kHz 消费，DATA 连接只保留最新值。中间样本被覆盖，消费者每次可能得到间隔两倍的样本，但队列不会持续积压。若控制只依赖最新状态，可用采样时间戳判断数据是否过期；不能把“没有队列延迟”误当成“必定读到每个测量”。

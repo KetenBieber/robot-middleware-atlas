@@ -139,6 +139,65 @@ URL scheme 选择 provider，vtable 提供 create/destroy/subscribe/unsubscribe/
 
 Provider 接口的每个操作都要定义同步语义：publish 是完成本地入队、完成系统调用还是完成持久化；handle 一次处理一条还是一批；destroy 是否等待 receiver；get_fileno 的可读性是 level 还是 edge。相同函数签名并不保证相同延迟模型，URL 配置本身就是运行行为的一部分。
 
+### 用实际构造代码看 URL 如何变成 provider 对象
+
+如果按照错误的单一 UDP 实现设计，每加入一种传输，`publish/subscribe/handle` 三类公共 API 都得增加 `switch` 分支。LCM 把这个选择压到构造期。下面是固定提交中 `lcm_create` 的连续片段，展示 provider 清单注册、默认 URL、scheme 查找、内核 registry 初始化及 provider 私有对象创建：
+
+~~~c
+    // initialize the list of providers
+    lcm_udpm_provider_init(providers);
+    lcm_logprov_provider_init(providers);
+    lcm_tcpq_provider_init(providers);
+    lcm_mpudpm_provider_init(providers);
+    lcm_memq_provider_init(providers);
+    if (providers->len == 0) {
+        fprintf(stderr, "Error: no LCM providers found\n");
+        goto fail;
+    }
+
+    if (!url || !strlen(url))
+        url = getenv("LCM_DEFAULT_URL");
+    if (!url || !strlen(url))
+        url = LCM_DEFAULT_URL;
+
+    if (0 != lcm_parse_url(url, &provider_str, &network, args)) {
+        fprintf(stderr, "%s:%d -- invalid URL [%s]\n", __FILE__, __LINE__, url);
+        goto fail;
+    }
+
+    lcm_provider_info_t *info = NULL;
+    /* Find a matching provider */
+    for (unsigned int i = 0; i < providers->len; i++) {
+        lcm_provider_info_t *pinfo = (lcm_provider_info_t *) g_ptr_array_index(providers, i);
+        if (!strcmp(pinfo->name, provider_str)) {
+            info = pinfo;
+            break;
+        }
+    }
+    if (!info) {
+        fprintf(stderr, "Error: LCM provider \"%s\" not found\n", provider_str);
+        g_ptr_array_free(providers, TRUE);
+        free(provider_str);
+        free(network);
+        g_hash_table_destroy(args);
+        return NULL;
+    }
+
+    lcm = (lcm_t *) calloc(1, sizeof(lcm_t));
+
+    lcm->vtable = info->vtable;
+    lcm->handlers_all = g_ptr_array_new();
+    lcm->handlers_map = g_hash_table_new(g_str_hash, g_str_equal);
+
+    g_rec_mutex_init(&lcm->mutex);
+    g_rec_mutex_init(&lcm->handle_mutex);
+
+    lcm->provider = info->vtable->create(lcm, network, args);
+~~~
+
+`providers` 是临时的工厂目录，`info->vtable` 则随 `lcm_t` 一起存活。`lcm->provider` 是具体传输实现返回的不透明句柄；同一个 `lcm_t` 同时持有函数表和实例状态，调用期不再需要知道当前是 UDP、日志还是进程内队列。`handlers_all` 保存权威 subscription 列表，`handlers_map` 保存已见具体 channel 的匹配缓存；二者并不包含 provider 的 socket 与 reassembly 私有状态。
+
+这个步骤也揭示了手写 C 多态的失败责任：URL 不合法、scheme 不存在、provider 的 `create()` 返回空，都应释放构造期临时目录和已经创建的对象。`lcm_t` 初始化了互斥锁以后再创建 provider，因此 provider 可以回调核心内部的 `lcm_*` 函数；反过来，销毁时必须先停止 provider 的后台活动，再拆核心 subscription 与互斥锁。构造与销毁必须是一张方向相反的依赖图，不能只看 `publish` 的一行 vtable 间接调用。
 ## UDPM 发送协议
 
 小消息可使用单 datagram 格式；超过阈值后使用分片格式，携带 sequence、总长度、fragment offset/number 等字段。发送端可用 `iovec/sendmsg` 把 header、channel 和 payload 分散写出，减少拼接 buffer。

@@ -139,6 +139,61 @@ bool CPublisher::Send(CPayloadWriter& payload_, long long time_)
 
 第一层只把裸地址和长度交给 payload writer；第二层先通过 `weak_ptr::lock()` 临时取得强引用，因此 Gate 并发注销时，当前调用仍能在 `publisher_impl` 局部变量释放前完成对象访问。这个强引用只解决对象内存寿命，不会串行化同一个 Impl 上的多个 `Send()`，也不会让异步 transport 继续借用调用者的 `buf_`。无已建立订阅端时，代码只刷新统计并返回 `false`；有订阅者时才生成时间戳并进入实现对象。真正选择 writer、复制或复用 payload 的位置是下一层 `CPublisherImpl::Write()`，不能把这里的成功返回解释成对端业务 callback 已运行。
 
+### 为什么启用 UDP/TCP 会改变 SHM 的拷贝策略
+
+表面上只有一次 `Send`，但真正的 payload staging 发生在 `CPublisherImpl::Write`。固定源码先计算负载大小并从各 writer 的连接计数决定要执行哪些 layer，然后才判定是否允许直接把 payload writer 接到 SHM：
+
+~~~cpp
+  bool CPublisherImpl::Write(CPayloadWriter& payload_, long long time_, long long filter_id_)
+  {
+    // get payload buffer size (one time, to avoid multiple computations)
+    const size_t payload_buf_size(payload_.GetSize());
+#if ECAL_CORE_TRANSPORT_SHM
+    const bool shm_send_enabled = m_writer_shm && m_send_layer_connection_counters.ShmEnabled();
+#endif
+#if ECAL_CORE_TRANSPORT_UDP
+    const bool udp_send_enabled = m_writer_udp && m_send_layer_connection_counters.UdpEnabled();
+#endif
+#if ECAL_CORE_TRANSPORT_TCP
+    const bool tcp_send_enabled = m_writer_tcp && m_send_layer_connection_counters.TcpEnabled();
+#endif
+
+    // are we allowed to perform zero copy writing?
+    bool allow_zero_copy(false);
+#if ECAL_CORE_TRANSPORT_SHM
+    allow_zero_copy = m_attributes.shm.zero_copy_mode; // zero copy mode activated by user
+#endif
+#if ECAL_CORE_TRANSPORT_UDP
+    // udp is active -> no zero copy
+    allow_zero_copy &= !udp_send_enabled;
+#endif
+#if ECAL_CORE_TRANSPORT_TCP
+    // tcp is active -> no zero copy
+    allow_zero_copy &= !tcp_send_enabled;
+#endif
+
+    // create a payload copy for all layer
+    if (!allow_zero_copy)
+    {
+      m_payload_buffer.resize(payload_buf_size);
+      payload_.WriteFull(m_payload_buffer.data(), m_payload_buffer.size());
+    }
+~~~
+
+`allow_zero_copy` 必须首先由用户启用 SHM zero-copy；只要实际启用了 UDP 或 TCP，就会被强制清零，并通过 `payload_.WriteFull` 先把 payload 序列化进 `m_payload_buffer`。原因在于 UDP/TCP 还需要一份连续、可独立访问的字节视图；仅有一个按需填充的 SHM buffer，不能让所有并发发送层都继续借用其写入窗口。所谓零拷贝并不是“使用 SHM 就绝对不复制”，而是同一 Publisher 的当前 layer 组合下是否允许跳过这个 staging 副本。
+
+还有一条更隐蔽的延迟支路：SHM writer 的 `PrepareWrite` 若返回需要重新注册，此代码会执行额外的 registration 并主动休眠 5 ms。固定源码的连续片段为：
+
+~~~cpp
+        if (m_writer_shm->PrepareWrite(wattr))
+        {
+          // register new to update listening subscribers and rematch
+          Register();
+          Process::SleepMS(5);
+        }
+~~~
+
+因此慢帧不能只归因于 mutex 或网络拥塞；SHM memfile 的首次建立、尺寸变化或重新连接也可能使 `Send` 调用栈出现这一段等待。对高速相机要提前创建数据样本和稳定的槽位尺寸，并把首次建连与稳态传输延迟分开统计。`m_payload_buffer`、`m_clock` 与 writer 索引是普通可变成员；各 layer 的计数是原子的，不代表同一个 Impl 上两个并发 `Write` 自动互斥。完整三个 layer 的错误与部分成功分支仍以[Publisher 发送专题](publisher-discovery-send.md)为准。
 ## 核心对象与所有权
 
 ```text

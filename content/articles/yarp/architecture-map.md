@@ -230,6 +230,82 @@ Port::write(const PortWriter&)
 
 每连接 Unit 隔离慢节点，但连接数 `N` 会带来 `O(N)` 状态、可能的线程栈和扇出工作。大规模连接需要测量的不是单连接峰值，而是总线程数、队列、context switch 和关闭时间。
 
+### 实际代码：后台发送不是复制一份 Writer 后再排队
+
+PortCore 遍历各输出 Unit，决定是否同步等待。具体 Unit 的 `send()` 并没有“后台复制用户消息对象”这个步骤。固定源码从 `PortCoreOutputUnit::send` 开始可以直接读到同步与后台两种分支：
+
+~~~cpp
+void* PortCoreOutputUnit::send(const yarp::os::PortWriter& writer,
+                               yarp::os::PortReader* reader,
+                               const yarp::os::PortWriter* callback,
+                               void* tracker,
+                               const std::string& envelopeString,
+                               bool waitAfter,
+                               bool waitBefore,
+                               bool* gotReply)
+{
+    bool replied = false;
+
+    {
+        std::shared_ptr<OutputProtocol> localOp = op;
+        if (localOp) {
+            if (!localOp->getConnection().isActive()) {
+                return tracker;
+            }
+        }
+    }
+
+    if (!waitBefore || !waitAfter) {
+        if (!running) {
+            // we must have a thread if we're going to be skipping waits
+            threaded = true;
+            yCIDebug(PORTCOREOUTPUTUNIT, getName(), "starting a thread for output");
+            start();
+            yCIDebug(PORTCOREOUTPUTUNIT, getName(), "started a thread for output");
+        }
+    }
+
+    if ((!waitBefore) && waitAfter) {
+        yCIError(PORTCOREOUTPUTUNIT, getName(), "chosen port wait combination not yet implemented");
+    }
+    if (!sending) {
+        cachedWriter = &writer;
+        cachedReader = reader;
+        cachedCallback = callback;
+        cachedEnvelope = envelopeString;
+
+        sending = true;
+        if (waitAfter) {
+            replied = sendHelper();
+            sending = false;
+        } else {
+            trackerMutex.lock();
+            void* nextTracker = tracker;
+            tracker = cachedTracker;
+            cachedTracker = nextTracker;
+            activate.post();
+            trackerMutex.unlock();
+        }
+    } else {
+        yCIDebug(PORTCOREOUTPUTUNIT, getName(), "skipping connection tagged as sending something");
+    }
+
+    if (waitAfter) {
+        if (gotReply != nullptr) {
+            *gotReply = replied;
+        }
+    }
+
+    // return tracker that we no longer need
+    return tracker;
+}
+~~~
+
+先检查 `OutputProtocol` 当前连接是否仍 active。若调用者要求跳过前置或完成等待，而该 Unit 没有运行中的 worker，就按需启动一条发送线程。`cachedWriter = &writer` 保存的是**调用者对象的地址**，不是值副本；`cachedReader` 和 `cachedCallback` 也只是暂存句柄。`waitAfter` 为真时，本函数在当前线程调用 `sendHelper()`；否则通过 `activate.post()` 唤醒 worker，让它稍后序列化数据。
+
+这里有两个必须保留的行为边界。第一，若 `sending` 已经为真，Unit 会跳过本次连接，不会在内部建立无限待办队列。因此“异步”不等于“缓存所有样本”，过载时业务必须观察发送统计或完成通知。第二，在完成回调之前，应用不能析构、移动或并发改写传给异步 Unit 的 `PortWriter`：指针寿命由调用方的等待/完成协议维持，而不是由 `cachedWriter` 自动管理。即使 PortCore 的 packet tracker 能记录一条消息经过了几只输出 Unit，它也不能凭空延长任意 C++ 栈上 Writer 的寿命。
+
+控制系统应按连接区分两个时刻：`Port::write` 返回，以及最后一只异步 Unit 完成。多连接扇出还要区分“某连接忙所以跳过”与“socket 已成功写出”；二者都不能用远端控制器已经消费样本来替代。
 ### 线程与数据移动矩阵
 
 | 阶段 | 常见线程 | 输入的所有权 | 可能的复制/阻塞 |

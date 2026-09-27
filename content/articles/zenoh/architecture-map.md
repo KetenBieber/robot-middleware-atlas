@@ -105,6 +105,97 @@ get(selector)
 
 查询的空间和关闭成本与未完成 fan-out 数相关。一个分支不发 Final 时必须由 timeout 收敛；迟到 Reply 要识别已完成 qid 并丢弃，不能重新创建状态。
 
+### 固定源码：从来源 Face 把 WireExpr 还原，再重用 Route
+
+如果只把路由写成 `HashMap<KeyExpr, Vec<Face>>`，有两个问题立刻暴露：收到的 wire scope 只在当前连接有效，且同一 key 从不同来源进入时，出站过滤和避免回环的答案可能不同。Zenoh 数据分发首先用当前来源 `FaceState` 解释 WireExpr，再检查 ingress policy，并把完整 RoutingExpr 交给 Route 计算。固定提交中的入口代码是：
+
+~~~rust
+pub fn route_data(
+    tables_ref: &Arc<TablesLock>,
+    src_face: &FaceState,
+    msg: &mut Push,
+    reliability: Reliability,
+    consume: bool,
+) {
+    let rtables = zread!(tables_ref.tables);
+    let tables = &*rtables;
+    let Some(prefix) =
+        rtables
+            .data
+            .get_mapping(src_face, &msg.wire_expr.scope, msg.wire_expr.mapping)
+    else {
+        tracing::error!(
+            "{} Route data with unknown scope {}!",
+            src_face,
+            msg.wire_expr.scope
+        );
+        return;
+    };
+
+    tracing::trace!(
+        "{} Route data for res {}{}",
+        src_face,
+        prefix.expr(),
+        msg.wire_expr.suffix.as_ref()
+    );
+
+    let expr = RoutingExpr::new(prefix, msg.wire_expr.suffix.as_ref());
+
+    #[cfg(feature = "stats")]
+    let payload_observer = super::stats::PayloadObserver::new(msg, Some(&expr), tables);
+    #[cfg(feature = "stats")]
+    payload_observer.observe_payload(zenoh_stats::Rx, src_face, msg);
+
+    if !tables.ingress_filter(src_face) {
+        return;
+    }
+~~~
+
+`get_mapping(src_face, scope, mapping)` 成功才拿到这条连接已声明过的资源前缀；未知 scope 直接记录错误并返回，不应把任意整数当全局 Resource ID。`RoutingExpr` 将共享前缀与本次消息 suffix 组合成待路由表达式；接下来执行 `ingress_filter(src_face)`，这一步之前不应按普通全局 key 查缓存，否则同样的字符串可能绕过来源特定的准入规则。
+
+下一层的缓存命中同样离不开来源上下文。固定提交的 `get_data_route` 实际按路由 region 汇集候选出口，并用目标 Face ID 去重：
+
+~~~rust
+fn get_data_route(
+    tables: &Tables,
+    src_face: &FaceState,
+    expr: &RoutingExpr,
+    node_id: NodeId,
+) -> Arc<Route> {
+    let compute_route = || {
+        let mut builder = RouteBuilder::<Direction>::new();
+
+        for (region, _) in tables.hats.iter() {
+            let route = get_hat_data_route(tables, src_face, expr, node_id, &region);
+
+            for dir in route.iter() {
+                builder.insert(dir.dst_face.id, || dir.clone());
+            }
+        }
+        Arc::new(builder.build())
+    };
+    let node_id = tables.hats[src_face.region].map_routing_context(&tables.data, src_face, node_id);
+    match expr
+        .resource()
+        .as_ref()
+        .and_then(|res| res.ctx.as_ref())
+        .map(|ctx| &ctx.data_routes)
+    {
+        Some(data_routes) => get_or_set_route(
+            data_routes,
+            tables.data.routes_version,
+            &src_face.region,
+            node_id,
+            compute_route,
+        ),
+        None => compute_route(),
+    }
+}
+~~~
+
+真正的缓存入口是 `get_or_set_route(data_routes, routes_version, src_face.region, node_id, compute_route)`：键不只是 key-expression，还含 region 与映射后的路由上下文，并且必须符合当前拓扑 `routes_version`。Resource 有可用 context 时才走缓存；临时表达式未定位到带 context 的 Resource 时仍可直接计算。这样在稳定拓扑下避免高频逐帧扫描所有声明，拓扑变动又能通过版本让旧 route 不再命中。
+
+图上的“缓存命中”也不能理解为 transport 写出成功。获取 Route 以后还要遍历方向、检查 egress policy、按目标 Face 重写 WireExpr 并投递到 Mux/Transport；慢链路会产生另外一层有界队列和拥塞行为。完整的逐目标分支放在[Publisher 与数据路由](publisher-routing.md)，此处先固定两个边界：**来源 Face 决定消息怎样被解释，Route 版本决定旧的转发答案能不能继续使用。**
 ## 核心对象与所有权
 
 **图示身份：概念、状态或调用链示意，不是源码。**

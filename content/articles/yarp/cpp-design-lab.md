@@ -1,5 +1,7 @@
 # YARP C++ 设计实验：Port、虚接口与并发关闭
 
+对照基线为本地 YARP 提交 `91710eb45baf5d9cb62dd5a0cb3c3a00f42481b9`。本页按实现能力组织缩小版 C++ 练习；标明“教学代码”的部分不属于上游源码，真实的发送扇出、Reader 线程及关闭次序分别以[写入与扇出](write-fanout.md)、[读取与 RPC](read-rpc.md)和[关闭生命周期](close-lifecycle.md)的固定提交摘录为准。
+
 YARP 的 C++ 难点集中在三个边界：应用对象如何被不同 Carrier 编码，一条 Port 如何同时拥有多条连接，以及 close 如何与后台读写并发。下面从一个最小消息类型开始逐层拆解。
 
 ## `Portable` 建立稳定的序列化接口

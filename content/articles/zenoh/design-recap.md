@@ -1,5 +1,7 @@
 # Zenoh 设计总结：从数据空间到可复刻路由内核
 
+本篇沿本地固定源码 `9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5` 归纳 [Session 生命周期](session-runtime.md)、[数据转发](publisher-routing.md)、[路由缓存](resource-route-cache.md)、[Query 完成协议](query-lifecycle.md)以及[背压和关闭](backpressure-close.md)。源码事实与自行设计的改进建议在正文中分别讨论，不能把后者当成该提交的现成功能。
+
 Zenoh 的核心不是某一个发布函数，而是一组相互制约的结构：Session 提供应用级实体与生命周期，Primitives 隔离 API 和路由内核，Face 表示一条逻辑通信边界，Resource tree 维护 key-expression 关系，Route cache 把昂贵计算移出高频数据路径，Transport 最终承担链路交付。
 
 把这些结构按因果关系连接起来，可以得到一幅完整的实现图：

@@ -41,6 +41,49 @@ PreOperational --configure 成功--> Stopped --start 成功--> Running
 
 TaskCore::start() 只允许从 Stopped 开始。它先设置 mTargetState=Running，再调用 startHook；hook 成功后提交 Running，并根据 TriggerOnStart 触发一次 Activity。失败时返回 Stopped；异常进入 Exception。startHook 适合使能设备和确认连接，不适合做耗时且不能取消的完整设备发现。生命周期函数并非整个都由一个全局 mutex 串行保护：应用应由单一管理者顺序调用 configure/start/stop/cleanup，避免两个管理线程基于同一旧状态同时转换。
 
+### 固定源码：配置成功后提交状态，失败不能自动撤销外部副作用
+
+对设备驱动而言，`configure()` 是从“参数和资源还不可靠”走到“可以尝试启动”的门槛。真正的内核状态转换与异常处理如下，摘自本地固定提交的完整函数：
+
+~~~cpp
+    bool TaskCore::configure() {
+        if ( mTaskState == Stopped || mTaskState == PreOperational) {
+            TRY(
+                mTargetState = Stopped;
+                bool successful;
+                { tracepoint_context(orocos_rtt, TaskContext_configureHook, mName.c_str());
+                    successful = configureHook(); }
+                if (successful) {
+                    if (mTaskState != Stopped && (mTaskState == mTargetState)) {
+                        log(Error) << "in configure(): state has been changed inside the configureHook" << endlog();
+                        log(Error) << "  but configureHook returned true. Bailing out." << endlog();
+                        exception();
+                        return false;
+                    }
+                    else {
+                        mTaskState = Stopped;
+                        return true;
+                    }
+                } else {
+                    mTargetState = mTaskState = PreOperational;
+                    return false;
+                }
+             ) CATCH(std::exception const& e,
+                log(Error) << "in configure(): switching to exception state because of unhandled exception" << endlog();
+                log(Error) << "  " << e.what() << endlog();
+                exception();
+             ) CATCH_ALL(
+                log(Error) << "in configure(): switching to exception state because of unhandled exception" << endlog();
+                exception();
+             )
+        }
+        return false; // no configure when running.
+    }
+~~~
+
+只有当前状态处于 `Stopped` 或 `PreOperational` 才允许配置。先设定目标为 `Stopped`，随后调用派生类的 `configureHook()`；只有其返回成功且没有与 hook 内部状态转换冲突，才更新 `mTaskState=Stopped`。当 hook 返回失败时，代码将当前态和目标态都设为 `PreOperational`；若 hook 抛异常或中途发生冲突，则进入 `exception()`。这些是**框架的状态提交语义**，不是设备资源的自动事务：比如串口已经打开而配置校验失败，代码并没有读取用户派生类成员，更不可能替它关闭串口。
+
+这就是 RAII 候选资源模式的必要性。业务 `configureHook()` 应先在局部唯一所有权对象里打开设备、申请固定容量缓存、装载参数；任何一步失败都通过局部析构回滚。成功后再把这些所有权移动到组件成员，返回 true 使框架正式提交 Stopped。不能把 `cleanupHook()` 当万能失败回滚：失败若发生在尚未达到 Stopped 的阶段，它未必会按你预期执行；析构阶段又已经失去安全调用派生虚函数的时机。
 ## TaskContext 的对象关系与真实所有权
 
 TaskContext 是组件公共门面。构造函数调用 TaskCore 建立 ExecutionEngine，再建立提供服务的 Service、请求服务的 ServiceRequester 和 Activity；setup() 将 configure、start、stop、cleanup、trigger 注册为默认 ClientThread Operations，并启动默认 Activity。源码见 [TaskContext::TaskContext/setup](https://github.com/orocos-toolchain/rtt/blob/600102e8be9c81905b20930e32d43b28244ab173/rtt/TaskContext.cpp#L70-L117)。

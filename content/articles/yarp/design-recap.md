@@ -1,5 +1,7 @@
 # YARP 设计总结：从名字到可插拔通信内核
 
+本文按本地固定提交 `91710eb45baf5d9cb62dd5a0cb3c3a00f42481b9` 综合前面源码章节。尤其要把 [PortCore 的所有权与锁](portcore-architecture.md)、[OutputUnit 的扇出/异步指针寿命](write-fanout.md)和[关闭时的线程静默点](close-lifecycle.md)放进同一张运行时图；下文描述设计模式时，只作为源代码结构的归纳，不代替真实调用链。
+
 YARP 将名字解析、连接管理和传输协议分层：Name Server 维护 name-to-Contact 控制面，PortCore 管理本地连接图，Unit 隔离每条连接，Protocol 管理会话状态，Carrier 实现握手与 framing，PortReader/Writer 隔离应用对象和连接编码。
 
 ## 总体架构

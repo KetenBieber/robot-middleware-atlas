@@ -144,6 +144,63 @@ struct QueryState {
 }
 ```
 
+### 固定源码：先绑定完成计数、超时与回调，再向外发送请求
+
+前面的状态图说明了为什么请求者必须先注册 qid。但实际实现还要处理超时 task 与 QueryState 插入之间的并发：超时任务会不会比插入更早抢到 CPU，从而“找不到自己要取消的请求”？直接看固定提交的连续源码，以下片段从计算 `nb_final` 一直延续到释放当前 SessionState 写锁：
+
+~~~rust
+let nb_final = match destination {
+            Locality::Any => 2,
+            _ => 1,
+        };
+        let token = self.0.task_controller.get_cancellation_token();
+        self.0
+            .task_controller
+            .spawn_with_rt(zenoh_runtime::ZRuntime::Net, {
+                let session = self.downgrade();
+                async move {
+                    tokio::select! {
+                        _ = tokio::time::sleep(timeout) => {
+                            let mut state = zwrite!(session.0.state);
+                            if let Some(query) = state.queries.remove(&qid) {
+                                std::mem::drop(state);
+                                tracing::debug!("Timeout on query {}! Send error and close.", qid);
+                                if query.reception_mode == ConsolidationMode::Latest {
+                                    for (_, reply) in query.replies.unwrap().into_iter() {
+                                        query.callback.call(reply);
+                                    }
+                                }
+                                query.callback.call(Reply {
+                                    result: Err(ReplyError::new("Timeout", Encoding::ZENOH_STRING)),
+                                    #[cfg(feature = "unstable")]
+                                    replier_id: None
+                                });
+                            }
+                        }
+                        _ = token.cancelled() => {}
+                    }
+                }
+            });
+
+        tracing::trace!("Register query {} (nb_final = {})", qid, nb_final);
+        state.queries.insert(
+            qid,
+            QueryState {
+                nb_final,
+                key_expr: key_expr.key_expr().into(),
+                parameters: parameters.clone().into_owned(),
+                reception_mode: consolidation,
+                replies: (consolidation != ConsolidationMode::None).then(HashMap::new),
+                callback,
+                querier_id,
+            },
+        );
+        drop(state);
+~~~
+
+`Locality::Any` 同时有远端和本地两个生产方向，所以等待两个 Final；只发往一个方向时等待一个。timeout task 被 spawn 以后，闭包里需要取得 `session.0.state` 的写锁才能删除 qid；外层当前仍持有相同写锁，直到插入 `QueryState` 并显式 `drop(state)`。因此，即使执行器立即调度 timeout task，它也必须等请求状态公开以后才能访问 map。这是**锁定义的发布顺序**，不能仅凭原子 qid 自增推导出来。
+
+timeout 分支用 `remove(&qid)` 争取唯一回收权，成功取得 QueryState 后释放锁，再刷新 Latest 缓存并向 callback 发送 Timeout 错误。正常 Final 若先移除了状态，超时 task 只会看到 None，不再重复收尾。这个顺序把“至少一个方向产生回复”与“请求最终必须结束”分开处理，不能把接收器关闭交给第一条 Reply 来决定。
 ## `nb_final` 是生产路径计数而不是回复计数
 
 当 `Locality::Any` 同时启用本地与远端分发时，`nb_final` 初始化为 2；只走一个方向时初始化为 1。
@@ -194,6 +251,29 @@ for (id, callback) in callbacks {
 
 对应源码：[`Session::handle_query`](https://github.com/eclipse-zenoh/zenoh/blob/9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5/zenoh/src/api/session.rs#L2969-L3043)。
 
+### 固定源码：本地筛选先复制句柄，用户回调在 Session 锁外运行
+
+前文的筛选示意对应到真实源码，就是把 `QueryableState` 的 ID 和 callback clone 成一个短生命周期的 vector：
+
+~~~rust
+let queryables = state
+            .queryables
+            .iter()
+            .filter(|(_, queryable)| {
+                (queryable.origin == Locality::Any
+                    || (local == (queryable.origin == Locality::SessionLocal)))
+                    && (queryable.complete || target != QueryTarget::AllComplete)
+                    && queryable.key_expr.intersects(key_expr)
+            })
+            .map(|(id, qable)| (*id, qable.callback.clone()))
+            .collect::<Vec<(u32, Callback<Query>)>>();
+
+        drop(state);
+~~~
+
+`origin` 检查区分本地请求与来自其他节点的请求；`complete` 只在 `AllComplete` target 下成为硬筛选条件；`key_expr.intersects` 判断两个 key-expression 的交集，而不是字符串完全相等。`collect::<Vec<_>>()` 先完成筛选，随后 `drop(state)` 才允许进入创建 Query 对象与用户 callback 的步骤。应用可以在回调中重新 declare/undeclare Queryable，而不必等待前面遗留的 Session 读锁。
+
+返回的只是回调句柄和实体 ID，没有深复制真实数据。每个 callback 收到的 Query 共享同一个 `Arc<QueryInner>`，所以不同 Queryable 可以把工作转交各自的异步任务；最终由最后一份 Query 的析构为这一条本地方向发送 Final。若 callback 把 Query 永久保存又不释放，请求端只能依赖超时策略收束，这与 `Arc` 的内存安全不是同一个契约。
 ## `QueryInner::drop` 把对象生命周期变成 Final
 
 每个匹配 callback 收到一个 `Query`，这些 Query 共享同一个 `Arc<QueryInner>`：
@@ -251,6 +331,41 @@ impl Drop for QueryInner {
 }
 ```
 
+### 固定源码：只有最后一个方向完成才真正关闭请求
+
+当本地或远端分支发送 ResponseFinal，接收端沿 qid 回到请求方的 SessionState。固定提交的完成分支如下：
+
+~~~rust
+fn send_response_final(&self, msg: &mut ResponseFinal) {
+        trace!("recv ResponseFinal {:?}", msg);
+        let mut state = zwrite!(self.0.state);
+        if state.primitives.is_none() {
+            return; // Session closing or closed
+        }
+        match state.queries.get_mut(&msg.rid) {
+            Some(query) => {
+                query.nb_final -= 1;
+                if query.nb_final == 0 {
+                    let query = state.queries.remove(&msg.rid).unwrap();
+                    std::mem::drop(state);
+                    if query.reception_mode == ConsolidationMode::Latest {
+                        for (_, reply) in query.replies.unwrap().into_iter() {
+                            query.callback.call(reply);
+                        }
+                    }
+                    trace!("Close query {}", msg.rid);
+                }
+            }
+            None => {
+                warn!("Received ResponseFinal for unknown Request: {}", msg.rid);
+            }
+        }
+    }
+~~~
+
+`nb_final` 是“尚未结束的生产方向数”，不是剩余 Reply 条数。第一次 Final 只做减一；归零那次才从 `queries` map 中移走状态。对于 `Latest` consolidation，缓存的最新版本要在这一刻由回调交付；这一批 callback 发生在显式释放 Session 写锁之后。若 Session 已在关闭中，或迟到的 Final 找不到请求，函数直接返回或记录 unknown request，不能重新打开已经结束的接收器。
+
+对路由端口和应用端而言，Final 分别解决不同粒度：路由中间节点要清理每个下游方向的 pending entry，原始请求方则等到本地与远端两个汇聚方向都结束。只画单个 RPC 的“一个请求、一个回复”无法描述这张扇出后又汇聚的生命周期图。
 ## 远端路由为每个方向重写 qid
 
 源 Face 上的 `src_qid` 只在该 Face 的命名空间内唯一。路由节点向多个下游 Face 扇出时，为每个方向分配新的 `dst_qid`：
@@ -292,6 +407,95 @@ Arc<Query> strong refs
 
 对应源码：[`route_query` 扇出](https://github.com/eclipse-zenoh/zenoh/blob/9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5/zenoh/src/net/routing/dispatcher/queries.rs#L202-L370)，[`QueryCleanup`](https://github.com/eclipse-zenoh/zenoh/blob/9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5/zenoh/src/net/routing/dispatcher/queries.rs#L437-L523)，[`回复与 Final 汇聚`](https://github.com/eclipse-zenoh/zenoh/blob/9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5/zenoh/src/net/routing/dispatcher/queries.rs#L552-L686)。
 
+### 固定源码：路由方向的 qid 与 Pending Entry 是一对
+
+前面给出的远端扇出图有一个需要落到代码中的关键点：源 Face 的 qid 不应该直接用于其他 Face 的 pending map。每个目标 Face 维护自己的 `next_qid`，注册时返回新的局部 rid：
+
+~~~rust
+fn insert_pending_query(outface: &mut Arc<FaceState>, query: Arc<Query>) -> RequestId {
+    let outface_mut = get_mut_unchecked(outface);
+    // This `wrapping_add` is kind of "safe" because it would require an incredible amount
+    // of parallel running queries to conflict a currently used id.
+    // However, query ids are encoded with varint algorithm, so an incremental id isn't a
+    // good match, and there is still room for optimization.
+    outface_mut.next_qid = outface_mut.next_qid.wrapping_add(1);
+    let qid = outface_mut.next_qid;
+    outface_mut.pending_queries.insert(
+        qid,
+        (query, outface_mut.task_controller.get_cancellation_token()),
+    );
+    qid
+}
+~~~
+
+这个函数把 `Arc<Query>`、目标 Face 生成的局部 rid 和该 Face 的取消 token 绑定在同一个 map entry 中。源 qid 则保留在共享 Query 对象的 `src_qid` 字段，反向 Response 到达时根据目标 Face 的 rid 找到对应的源 Face，再改写回原 qid。它隔离的是**每条连接各自的请求编号空间**，不是在整个集群内强制共享一只全局计数器。
+
+还有一个容易忽视的引用计数条件：`route_query` 完成各目标路径注册后，必须立即释放暂存在源调用栈上的那份 `Arc<Query>`。本地固定提交对此有明确注释：
+
+~~~rust
+                // NOTE: it's important to drop the `Arc<Query>` object immediately otherwise
+                // a ResponseFinal from a local queryable won't finalize the query,
+                // this is because `Arc::strong_count(&query)` would always be > 1.
+                drop(query);
+~~~
+
+如果不释放这份额外引用，即使全部目标方向都完成并删除 pending entry，`Arc` 的强计数仍大于 1，最后一条方向上的 `Arc::into_inner` 就可能无法确认自己是唯一持有者，导致上游 Final 无法按预期发送。生命周期的正确性不只是“map 中有没有 entry”，还包括临时局部 `Arc` 是否已经退出作用域。
+
+### 每个方向的超时都必须进入相同的回收路径
+
+方向超时任务保留 `Weak<FaceState>` 而不是永久强持有断开后的 Face。固定提交的 `QueryCleanup::run` 在升级 Face 成功后先向源路由发送超时错误 Response，再在 `queries_lock` 下尝试移除该方向 entry；只有成功取得 entry 的路径才进行 `finalize_pending_query`：
+
+~~~rust
+impl Timed for QueryCleanup {
+    async fn run(&mut self) {
+        if let Some(mut face) = self.face.upgrade() {
+            let ext_respid = Some(response::ext::ResponderIdType {
+                zid: face.zid,
+                eid: 0,
+            });
+            route_send_response(
+                &self.tables,
+                &mut face,
+                &mut Response {
+                    rid: self.qid,
+                    wire_expr: WireExpr::empty(),
+                    payload: ResponseBody::Err(zenoh::Err {
+                        encoding: Encoding::default(),
+                        ext_sinfo: None,
+                        #[cfg(feature = "shared-memory")]
+                        ext_shm: None,
+                        ext_unknown: vec![],
+                        payload: ZBuf::from("Timeout".as_bytes().to_vec()),
+                    }),
+                    ext_qos: self.qos,
+                    ext_tstamp: None,
+                    ext_respid,
+                    // TODO: Maybe this should be set?
+                    ext_ts_stack: None,
+                },
+            );
+            let queries_lock = zwrite!(self.tables.queries_lock);
+            if let Some(query) = get_mut_unchecked(&mut face)
+                .pending_queries
+                .remove(&self.qid)
+            {
+                drop(queries_lock);
+                tracing::warn!(
+                    "{}:{} Didn't receive final reply for query {}:{}: Timeout({:#?})!",
+                    face,
+                    self.qid,
+                    query.0.src_face,
+                    query.0.src_qid,
+                    self.timeout,
+                );
+                finalize_pending_query(query);
+            }
+        }
+    }
+}
+~~~
+
+正常远端 Final、超时清理以及 Face 关闭都可能争夺同一 pending entry。这里的写锁和 `remove` 决定哪一个分支赢得该 entry；`QueryCleanup` 取得不到 entry 时就不能再声称自己代表最后一个完成方向。实际部署里还需要区分源端整体 timeout 与路由侧单方向 timeout：前者规定应用最多等待多久，后者负责避免某个坏连接永久阻塞路由器的扇出汇聚。
 ## Consolidation 决定 Reply 何时交付
 
 多个方向可能对同一个 key 返回多次。Consolidation 用来规定接收端保留和交付哪些版本：

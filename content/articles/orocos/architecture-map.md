@@ -54,12 +54,73 @@ TaskContext 构造时建立 TaskCore/ExecutionEngine、Service、ServiceRequeste
 
 运行时对象的主要线索为：Activity 通过 ActivityInterface 的 raw Runnable 指针调用 Engine；TaskContext 用 shared_ptr 持有默认 Activity；TaskCore 以 raw pointer 持有 ExecutionEngine 并在父类析构释放；Port 连接通过 ChannelElement shared/intrusive pointer 管理节点。引用计数延长的是相关对象寿命，不代表线程已经退出，也不保证借用的对象或动态库可先行销毁。所有权源码分布在 [TaskCore.cpp](https://github.com/orocos-toolchain/rtt/blob/600102e8be9c81905b20930e32d43b28244ab173/rtt/base/TaskCore.cpp#L53-L76)、[TaskContext.hpp](https://github.com/orocos-toolchain/rtt/blob/600102e8be9c81905b20930e32d43b28244ab173/rtt/TaskContext.hpp#L680-L698) 和 [ActivityInterface.hpp](https://github.com/orocos-toolchain/rtt/blob/600102e8be9c81905b20930e32d43b28244ab173/rtt/base/ActivityInterface.hpp#L45-L75)。
 
+### 构造链：先建立执行引擎，再选择 Activity
+
+如果 TaskContext 在派生类尚未构造完毕时就让后台线程调用业务 hook，线程可能观察到未初始化的 Port 或设备成员。RTT 把构造步骤分开：`TaskCore` 基类首先创建 `ExecutionEngine`，`TaskContext` 再按编译配置选择 `Activity`，`setup()` 注册服务后才启动默认活动。先看本地固定提交的真实构造：
+
+~~~cpp
+    TaskContext::TaskContext(const std::string& name, TaskState initial_state /*= Stopped*/)
+        :  TaskCore( initial_state, name )
+           ,tcservice(new Service(name,this) ), tcrequests( new ServiceRequester(name,this) )
+#if defined(ORO_ACT_DEFAULT_SEQUENTIAL)
+           ,our_act( new SequentialActivity( this->engine() ) )
+#elif defined(ORO_ACT_DEFAULT_ACTIVITY)
+           ,our_act( new Activity( this->engine(), name ) )
+#endif
+    {
+        this->setup();
+    }
+~~~
+
+`TaskCore(initial_state, name)` 的初始化发生在派生对象成员初始化之前；构造函数体里的 `setup()` 则负责建立运行时操作入口。`our_act` 是 TaskContext 管理的 Activity 对象，内部借用 Engine 的 Runnable 接口；组件运行时状态仍受 TaskCore 控制。`our_act->start()` 让执行宿主可运行，**不是业务已经进入 Running 状态的保证**。业务 `updateHook()` 只有通过 Engine 的状态门控才会被调用。
+
+自己实现时应先构造完整的消息队列与事件消费者，再开放 producer 或启动线程；将 Activity 线程启动与业务设备使能分成不同状态转换。否则构造期与停止期会出现对半初始化组件的并发访问。
 ### 一周期里执行的工作不是 updateHook 独占线程
 
 ExecutionEngine::work(reason) 规定顺序：Trigger 时处理消息与端口 callbacks；TimeOut/IOReady 时再处理 function 队列和 TaskCore hooks。状态为 Running 才进 updateHook，RunTimeError 时进入 errorHook；事实见 [ExecutionEngine.cpp](https://github.com/orocos-toolchain/rtt/blob/600102e8be9c81905b20930e32d43b28244ab173/rtt/ExecutionEngine.cpp#L330-L392)。
 
 本提交在 Engine 构造时为 message、port、function 各创建容量 100 的 MWSR 队列。但 processMessages 与 processPortCallbacks 都 drain 到空，容量是空间界限，不是每周期批处理时间预算。如果一条 Port callback 耗时 0.5 ms，几十条积压足以错过 1 ms deadline。对严格截止期要隔离慢工作，或在自研复刻中加入每周期明确 batch；后者是改进方案，不应被写成此提交的事实。队列满返回 false，应用应把它变成拒绝计数和控制策略，而不能仅凭 Activity 收到 trigger 就宣称任务会执行。
 
+### 直接对照 `ExecutionEngine::work` 的真正分派顺序
+
+`Activity::trigger()` 提交的是一次执行请求；线程真正获得 CPU 以后，Engine 还会按触发原因决定是否进入业务 hook。下面是固定提交的完整工作分派：
+
+~~~cpp
+    void ExecutionEngine::work(RunnableInterface::WorkReason reason) {
+        // Interprete work before calling into user code such that we are consistent at all times.
+        if (taskc) {
+            ++taskc->mCycleCounter;
+            switch(reason) {
+            case RunnableInterface::Trigger :
+                ++taskc->mTriggerCounter;
+                break;
+            case RunnableInterface::TimeOut :
+                ++taskc->mTimeOutCounter;
+                break;
+            case RunnableInterface::IOReady :
+                ++taskc->mIOCounter;
+                break;
+            default:
+                break;
+            }
+        }
+        if (reason == RunnableInterface::Trigger) {
+            /* Callback step */
+            processMessages();
+            processPortCallbacks();
+        } else if (reason == RunnableInterface::TimeOut || reason == RunnableInterface::IOReady) {
+            /* Update step */
+            processMessages();
+            processPortCallbacks();
+            processFunctions();
+            processHooks();
+        }
+    }
+~~~
+
+纯 `Trigger` 只排空命令和端口回调；`TimeOut` 或 `IOReady` 在它们之后还会执行 function 队列和生命周期 hook。这意味着一次到达的端口事件不必然对应一次 `updateHook()`，OwnThread 命令也能先于同轮控制计算修改状态。
+
+假设本轮累积 10 条各耗时 0.6 ms 的命令：即使控制周期配置为 1 ms，`processMessages()` 的完整排空也可能先花掉 6 ms。固定提交的三个 Engine 队列各有容量 100，但这是待办空间上限，不是每周期 CPU 时间预算。`getActivity()->trigger()` 是让 Activity 尝试执行；`msg_cond.broadcast()` 则通知等待 Operation 完成的线程，二者分别服务于不同的等待者，不能被画成同一条业务执行线程。
 ## 一条样本的空间路径与时间路径
 
 样本的空间路径是 OutputPort 到 ConnFactory 创建的 ChannelElement 链，再到 InputPort 的读取端。本地 PerConnection PUSH 可在连接链上放 ChannelDataElement 或 ChannelBufferElement；DATA 是单值最新状态，BUFFER 是有限 FIFO，CIRCULAR_BUFFER 满时丢旧项。由 [ConnFactory::buildDataStorage](https://github.com/orocos-toolchain/rtt/blob/600102e8be9c81905b20930e32d43b28244ab173/rtt/internal/ConnFactory.hpp#L150-L205) 与 [ChannelBufferElement::read/write](https://github.com/orocos-toolchain/rtt/blob/600102e8be9c81905b20930e32d43b28244ab173/rtt/internal/ChannelBufferElement.hpp#L95-L134) 可追到存储实现。
@@ -82,6 +143,23 @@ ExecutionEngine::work(reason) 规定顺序：Trigger 时处理消息与端口 ca
 
 三条正交轴可以帮助定位配置：生命周期轴决定能否配置/运行/清理；执行轴决定在哪条线程及何时运行；数据轴决定保留多少样本、覆盖谁、谁主动发送。同一 TaskContext 可以跑 1 kHz 周期，也可以以事件方式触发；相同 InputPort 类型可以连 DATA 或 BUFFER。读一个类名无法判断组件 deadline、线程数或排队行为。
 
+### 读到“最新值”仍然可能花费与积压长度成正比的时间
+
+机器人控制通常希望使用最新姿态而非顺序执行过期样本。RTT 的 `InputPort<T>::readNewest()` 不是直接读取最新槽位，而是持续读取新样本直到队列不再返回 `NewData`。下面是固定源码：
+
+~~~cpp
+        FlowStatus readNewest(typename base::ChannelElement<T>::reference_t sample, bool copy_old_data = true)
+        {
+            FlowStatus result = read(sample, copy_old_data);
+            if (result != RTT::NewData)
+                return result;
+
+            while (read(sample, false) == RTT::NewData);
+            return RTT::NewData;
+        }
+~~~
+
+若 BUFFER 中积压了 `k` 条样本，函数会进行数量级为 `O(k)` 的读取与样本赋值；若 `T` 含动态分配的字段，这些复制还可能产生 allocator 抖动。`readNewest()` 解决数据新鲜度的一部分问题，却没有常数时间保证。对必须证明周期上界的控制器，应依据场景选用 DATA 最新值存储，或者在应用层自行给 drain 设置工作量上限；后者是推荐改进，不是这个 RTT 提交已经实现的额外参数。
 ## 从真实实现推回设计取舍
 
 TaskCore 固定生命周期骨架，使所有组件共享状态检查，但 hook 能包含分配、阻塞和设备错误；Activity 可替换，部署时线程策略成为系统配置；OwnThread Operation 把命令放入 Engine 串行处理，代价是排队与同步等待；ChannelElement 链使 storage/transports 可组合，代价是复制与关闭节点分散；TypeKit/plugin 使运行时按名字创建不同类型和组件，代价是 ABI 与动态库寿命进入对象生命周期。它们隔离不同变化点，也引入新故障边界。

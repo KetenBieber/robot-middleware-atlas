@@ -83,6 +83,46 @@ processMessages() 排空消息队列并调用 executeAndDispose()。目标 Engin
 
 这版没有通用 CallState 类；状态在按签名实例化的 invocation 与 BindStorage::RStore 中。SendHandle 本身通过共享指针保留 invocation，collect() 查询结果；析构函数不发取消请求。RTT 使用 boost::function<Signature> 作为统一调用接口；OperationCallerBinder 把成员函数指针、传入的对象指针和参数占位符绑定为 boost::function。模板为每个实际签名实例化不同实现，Service 再用运行时名称暴露操作。绑定对象指针不会自动拥有目标组件；Service/Operation 生命周期不能越过组件对象析构。
 
+### 固定源码：`executeAndDispose()` 既是执行点，也是生命周期转折点
+
+`do_send()` 把 invocation 裸指针交给 Engine，但调用者拿着的 `SendHandle` 与目标队列实际处理之间仍有一道同步边界。固定源码中每个按签名实例化的 invocation 自己实现 `executeAndDispose()`：
+
+~~~cpp
+            void executeAndDispose() {
+                if (!this->retv.isExecuted()) {
+                    this->exec(); // calls BindStorage.
+                    //cout << "executed method"<<endl;
+                    if(this->retv.isError())
+                        this->reportError();
+                    bool result = false;
+                    if ( this->caller){
+                        result = this->caller->process(this);
+                    }
+                    if (!result)
+                        dispose();
+                } else {
+                    //cout << "received method done msg."<<endl;
+                    // Already executed, are in caller.
+                    // nop, we will check ret in collect()
+                    // This is the place to call call-back functions,
+                    // since we're in the caller's (or proxy's) EE.
+                    dispose();
+                }
+                return;
+            }
+
+            /**
+             * As long as dispose (or executeAndDispose() ) is
+             * not called, this object will not be destroyed.
+             */
+            void dispose() {
+                self.reset();
+            }
+~~~
+
+第一次到达目标 Engine 时，`retv.isExecuted()` 为假，它调用 `exec()` 执行先前存储的参数和业务函数，并记录结果或错误。若设置了 caller Engine，invocation 再次以同一个对象指针投递给调用方的 Engine；只有转交失败或没有 caller 时才立即 `dispose()`。第二次到达 caller Engine，`retv.isExecuted()` 已经为真，分支不再执行业务函数，只释放内部 `self` 强引用。即便调用方的 `SendHandle` 仍存在，invocation 也可继续存活供 collect 读取结果；清理 self 并不等于强制销毁全部引用。
+
+两次队列投递的单位都是 invocation 身份，不是一次次重复执行命令。若把“目标执行完”与“caller 收集完成”合成同一个状态，异步结果回传很容易重复触发设备动作。与此同时，`shared_ptr` 只保住 invocation 自身，不会替 `AStore<T&>` 所借用的外部对象续命，因此引用参数的悬空问题仍须由上层 API 约束。
 ## call 与 send 的差别
 
 ClientThread 的 call() 直接执行存储的可调用对象。若是跨 Engine 的 OwnThread，call() 会先 send，再 collect，并返回结果；发送或收集失败抛 SendFailure。固定源码摘录：

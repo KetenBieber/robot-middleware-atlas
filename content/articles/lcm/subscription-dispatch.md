@@ -176,44 +176,73 @@ one MessageBuffer
 
 配额隔离的是“为某订阅者保留多少历史”，不是 CPU 执行隔离。需要并行时，callback 应快速转交到应用自有队列；转交时必须复制或 decode，因为 provider payload 在 handle 返回后失效。
 
-## dispatch 前冻结迭代边界
+## 分发时如何冻结迭代边界，却在锁外执行业务
 
-`lcm_dispatch_handlers()` 取得当前匹配数组，并保存初始长度：
+此时 provider 已经接收完整消息，核心层也知道这条具体 channel 应交给哪些 handler。新的矛盾是：业务 callback 可能很慢，还可能在内部执行 `unsubscribe()`，因此不能一直持有核心订阅表的互斥锁；但如果解锁后让 callback 直接删除正在遍历的 handler，又会发生迭代器失效和悬空指针。
 
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
+一个朴素的错误版本是 `for (handler : vector) handler(message)`。假设 A、B 两只订阅收到同一帧图像；A 回调中取消 B 并释放它的对象，for 循环下一次访问 B 的指针就可能触发 use-after-free。给整轮循环加锁也不是完整答案，因为用户代码可能反过来调用订阅接口、执行文件 I/O，或与接收线程争同一把锁。
 
-```c
-int nhandlers = handlers->len;
-for (int i = 0; i < nhandlers; ++i)
-    handlers[i]->callback_scheduled = 1;
-```
+LCM 采用**冻结当前迭代边界、逻辑删除、最后集中回收**三阶段。下面给出固定提交的完整连续 `lcm_dispatch_handlers()`，没有把重要的锁域和回收分支藏进教学伪代码：
 
-固定 `nhandlers` 保证 callback 中新增的订阅不会突然参与当前消息。新订阅从下一条消息开始生效，事件边界可预测。
-
-`callback_scheduled` 表示这批迭代仍持有 subscription 裸指针。它不是“当前正在调用”单一 handler，而是整批 handler 的生命保护标记。
-
-一个具体的删除时序是：handle 线程先把 A、B 两个订阅都标为 scheduled，随后进入 A 的 callback；A 内调用 unsubscribe(B)，B 被标记删除而不立即释放，dispatch 回到锁内后跳过 B 并在遍历结束时回收它。相反，若另一管理线程调用 unsubscribe(A)，函数可以在 A callback 尚未返回时就把删除标记设好并返回；这个返回值不是 callback 已退出的屏障。若管理线程随后释放 A 的 `userdata`，正在执行的 callback 仍会解引用悬空地址。安全应用要在同一个事件循环线程做 unsubscribe，或先停止并 join handle 线程，再释放 user state。
-
-## 用户 callback 在核心锁外执行
-
-分发循环为：
-
-**代码身份：教学摘录（节选或改写以解释机制，不是固定提交的逐字连续源码）。**
-
-```c
-if (!sub->marked_for_deletion &&
-    sub->num_queued_messages > 0) {
-    sub->num_queued_messages--;
-    g_rec_mutex_unlock(&lcm->mutex);
-    sub->handler(buf, channel, sub->userdata);
+~~~c
+int lcm_dispatch_handlers(lcm_t *lcm, lcm_recv_buf_t *buf, const char *channel)
+{
     g_rec_mutex_lock(&lcm->mutex);
+
+    GPtrArray *handlers = lcm_get_handlers(lcm, channel);
+
+    // ref the handlers to prevent them from being destroyed by an
+    // lcm_unsubscribe.  This guarantees that handlers 0-(nhandlers-1) will not
+    // be destroyed during the callbacks.  Store nhandlers in a local variable
+    // so that we don't iterate over handlers that are added during the
+    // callbacks.
+    int nhandlers = handlers->len;
+    for (int i = 0; i < nhandlers; i++) {
+        lcm_subscription_t *subscription = (lcm_subscription_t *) g_ptr_array_index(handlers, i);
+        subscription->callback_scheduled = 1;
+    }
+
+    // now, call the handlers.
+    for (int i = 0; i < nhandlers; i++) {
+        lcm_subscription_t *subscription = (lcm_subscription_t *) g_ptr_array_index(handlers, i);
+
+        if (!subscription->marked_for_deletion && subscription->num_queued_messages > 0) {
+            subscription->num_queued_messages--;
+            g_rec_mutex_unlock(&lcm->mutex);
+            subscription->handler(buf, channel, subscription->userdata);
+            g_rec_mutex_lock(&lcm->mutex);
+        }
+    }
+
+    // unref the handlers and check if any should be deleted
+    GList *to_remove = NULL;
+    for (int i = 0; i < nhandlers; i++) {
+        lcm_subscription_t *subscription = (lcm_subscription_t *) g_ptr_array_index(handlers, i);
+
+        subscription->callback_scheduled = 0;
+        if (subscription->marked_for_deletion)
+            to_remove = g_list_prepend(to_remove, subscription);
+    }
+    // actually delete handlers marked for deletion
+    for (; to_remove; to_remove = g_list_delete_link(to_remove, to_remove)) {
+        lcm_subscription_t *subscription = (lcm_subscription_t *) to_remove->data;
+        g_ptr_array_remove(lcm->handlers_all, subscription);
+        g_hash_table_foreach(lcm->handlers_map, map_remove_handler_callback, subscription);
+        lcm_handler_free(subscription);
+    }
+    g_rec_mutex_unlock(&lcm->mutex);
+
+    return 0;
 }
-```
+~~~
 
-先减少 pending count，再释放锁，随后调用未知用户代码。这样 callback 可以 publish 或 unsubscribe，也不会让网络线程在全局订阅锁上等待整个算法计算。
+第一段在核心 mutex 下得到 channel 的缓存 handler 数组，保存 `nhandlers`，再给这批 subscription 标记 `callback_scheduled=1`。这个标志不是引用计数，也不是“当前就在执行”的状态，而是通知 `unsubscribe()`：本轮迭代仍可能解引用这个对象，所以现在只能逻辑删除，不能移动数组槽位或 `free`。`nhandlers` 冻结数量而非完整副本；在 callback 中新增的订阅不会意外插入本次消息的遍历范围。
 
-锁外 callback 同时意味着重新加锁后所有共享状态都可能变化。循环不能假设 map、订阅标记或全局列表仍保持调用前状态，只能依赖预先冻结的数组元素生命周期。
+第二段逐个判断 `marked_for_deletion` 和配额 `num_queued_messages`。对有资格的节点，先扣掉配额，再 **释放 `lcm->mutex` 执行 `subscription->handler(buf, channel, userdata)`**，完成后重新加锁。这样业务 callback 能够修改订阅表；但本次处理仍发生在调用 `lcm_handle()` 的应用线程上。A 耗时 20 ms，则同一条消息的 B 仍必须等这 20 ms，并不会因独立配额就获得独立线程。真正的 CPU 隔离需要业务 callback 快速复制或 decode 数据后，把工作交给另一个有界应用队列。
 
+第三段解除所有本轮迭代标志，将 `marked_for_deletion` 的对象收集到 `to_remove`，然后从 `handlers_all`、所有 channel 缓存及堆内存中一次性移除。这一安全点保护的是核心内部 `lcm_subscription_t` 节点，不拥有用户提供的 `userdata`。外部管理线程若取消订阅后马上释放 userdata，而 handle 线程仍在执行该回调，依然可能发生悬空访问；需要先停 handle 循环并等待它退出。
+
+这里同时解释了为什么 `lcm_handle()` 用独立 `handle_mutex` 串行化完整处理，又用 `in_handle` 禁止递归 handle：核心允许 callback 调用部分订阅管理函数，但不允许同一 handle 过程递归消费下一条消息来绕过当前批次的回收边界。
 ## callback 内 unsubscribe 使用延迟删除
 
 如果 handler 在自身 callback 中调用 unsubscribe，立即从数组删除并 free 会让 dispatch 循环持有悬空指针。LCM 检查：
