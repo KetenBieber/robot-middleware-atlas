@@ -381,7 +381,7 @@ compound invariant + nontrivial object lifetime -> mutex often clearer
 single flag/counter with defined transitions    -> atomic may fit
 ```
 
-无锁算法还需要精确 memory order 和对象回收协议。`memory_order`（内存序）是传给原子操作的约束，用来规定该操作与其他内存读写之间哪些先后关系必须对其他线程可见；它不会把多个原子变量的组合更新自动变成一个不可分割的事务。Cyber 在 ring 上使用 mutex、在 routine state 上使用 atomic，是按不变量粒度选择工具，而不是追求所有路径 lock-free。
+无锁算法还需要精确 memory order 和对象回收协议。`memory_order`（内存序）是传给原子操作的约束，用来规定该操作与其他内存读写之间哪些先后关系必须对其他线程可见；它不会把多个原子变量的组合更新自动变成一个不可分割的事务。必须区分固定提交中的实际字段：`CRoutine::lock_` 和 `updated_` 是 `std::atomic_flag`，而 `state_` 是普通的 `RoutineState` 枚举，并**非 atomic**。通知线程读取 `state_` 与运行线程修改 `state_` 时，在可见源码里没有统一同步协议，存在 C++ data race 风险；不能因为旁边有两个原子标志就宣称整个状态机线程安全。详见[事件与任务状态](croutine-wakeup.md)及[Processor 执行路径](processor-context-switch.md)。缓存按各自 mutex 保护复合不变量、原子标志仅维护单独事件或执行互斥，这才是从这份源码能够直接观察到的设计。
 
 ## 编译期安全、运行时弹性与可调试性的三角取舍
 

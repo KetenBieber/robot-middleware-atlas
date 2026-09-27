@@ -410,7 +410,30 @@ if (std::abs(age) > max_pose_age) {
 
 ## 初始缺数与连续覆盖
 
-辅助输入从未到达时，`Latest()` 返回 false，fusion callback 不向融合 ring 写入数据。主输入虽然已经进入自己的 ring，但不会形成可供 `TryFetch()` 返回的参数组。
+辅助输入从未到达时，`Latest()` 返回 false，fusion callback 不向融合 ring 写入数据。这里有一个容易被“主输入先入缓存”的直觉掩盖的细节：**该 DataVisitor 的原始 M0 ring 也不会保存这条主消息**。原因不在调度器，而在 `CacheBuffer::Fill()` 的互斥分支。
+
+下面是**固定提交的 `CacheBuffer::Fill()` 源码**，它把普通缓存写入与多输入融合写入明确分开：
+
+```cpp
+void Fill(const T& value) {
+  if (fusion_callback_) {
+    fusion_callback_(value);
+  } else {
+    if (Full()) {
+      buffer_[GetIndex(head_)] = value;
+      ++head_;
+      ++tail_;
+    } else {
+      buffer_[GetIndex(tail_ + 1)] = value;
+      ++tail_;
+    }
+  }
+}
+```
+
+`AllLatest` 构造时给主输入缓存安装融合回调。因此 M0 到达后，写入线程在主缓存的 mutex 内调用这个回调；若辅助输入尚不存在，回调立即返回，既不会推进 M0 的 `tail_`，也不会往融合 ring 存入 tuple。虽然 `DataDispatcher::Dispatch()` 随后仍会通知主 channel，Processor 即使醒来，`TryFetch()` 也没有可取的参数组。稍后 M1 第一次到达，只会更新辅助缓存，不会追溯重建此前的主消息，也不会单独唤醒这个以 M0 为触发源的组件。**要生成第一组参数，必须等到下一次 M0 到来。**
+
+例如相机第 10 帧先到、定位稍后才初始化，`cloud#10` 对这个 DataVisitor 就已经失去生成融合组的机会；定位就绪后 `cloud#11` 到来，才可能得到 `(cloud#11, pose#1)`。原始主 channel 收包数、成功生成的 tuple 数和最终 `Proc()` 次数是三个不同的指标，不应该合成一个“丢帧率”。
 
 这带来两个行为：
 
@@ -434,14 +457,14 @@ if (std::abs(age) > max_pose_age) {
 
 每条主输入到达时，融合 callback 要读取 `K-1` 个 Latest，并创建一只含 K 个智能指针的 tuple，因此为 `O(K)`。由于 Cyber RT 把 K 限制为 4，这个上界很小而且固定。
 
-单个 visitor 的指针槽位内存近似为：
+单个 visitor 的指针槽位容量可以按构造出的物理缓存分账。辅助输入原始 ring 与融合 ring 保存有效消息；M0 缓存在安装融合回调以后通常不保存原始主消息，但固定提交仍为它分配 `Q0+1` 个槽位。若估算**预分配槽位**而非实际仍然持有的对象数，可近似写成：
 
 ```text
 Mpointer ~= sizeof(shared_ptr) * (Q0 + Q1 + ... + Q(K-1))
          + sizeof(shared_ptr<FusionTuple>) * Qf
 ```
 
-这还不包括 tuple 对象、控制块和消息本体。消息本体可能被多个原始 ring 与多个 fusion tuple 共同持有，因此峰值寿命取决于最慢消费者，而不只取决于单个 channel 的 queue size。
+这还不包括 tuple 对象、控制块和消息本体。主输入对象可以被其他单输入 visitor 的原始 ring 保存，也可以被多个融合 tuple 引用；本 visitor 的原始 M0 ring 在正常融合路径不额外保存它。峰值对象寿命取决于所有实际引用者，而不只取决于这个组件的 queue size。
 
 当一个高频 channel 被 `B` 个 DataVisitor 订阅时，Dispatcher 热路径为 `O(B)`；若其中多个 visitor 又把该 channel 作为主输入，每个 visitor 都会独立执行 Latest 查询和 tuple 分配。共享 transport receiver 减少了接收端数量，却没有消除消费者级缓存与融合成本。
 
@@ -502,6 +525,6 @@ class AllLatestJoin {
 
 ## 从多输入组合继续进入调度链
 
-到这里，`Proc(m0, m1)` 的参数来源已经完整：每路 transport 消息先进入 visitor 私有缓存，M0 写入时由 AllLatest 捕获辅助输入快照，tuple 进入融合 ring，主 channel 通知再唤醒 task，Processor 最后取出这只已固化的 tuple。
+到这里，`Proc(m0, m1)` 的参数来源已经完整：辅助输入由 Dispatcher 写入 visitor 私有缓存；M0 到达后经已安装的融合回调读取辅助输入最新指针，完整 tuple 才进入融合 ring。随后主 channel 的通知让 task 有机会重新检查数据；Processor 最后从融合 ring 取出这组已固化的参数。如果 M1 尚未就绪，M0 不会保存在该 visitor 的普通主 ring，任务即使被通知也没有可读 tuple。
 
 下一层不再处理消息配对，而是处理执行权：同一时刻多只 tuple 等待处理时，Scheduler 如何选择 CRoutine，优先级为何不等于抢占，以及一个耗时 `Proc()` 如何影响同 processor 上的其他组件。

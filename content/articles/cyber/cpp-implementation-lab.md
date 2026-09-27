@@ -2,9 +2,9 @@
 
 本章的 Apollo 真实源码统一固定到 `d53aa3da47a06a08e6d0cd175d5623a34fa0d6aa`；真实摘录直接贴出，教学代码会另行标记。
 
-前面的章节分别解释了 DAG、Dispatcher、DataVisitor 和 CRoutine。本章把这些零件重新装成一个可以自行实现的最小运行时。目标不是复制完整 Cyber RT，而是保留它最关键的因果链：消息到达使数据变为就绪，就绪状态唤醒处理协程，调度器再调用组件业务逻辑。
+如果从零实现一个机器人进程内消息运行时，第一版往往只有 `callback(message)`；下一步却马上碰到数据积压、慢回调阻塞接收线程、消息类型边界和关闭时的悬空访问。要逐步解决这些问题，可以把运行时拆成有界缓存、Dispatcher、Notifier、工作线程和业务组件，再决定哪些接口值得发展成 CRoutine 与 Scheduler。本章把这些零件组成一个自行实现的最小实验，保留最重要的因果链：消息到达让数据就绪，事件唤醒处理任务，工作线程最后进入组件业务逻辑。
 
-先说明代码来源：本章**明确标注“固定提交源码摘录”的代码才是 Apollo 源码**；其余 C++ 代码块都是教学最小例子，不是源码摘录，也不是可以直接拼成单个翻译单元的完整程序。除特别注明外，教学接口按 C++17 编写（如 `std::shared_mutex` 和类模板实参推导）；工作循环使用 C++17 可用的原子停止标志，不依赖 C++20 才提供的线程停止令牌 API。每层用源码摘录核验模型与 Cyber 的差异。
+先说明代码来源：本章**明确标注“固定提交源码摘录”的代码才是 Apollo 源码**；前六层的 C++ 片段是逐层推导的教学接口，不能直接拼成单个翻译单元。文末附录则给出另一份独立、完整的 `mini_node.cc`，可用于验证 Node、Reader 与 Writer 的基本生命周期；它也不是上游源码。除特别注明外，教学接口按 C++17 编写（如 `std::shared_mutex` 和类模板实参推导）；工作循环使用 C++17 可用的原子停止标志，不依赖 C++20 才提供的线程停止令牌 API。每层用源码摘录核验模型与 Cyber 的差异。
 
 ## 先确定最小功能与非目标
 
@@ -300,3 +300,206 @@ void RunBinding(RuntimeBinding<T>& binding,
 ## 实现完成标准
 
 最小系统应验证：错误消息类型不会进入组件；慢组件不会持有 Dispatcher 注册表锁；缓存容量有上界；连续通知不会永久丢失就绪状态；关闭后不再进入 `Proc()`；组件异常不会杀死整个工作进程；替换线程循环为 ready queue 调度器时数据层接口保持稳定。这条链路成立后，才具备继续复刻 Cyber RT 调度与多输入语义的基础。
+
+## 附录：可运行的 Node、Reader 与 Writer 最小版
+
+这是与前面运行时分层实验相互独立的 **C++17 教学实现**，不是 Apollo 源码。它专门验证 [Node、Reader 和 Writer 的对象边界](node-reader-writer.md)：类型安全、异构所有权、工作线程与关闭次序。与上面的拆分式教学片段不同，下列 `mini_node.cc` 按单文件组织，可用文中给出的命令编译。
+
+下面的**教学最小例子**不是 Apollo 源码。它只复刻本文最关键的边界：模板保持消息类型，非模板 base 允许 Node 异构持有 Reader，Node 不拥有 Writer，Reader callback 在 worker 线程执行，关闭先停止 worker 再释放对象。为了让一份文件可以直接运行，它没有实现 service discovery、共享 Receiver、ring 覆盖和多 transport。代码里的 `condition_variable` 让 worker 在队列为空时睡眠、由发布线程通知后重查谓词；它必须与保护队列的 mutex 配合。`join()` 让关闭线程等待 worker 的函数真正退出后再继续销毁依赖对象。`weak_ptr<void>` 是仅用于检测 owner 是否仍存活的弱句柄，既不延长 Reader 寿命，也不携带 Reader 的静态类型；`shared_from_this()` 只能在对象已由 `shared_ptr` 管理后调用。
+
+保存为 `mini_node.cc`，在 Linux 上执行：
+
+```bash
+c++ -std=c++17 -O2 -pthread mini_node.cc && ./a.out
+```
+
+```cpp
+#include <condition_variable>
+#include <functional>
+#include <iostream>
+#include <memory>
+#include <mutex>
+#include <queue>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+class ReaderBase {
+ public:
+  virtual ~ReaderBase() = default;
+  virtual void Stop() = 0;
+};
+
+template <class T>
+class Channel {
+ public:
+  using Callback = std::function<void(std::shared_ptr<const T>)>;
+
+  void Subscribe(std::weak_ptr<void> lifetime, Callback callback) {
+    std::lock_guard<std::mutex> lock(mu_);
+    subscribers_.push_back({std::move(lifetime), std::move(callback)});
+  }
+
+  void Publish(std::shared_ptr<const T> message) {
+    std::vector<Callback> callbacks;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      for (auto it = subscribers_.begin(); it != subscribers_.end();) {
+        if (it->lifetime.expired()) {
+          it = subscribers_.erase(it);
+        } else {
+          callbacks.push_back(it->callback);
+          ++it;
+        }
+      }
+    }
+    for (auto& callback : callbacks) callback(message); // registry 锁外调用
+  }
+
+ private:
+  struct Subscription {
+    std::weak_ptr<void> lifetime;
+    Callback callback;
+  };
+  std::mutex mu_;
+  std::vector<Subscription> subscribers_;
+};
+
+template <class T>
+class Reader final : public ReaderBase,
+                     public std::enable_shared_from_this<Reader<T>> {
+ public:
+  using Callback = std::function<void(std::shared_ptr<const T>)>;
+
+  static std::shared_ptr<Reader> Create(std::shared_ptr<Channel<T>> channel,
+                                        Callback callback) {
+    auto reader = std::shared_ptr<Reader>(
+        new Reader(std::move(channel), std::move(callback)));
+    reader->Start();
+    return reader;
+  }
+
+  ~Reader() override { Stop(); }
+
+  void Stop() override {
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      if (stopped_) return;
+      stopped_ = true;
+    }
+    cv_.notify_all();
+    if (worker_.joinable()) worker_.join();
+  }
+
+ private:
+  Reader(std::shared_ptr<Channel<T>> channel, Callback callback)
+      : channel_(std::move(channel)), callback_(std::move(callback)) {}
+
+  void Start() {
+    std::weak_ptr<Reader> weak = this->shared_from_this();
+    channel_->Subscribe(weak, [weak](std::shared_ptr<const T> message) {
+      if (auto self = weak.lock()) self->Enqueue(std::move(message));
+    });
+    worker_ = std::thread([this] { Run(); });
+  }
+
+  void Enqueue(std::shared_ptr<const T> message) {
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      if (stopped_) return;
+      queue_.push(std::move(message));
+    }
+    cv_.notify_one();
+  }
+
+  void Run() {
+    for (;;) {
+      std::shared_ptr<const T> message;
+      {
+        std::unique_lock<std::mutex> lock(mu_);
+        cv_.wait(lock, [this] { return stopped_ || !queue_.empty(); });
+        if (stopped_ && queue_.empty()) return; // drain 后退出
+        message = std::move(queue_.front());
+        queue_.pop();
+      }
+      callback_(std::move(message)); // 队列锁外执行业务
+    }
+  }
+
+  std::shared_ptr<Channel<T>> channel_;
+  Callback callback_;
+  std::mutex mu_;
+  std::condition_variable cv_;
+  std::queue<std::shared_ptr<const T>> queue_;
+  bool stopped_ = false;
+  std::thread worker_;
+};
+
+template <class T>
+class Writer {
+ public:
+  explicit Writer(std::shared_ptr<Channel<T>> channel)
+      : channel_(std::move(channel)) {}
+  void Write(std::shared_ptr<const T> message) {
+    channel_->Publish(std::move(message));
+  }
+
+ private:
+  std::shared_ptr<Channel<T>> channel_;
+};
+
+class Node {
+ public:
+  template <class T, class Callback>
+  std::shared_ptr<Reader<T>> CreateReader(
+      const std::string& name, std::shared_ptr<Channel<T>> channel,
+      Callback&& callback) {
+    auto reader = Reader<T>::Create(
+        std::move(channel), std::forward<Callback>(callback));
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!readers_.emplace(name, reader).second) return nullptr;
+    return reader;
+  }
+
+  template <class T>
+  std::shared_ptr<Writer<T>> CreateWriter(
+      std::shared_ptr<Channel<T>> channel) {
+    return std::make_shared<Writer<T>>(std::move(channel));
+  }
+
+  ~Node() {
+    std::vector<std::shared_ptr<ReaderBase>> snapshot;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      for (auto& entry : readers_) snapshot.push_back(entry.second);
+      readers_.clear();
+    }
+    for (auto& reader : snapshot) reader->Stop();
+  }
+
+ private:
+  std::mutex mu_;
+  std::unordered_map<std::string, std::shared_ptr<ReaderBase>> readers_;
+};
+
+struct Image { int sequence = 0; };
+
+int main() {
+  auto channel = std::make_shared<Channel<Image>>();
+  Node node;
+  auto reader = node.CreateReader<Image>(
+      "/camera/front", channel,
+      [](const std::shared_ptr<const Image>& image) {
+        std::cout << "process frame " << image->sequence << '\n';
+      });
+  auto writer = node.CreateWriter<Image>(channel); // Node 不保存 Writer
+  writer->Write(std::make_shared<Image>(Image{42}));
+  reader->Stop(); // drain 第 42 帧，并 join worker
+}
+```
+
+这个版本为了教学使用无界 `std::queue`，生产者长期快于消费者时会无限增长；下一步应替换为固定容量 ring，并明确满时覆盖旧样本还是阻塞生产者。`Channel` 已经用 weak lifetime 清理过期订阅，避免 registry 反向拥有 Reader；`Reader::Create` 则保证 `shared_from_this()` 只在 shared owner 建立以后调用。
+
+它还刻意让 Node 析构时先在锁内复制 Reader owners、清空 map，再在锁外 Stop。用户 callback 绝不能在 Node registry mutex 内执行，否则 callback 若创建/删除 Reader 会发生自死锁。继续向 Cyber 演进时，可以把每只 Reader 的 `std::thread` 替换成共享 Processor 与 routine，再加入 RoleAttributes、共享 Receiver 和 transport factory；对象边界不需要推倒重来。

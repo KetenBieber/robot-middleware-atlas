@@ -1,8 +1,8 @@
 # 有界消息缓存：`pending_queue_size=3` 的精确语义
 
-上一章已经建立了对象图：Component 初始化时创建 Reader、DataVisitor 和 CRoutine，DataVisitor 内部有一只有界缓存。现在先不追完整消息链，只拆这只缓存。
+相机每秒送来 60 帧，而一个重计算组件每秒只能处理 10 帧。如果接收线程等组件处理完再接下一帧，计算长尾就向上阻塞通信；如果给组件一只无界队列，处理到的图像又会越来越旧。因此先不追完整消息链，而要确定 Cyber RT 在两者之间放置的有界缓存究竟保留什么、淘汰什么，以及落后的消费者醒来时从哪里继续。
 
-如果直接从本章开始，可以先把四个对象压缩成一句话：Component 是业务对象，Reader 是 channel 的进程内读端，DataVisitor 保存“这个消费者读到哪里”的私有视图，CRoutine 是 Scheduler 以后会恢复执行的逻辑任务。`pending_queue_size` 是 Reader/Component 输入配置中的逻辑消息容量；它限制这只 DataVisitor 最多保留多少条待处理历史，而不是操作系统 socket 缓冲大小。
+先把四个对象压缩成一句话：Component 是业务对象，Reader 是 channel 的接收端点，DataVisitor 保存“这个消费者读到哪里”的私有视图，CRoutine 是 Scheduler 以后会恢复执行的逻辑任务。`pending_queue_size` 是 Reader/Component 输入配置中的逻辑消息容量；它限制这只 DataVisitor 最多保留多少条待处理历史，而不是操作系统 socket 缓冲大小。
 
 这样安排有一个明确原因。后面读到 `DataDispatcher::Dispatch()`、`DataVisitor::TryFetch()` 和 scheduler wakeup 时，所有逻辑都建立在“数据已经怎样存进缓存”之上。如果连 `pending_queue_size` 的准确语义都不知道，就无法判断慢消费者会积压、阻塞、丢旧还是丢新，也无法评估控制器拿到的数据有多老。
 

@@ -500,137 +500,45 @@ auto listener_adapter = [listener, self_attr](
 
 从控制链看，这一点很实用：即使 `Proc()` 被安排在独立高优先级 worker 上，前面的 RTPS listener 仍可能受到字符串分配、反序列化和其自身 OS 调度的影响。提高 Cyber task priority 不会自动缩短这部分上游时间。
 
-## 接收线程把消息写入每个消费者的缓存
+## 两种进度分开：第 42 帧已经到达，算法还没开始
 
-现在 transport 已把 `MessageT` 交给进程内 listener；下一步不是执行算法，而是把同一消息放进各消费者独立的缓存。这样一个消费者读取消息时，不会替另一个消费者移动游标。下面先看负责扇出的 registry，再看每只缓存的容量和落后语义。
+上游的 INTRA、SHM 或 RTPS 最终都把接收到的 `shared_ptr<M0>` 送入 `DataDispatcher<M0>`。下面不再重复每种传输内部的解码和监听代码，而是只跟踪一个可观察的状态：假设第 42 帧现在刚结束反序列化，`Component::Proc()` 仍未执行。接下来的每一步究竟保存了什么状态、由哪只线程执行？
 
-### `DataDispatcher`：按 channel 把一个对象扇出到多只缓存
+### 先把消息放进各自的 ring
 
-`DataDispatcher<T>` 的核心结构很小。下列为**固定提交源码摘录**：
-
-```cpp
-using BufferVector =
-    std::vector<std::weak_ptr<CacheBuffer<std::shared_ptr<T>>>>;
-
-std::mutex buffers_map_mutex_;
-AtomicHashMap<uint64_t, BufferVector> buffers_map_;
-```
-
-key 是 `channel_id`，value 是该 channel 下所有 `DataVisitor` 缓存的弱引用列表。`weak_ptr` 很关键：全局 Dispatcher 可以比 Reader 和 Component 活得更久，但 registry 不应因此延长订阅者寿命。
-
-`weak_ptr` 解决的是缓存对象的寿命，不负责保护装它们的 `std::vector`。这两个问题容易被混为一谈：即使每个元素都能安全 `lock()`，另一个线程扩容 vector 时，遍历者仍可能读到已经搬迁的存储。先看 `Dispatch()` 如何使用这张表，再回到注册与分发并发时会发生什么。
-
-消息到来时，下面的**固定提交源码摘录**展示扇出逻辑；行尾注释是教学说明：
+固定提交的 `DataDispatcher<T>::Dispatch` 几乎完整地回答了“接收线程做多少事才能返回”：
 
 ```cpp
-bool Dispatch(const uint64_t channel_id,
-              const std::shared_ptr<T>& msg) {
+template <typename T>
+bool DataDispatcher<T>::Dispatch(const uint64_t channel_id,
+                                 const std::shared_ptr<T>& msg) {
   BufferVector* buffers = nullptr;
-  if (!buffers_map_.Get(channel_id, &buffers)) {
+  if (apollo::cyber::IsShutdown()) {
     return false;
   }
-
-  for (auto& buffer_wptr : *buffers) {
-    if (auto buffer = buffer_wptr.lock()) {
-      std::lock_guard<std::mutex> lock(buffer->Mutex());
-      buffer->Fill(msg);                  // 复制 shared_ptr，不复制 T
+  if (buffers_map_.Get(channel_id, &buffers)) {
+    for (auto& buffer_wptr : *buffers) {
+      if (auto buffer = buffer_wptr.lock()) {
+        std::lock_guard<std::mutex> lock(buffer->Mutex());
+        buffer->Fill(msg);
+      }
     }
-  }
-
-  return notifier_->Notify(channel_id);   // 数据全部落槽后再发事件
-}
-```
-
-设同一 channel 注册了 `B` 只缓存，这段分发至少是 `O(B)`：逐项锁定弱引用、逐只加锁和写槽。payload 不会被复制，但 `shared_ptr` 控制块的引用计数会变化，多个核心同时处理同一对象时还可能争用那条 cache line。
-
-这里的锁粒度有意放在单只 buffer，而不是整个 channel。这样不同缓存的消费者互不共享读取锁；但 producer 仍串行访问它们，一个慢锁会推迟后续所有 buffer 的写入和通知。对拥有许多 observer 的高频 channel，这一扇出点比 hash lookup 本身更值得关注。
-
-`AtomicHashMap` 使用固定 bucket，避免每次查找都获取全局 map mutex；但 map 的线程安全不会自动延伸到它返回的 `BufferVector*`，因为 vector 本身仍可变。`AddBuffer()` 在 `buffers_map_mutex_` 下执行 `emplace_back()`，`Dispatch()` 遍历同一只 vector 时却没有取得这把锁。若两者并发，扩容可能搬迁 vector 的元素，而遍历线程同时读取旧存储；这构成 C++ data race，行为未定义。
-
-这不是 API 已经替调用者保证的“只在启动时注册”。固定提交的 `NodeChannelImpl::CreateReader()` 会同步调用 `Reader::Init()`，后者构造 `DataVisitor` 并调用 `AddBuffer()`；公开调用路径没有把这一步与活跃的 `Dispatch()` 用同一把锁串行化。因此，启动期集中创建 reader、运行期只读是一种能避开冲突的使用约定，不是 Dispatcher 自身强制的不变量。若应用在消息持续到达时动态创建 reader，就必须在调用侧串行化注册，或修复 registry：例如让读写双方持有同一把锁，或在注册表中发布不可变 snapshot。后一方案避免读者与 vector 扩容竞争，但会把复制/分配成本移到注册路径。这个边界也说明 `AtomicHashMap` 只保护 map 的查找与 bucket，不等于它管理的 value 自动线程安全。
-
-另一个长期运行问题是过期弱引用没有在这条路径中被移除。它不会造成对象泄漏，却会让反复创建和销毁 Reader 的进程不断积累空槽，增加每次 `Dispatch()` 的扫描成本。工业实现若允许动态组件重载，应让注册返回可注销 token，或定期压缩列表。
-
-### `CacheBuffer`：有界并覆盖旧项；游标恢复还要看边界
-
-`CacheBuffer(size)` 实际分配 `size + 1` 个槽位，用多出的空槽区分满和空。逻辑容量仍是调用者给出的 `size`。下面直接看构造、判满和覆盖写入的**固定提交源码摘录**；行尾注释是教学说明，不是上游原注释：
-
-```cpp
-explicit CacheBuffer(uint64_t size) {
-  capacity_ = size + 1;                   // ① 留一格区分 full / empty
-  buffer_.resize(capacity_);
-}
-
-bool Full() const {
-  return capacity_ - 1 == tail_ - head_;  // ② 有效元素上限仍是 size
-}
-
-void Fill(const T& value) {
-  if (fusion_callback_) {
-    fusion_callback_(value);              // ③ 多输入时 M0 可改走融合路径
-  } else if (Full()) {
-    buffer_[GetIndex(head_)] = value;     // ④ 写入 head_ 边界槽，再淘汰最旧逻辑序号
-    ++head_;
-    ++tail_;
   } else {
-    buffer_[GetIndex(tail_ + 1)] = value;
-    ++tail_;
+    return false;
   }
+  return notifier_->Notify(channel_id);
 }
 ```
 
-`head_` 和 `tail_` 是单调递增的逻辑序号，真正访问数组时才取模。这比让两个下标直接在 `[0, capacity)` 内回绕更容易判断某个消费者的私有游标是否已经落后。
+这里 `buffers_map_` 的 key 是 channel ID，value 是 `vector<weak_ptr<CacheBuffer<shared_ptr<T>>>>`。Dispatcher 本身不强占消费者 ring；每次 `lock()` 暂时保证当前写入对象仍存活。如果一个 channel 有三只消费者，循环可能尝试三次弱引用提升，分别取得三把 buffer 锁并写入三只槽。消息本体不因这三次句柄复制而深复制；但共享引用计数、每只 ring 的锁和槽位赋值仍属于接收线程的串行工作。
 
-这里的“覆盖旧数据”首先是逻辑淘汰，不一定在同一次 `Fill()` 中物理覆盖最老消息所在的数组格。容量 3 时内部有 4 个槽；写满后的下一条数据会写到 `head_` 对应的边界槽，再同时增加 `head_` 和 `tail_`。最老序号立即不再可读，但旧槽里的 `shared_ptr` 可能留到后续一条消息才被赋新值、真正释放引用。因而逻辑可读容量仍是 3，而物理上短暂保留的消息引用最多可能是 4；完整的 A–G 轨迹见[有界消息缓存专题](pending-queue-ring.md)。
+“各自的 ring”解决的是慢消费者不能夺走别人数据的需求：控制任务很慢时，它自己可能因为 ring 满而跳过旧帧，不会直接推动监控 Reader 的游标。但 Dispatcher 对同一 channel 的 fan-out 是串行的，一个消费者的缓存锁等待仍可能延迟其他消费者获得第 42 帧。注册并发也是单独的正确性问题：`AddBuffer()` 追加内层 vector 时有写锁，上面的 `Dispatch()` 读取 vector 却不取得它；运行中创建 Reader 若与遍历重叠，存在数据竞争。这个限制以及 Notifier 的强引用累积在[Dispatcher 的逐函数分析](dispatcher-notifier.md)中展开。
 
-消费者并不共享一个“弹出即删除”的队头。每个 `DataVisitor` 保存自己的 `next_msg_index_`，`ChannelBuffer::Fetch()` 用它读取底层 ring。`Fetch()` 的索引修正 决定了慢消费者的真实行为。下列是**固定提交源码摘录**，说明文字已缩去：
+`CacheBuffer` 的物理槽位数为 `pending_queue_size + 1`，正常能容纳用户设置的历史深度。写满后用覆盖策略保护上界，首次 `Fetch` 又有自己的 latest 语义，不能根据 `vector` 大小想当然地认定消费者会读到每一帧。对第 42 帧，真正的结论只是：“在 t1 时刻，尚存活的订阅缓存已尝试按各自锁顺序接纳它”；并不意味着每只消费者最终都处理了它。
 
-```cpp
-if (*index == 0) {
-  *index = buffer_->Tail();               // 第一次只取当前最新项
-} else if (*index == buffer_->Tail() + 1) {
-  return false;                           // 已经追到生产者之后
-} else if (*index < buffer_->Head()) {     // Head() 返回 head_ + 1，即最早有效序号
-  auto interval = buffer_->Tail() - *index;
-  // log dropped interval
-  *index = buffer_->Tail();               // 历史已被覆盖，直接追到最新项
-}
-m = buffer_->at(*index);                  // 复制一份 shared_ptr
-```
+### 通知不带第 42 帧，也不等于调用业务
 
-游标是 visitor 私有状态，不是 ring 的共享读指针。第一次读取从当前 `tail_` 开始；正常情况下 `TryFetch()` 每成功一次就把它加一；如果游标小于公开访问器 `Head()`（即私有淘汰边界 `head_ + 1`），说明对应历史已被覆盖，下一次读取直接推进到 `tail_`。游标等于 `Head()` 时则正指向最早仍有效的消息。由此可见，这不是逐条补齐全部尚未处理的历史（backlog），而是牺牲部分连续性、尽快追上新数据；容量为 3 的 A–G 轨迹和字段映射见[环形缓存章节](pending-queue-ring.md)。
-
-这里还有一个容易被“单调递增”四个字掩盖的边界。`head_`、`tail_` 和 visitor 游标都是 `uint64_t`；`tail_ - head_` 的无符号减法在回绕时仍按模 $2^{64}$ 计算，只要两者的真实距离始终远小于计数空间，`Size()` 和 `Full()` 仍能工作。但 `index < Head()` 这种普通大小比较并不是回绕安全比较，`tail_ + 1` 也会在最大值处变成 0。现实消息速率下走满 64 位计数器几乎不可达，但从零复刻时仍应把“计数器在进程寿命内不回绕、queue size 远小于计数空间”写成不变量，或采用显式 epoch / 回绕安全的序号比较。传入的 `size` 还必须小于 `UINT64_MAX`，否则构造函数中的 `size + 1` 本身就会溢出。
-
-因此它更接近机器人状态流常见的 freshness 语义：内存有界，消费者过慢时丢旧样本。对于里程计、姿态或当前障碍物集合，这通常比处理几十毫秒前的完整队列更合理；对于审计日志、计费或必须逐事件处理的状态机则不合适。
-
-## 缓存保存数据，Notifier 只推动下一次检查
-
-消息现在已经在 ring 中。还缺一件事：等待中的 consumer 怎样知道自己应该重新检查缓存。Cyber 把这件事分成“数据状态留在 buffer”和“可合并事件送到 scheduler”，因此后面的通知路径不会搬运图像本身。
-
-### `DataNotifier` 传的是事件，不是消息
-
-`DataVisitor<M0>` 构造时完成两项注册：把自己的 buffer 加入 `DataDispatcher<M0>`，再把 notifier 加入全局 `DataNotifier`。取数时，它只推进自己的游标。下列为**固定提交源码摘录**：
-
-```cpp
-DataVisitor(uint64_t channel_id, uint32_t queue_size)
-    : buffer_(channel_id, new BufferType<M0>(queue_size)) {
-  DataDispatcher<M0>::Instance()->AddBuffer(buffer_);
-  data_notifier_->AddNotifier(buffer_.channel_id(), notifier_);
-}
-
-bool TryFetch(std::shared_ptr<M0>& m0) {
-  if (buffer_.Fetch(&next_msg_index_, m0)) {
-    ++next_msg_index_;
-    return true;
-  }
-  return false;
-}
-```
-
-Notifier 不携带 payload。Dispatcher 已经先把数据写入所有 buffer，然后才按 channel 发通知。多个快速到达的通知可以合并，消费者恢复后依然以 buffer 状态为准。这是一种很有价值的分离：调度器只管理“任务可能有工作”这一事实，不需要把任意消息类型塞进自己的运行队列（run queue，即调度器接下来要检查或执行的任务集合）。若把每条消息都复制进调度队列，调度器就必须了解所有消息类型，还可能在任务执行变慢时积累一条独立于有界 buffer 的无界积压。
-
-关键在于这个事件如何走到 Scheduler。**固定提交源码摘录：**`DataNotifier::Notify()`：
+`Dispatch` 最后一行才进入 `DataNotifier::Notify`。固定源码中：
 
 ```cpp
 inline bool DataNotifier::Notify(const uint64_t channel_id) {
@@ -647,44 +555,46 @@ inline bool DataNotifier::Notify(const uint64_t channel_id) {
 }
 ```
 
-`Notify()` 只按 channel 找到回调列表并逐个同步调用 `std::function<void()>`；它不创建新线程、不搬运消息，也不把 callback 放进另一个队列。因此调用它的 `DataDispatcher::Dispatch()` 所在线程会一直执行到这些通知回调返回：INTRA 下可能是发布者线程，SHM 下是共享内存派发线程，RTPS 下则是 listener 回调线程。固定源码的 `AddNotifier()` 在注册时持锁，而 `Notify()` 遍历 vector 没取同一把锁；若允许运行中动态增加 visitor，两侧并发时仍需同步，完整边界见[Dispatcher 与 Notifier 的注册/分发分析](dispatcher-notifier.md)。
+这里的 value 不是图像列表，而是 `vector<shared_ptr<Notifier>>`，每个 Notifier 只持有 `std::function<void()>`。因此第 42 帧仍留在 ring，通知调用携带的是“对应 channel 的消费任务可以再检查一次数据”。`Notify` 同步运行所有已登记的无参 callback：SHM 接收线程不会在这一步自动转换成 Processor 线程，INTRA 仍处于原始 Writer 的调用栈。若这里直接塞进感知 `Proc()`，就会重新引入“接收线程被算法长尾阻塞”的旧设计。
 
-创建 task 时，`Scheduler::CreateTask()` 把 visitor 的 notify callback 绑定到 task id。下列为**固定提交源码摘录**，说明性注释已标明：
+注册路径也能看出这个设计为什么需要两层登记。单输入 `DataVisitor<M0>` 构造时先为自己的 `ChannelBuffer` 调用 `DataDispatcher<M0>::AddBuffer`，随后将自己的 `Notifier` 登记到 `DataNotifier`。数据存储与事件回调使用两张表：前者决定消息体放哪里，后者决定哪些 task 需要检查。这两个注册动作本身不是“一次不可分割的安装”；task 的 callback 稍后才由 Scheduler 绑定，启动阶段与运行时热注册都需要特别检查时序。
+
+固定 `Scheduler::CreateTask` 的相关连续代码揭示了 callback 究竟捕获了什么：
 
 ```cpp
+auto task_id = GlobalData::RegisterTaskName(name);
+
 auto cr = std::make_shared<CRoutine>(func);
 cr->set_id(task_id);
-DispatchTask(cr);
+cr->set_name(name);
+
+if (!DispatchTask(cr)) {
+  return false;
+}
 
 if (visitor != nullptr) {
   visitor->RegisterNotifyCallback([this, task_id]() {
-    if (stop_.load()) {
+    if (cyber_unlikely(stop_.load())) {
       return;
     }
     this->NotifyProcessor(task_id);
   });
 }
+return true;
 ```
 
-于是完整唤醒关系是：
+`task_id` 是稳定的任务名散列身份；闭包并未捕获图像、Reader 或 Component。它也没有保有 Scheduler 的强引用，只是原始 `this`：要安全销毁运行时，必须管理旧 notifier callback 的可达性。固定实现先 `DispatchTask` 再 `RegisterNotifyCallback`，这让 task 先具备被找到的条件，却也留下 callback 尚未绑定而数据已经能到达的窄窗口。[Notifier 注册与注销的实现边界](dispatcher-notifier.md)详细解释为什么不能只靠“登记完成”四个字忽略这个问题。
 
-```text
-DataDispatcher::Dispatch(channel)
-  -> DataNotifier::Notify(channel)
-    -> channel 下每个 Notifier callback
-      -> Scheduler::NotifyProcessor(task_id)
-        -> 找到 CRoutine
-        -> SetUpdateFlag()
-        -> 通知相应 ProcessorContext 的 condition variable（让空闲 worker 睡眠或重查）
-```
+## 一次 channel 事件怎样变成一次任务重查
 
-先认识源码接下来要比较的 `RoutineState`：这是 Cyber 给 CRoutine 使用的调度标签；`DATA_WAIT` 表示上次检查时没有可取数据，`IO_WAIT` 表示 routine 等待异步 I/O。它们不是 Linux 工作线程的状态，也不意味着操作系统线程已经睡下；后文会追踪标签何时变成 `READY`。
-
-下面把“通知”落到固定提交的调度策略函数。**固定提交源码摘录：**`SchedulerClassic::NotifyProcessor()`：
+下面沿 Classic 策略继续：`SchedulerClassic::NotifyProcessor(crid)` 查找 task。如果它看到该 routine 正处于 `DATA_WAIT` 或 `IO_WAIT`，就清除 `updated_` 原子标志，表示有待消费的更新；随后通知任务所属 group 的 `ClassicContext`。这条同步回调仍运行于刚才的接收执行上下文。
 
 ```cpp
 bool SchedulerClassic::NotifyProcessor(uint64_t crid) {
-  if (cyber_unlikely(stop_)) return true;
+  if (cyber_unlikely(stop_)) {
+    return true;
+  }
+
   {
     ReadLockGuard<AtomicRWLock> lk(id_cr_lock_);
     if (id_cr_.find(crid) != id_cr_.end()) {
@@ -693,6 +603,7 @@ bool SchedulerClassic::NotifyProcessor(uint64_t crid) {
           cr->state() == RoutineState::IO_WAIT) {
         cr->SetUpdateFlag();
       }
+
       ClassicContext::Notify(cr->group_name());
       return true;
     }
@@ -701,121 +612,9 @@ bool SchedulerClassic::NotifyProcessor(uint64_t crid) {
 }
 ```
 
-这里比较的两个状态只是调度器对 routine 的上次观察：如果 routine 显示正在等数据或 I/O，通知路径才清除 `updated_` 标记，提示下一轮重新检查。
-
-这段函数只按 task id 找到 CRoutine；若它看起来在等待数据或 I/O，就清除 `updated_` 标记，再通知其 group 的等待条件。`ClassicContext::Notify()` 会增加该组的通知计数并 `notify_one()`；这里没有调用 `Resume()`，也没有进入 `Proc()`。这把 `id_cr_lock_` 保护映射查找，不是 CRoutine 执行期间的 `lock_`；状态字段跨线程是否安全，稍后还要单独核对。
-
-所以“通知”到这里仍然没有执行 `Proc()`，也没有把 `RoutineState` 直接改成 `READY`。`SetUpdateFlag()` 只留下“下一轮要重查”的原子标记，`ClassicContext::Notify()` 只增加等待计数并通知条件变量；之后某条 Processor OS 线程要先被内核调度，再进入 `NextRoutine()`，由 `CRoutine::UpdateState()` 消费标记并把 `DATA_WAIT/IO_WAIT` 改为 `READY`。只有该 routine 随后被选中、`Resume()` 真正恢复它的栈，业务循环才会再取数据并进入 `Proc()`。
-
-### 防止在“检查为空”和“进入休眠”之间丢通知
-
-先看没有保护时会怎样。下面每一步都可能只相差几个 CPU 指令：
-
-```text
-时刻  消费协程                         接收线程
-t1    检查 buffer，发现为空
-t2                                     写入 frame 42
-t3                                     发送一次 notify
-t4    把自己标成等待并真正睡眠
-t5    —— 没有新的 frame，也就没有第二次 notify ——
-```
-
-问题不在于 frame 42 丢了；它仍躺在 ring 里。真正丢失的是“应该再来检查一次”的事件。消费者在通知发出以后才睡下，于是缓存非空，消费者却可能一直沉睡。这类竞态通常叫 lost wakeup。
-
-Cyber 的解法由两部分共同完成：ring 保存消息数量，`updated_` 只记住“等待边界附近发生过更新”。因此，即便 A、B、C 三次到达被合并为一个事件，消息仍由 ring 分别保存；事件位只负责阻止消费者漏掉下一次检查机会。
-
-在看循环之前，先把源码里的 `RoutineState` 和操作系统线程状态分开。Cyber 的 `enum class RoutineState` 是调度器给每个 CRoutine 记录的“下一步是否值得尝试”的标签：`READY` 表示可以被 Processor 选中，`DATA_WAIT` 表示当前没有可取的数据，`IO_WAIT` 表示等待异步 I/O，`SLEEP` 表示等待期限，`FINISHED` 表示函数已结束。它不是 Linux 线程的 `running/blocked/runnable` 状态，也不是 CRoutine 此刻是否正在占用 CPU 的完整状态机；枚举中甚至没有 `RUNNING`。下面的循环会在调用 `TryFetch()` 前先写入 `DATA_WAIT`，即使紧接着取数成功并执行 `f(msg)`，这个字段仍可能暂时是 `DATA_WAIT`。所以它描述的是调度协议的一部分，而不能单独当成“该协程已经睡着”的事实。
-
-这个区别解释了为什么“消息到达”不等于“Proc 已经开始”。如果 CRoutine 正在自己的 Processor 上执行，它可能在下一次 `TryFetch()` 直接取到刚入 ring 的消息；如果它已经 `Yield()` 回到 Processor 主循环，数据写入只会促成通知和一次新的调度检查。只有被选中后 `Resume()` 才会恢复协程栈，业务闭包才可能继续运行。本文后面会把这两种路径分别回放。
-
-协程函数由 `CreateRoutineFactory<M0>` 生成。它循环尝试从 visitor 取数据，成功时调用业务函数，失败时让出执行权。下列为**固定提交源码摘录**，行尾中文注释为本文添加：
+这里的 “WAIT” 是 CRoutine 的逻辑状态，不是这只接收线程在等 condition variable。真正可能睡着的是另一边的 Processor OS 线程。固定 `ClassicContext::Notify` 用受 mutex 保护的计数留下事件，再通知一名等待者：
 
 ```cpp
-for (;;) {
-  CRoutine::GetCurrentRoutine()->set_state(RoutineState::DATA_WAIT);
-
-  if (dv->TryFetch(msg)) {
-    f(msg);                               // 最终进入 Component::Process
-    CRoutine::Yield(RoutineState::READY); // 可能还有 backlog，继续可运行
-  } else {
-    CRoutine::Yield();                    // 没有数据，保持 DATA_WAIT
-  }
-}
-```
-
-顺序不能随意交换：先把自己标为 `DATA_WAIT`，再检查 buffer。否则可能出现消费者看见空队列，producer 随即写入并通知，但消费者之后才进入等待，导致这次通知无人接住。
-
-Cyber 又用 `CRoutine::updated_` 封住这一窗口。它的类型 `std::atomic_flag` 是 C++ 提供的两态原子标记：与普通 `bool` 不同，两个线程并发操作时，`test_and_set()` 仍会作为一个不可拆开的读—改—写动作，返回旧值并把它置为 `true`。普通 bool 若被一边写、一边无同步地读，会构成前面定义的数据竞争；这个 flag 只记“至少有过一次更新”，不统计消息数，也不保存 payload。代码中的 `std::memory_order_release` 是内存序：它约束本线程此前的写入不能越过这次原子更新；若想让另一线程借它观察到这些普通写入，还需要对端匹配的 acquire 操作。producer 的 `SetUpdateFlag()` 清除此标记，scheduler 扫描 routine 时，`UpdateState()` 再用 `test_and_set()` 消费它。下列为**固定提交源码摘录**：
-
-```cpp
-if (!updated_.test_and_set(std::memory_order_release)) {
-  if (state_ == RoutineState::DATA_WAIT ||
-      state_ == RoutineState::IO_WAIT) {
-    state_ = RoutineState::READY;
-  }
-}
-```
-
-
-这里的方向容易看反：`SetUpdateFlag()` 实际调用 `updated_.clear(std::memory_order_release)`，把 flag 清为 `false`，表示等待边界附近有更新尚待处理；`UpdateState()` 调用 `test_and_set()`，原子地取出旧值并重新设为 `true`。旧值是 `false` 时，调度器才尝试把 `DATA_WAIT/IO_WAIT` 改为 `READY`。连续多次 `clear()` 会合并成同一个待处理事件，所以它是闩锁而不是计数器。
-
-`memory_order` 说明这个原子操作与周围普通内存读写之间允许怎样排序，不会唤醒线程，也不会自动发布消息内容。固定源码的 `test_and_set()` 使用 `memory_order_release`，它没有 acquire 语义；不能据此声称 Processor 已通过 `updated_` 看见 producer 写入的 payload。消息对象由 `CacheBuffer::Mutex()` 的解锁/加锁配对保护，`updated_` 只提供“再检查一次”的提示。若把 ring 换成无锁结构，就必须另行设计匹配的发布/读取内存序，不能把这个 release-only 用法照搬过去。
-
-预期的握手路径由三方完成：consumer 先设 `DATA_WAIT`、再检查 buffer 并 yield；producer 写入 buffer 后调用 `SetUpdateFlag()` 并通知 context；随后某个 Processor 的 `NextRoutine()` 调用 `UpdateState()`，发现待处理 flag 后尝试把等待态改为 `READY`。因此必须分别看“缓存已经有数据”“Processor 被通知”“routine 被选中”三个事实。`updated_` 的确记录了等待边界附近发生过更新，但由于同一份普通 `state_` 也被不同线程读写，不能仅凭这个 flag 证明整个跨线程握手在 C++ 内存模型下无数据竞争；下一段会把这一边界具体展开。
-
-不过，这段代码所表达的握手意图不能直接等同于“`state_` 已经线程安全”。固定源码中，RoutineFactory 在 Processor 线程通过 `set_state()` 写普通枚举 `state_`；transport callback 所在线程进入 `SchedulerClassic::NotifyProcessor()` 时，又在 `id_cr_lock_` 保护下读取同一个字段。该锁保护的是 task-id map；Processor 执行 routine 时并不持有它。`ClassicContext::NextRoutine()` 虽会先 `Acquire()` routine 的 `lock_` 再调用 `UpdateState()`，通知路径却没有取得这把 `lock_`。因此这些普通 `state_` 读写之间没有共同同步关系，按 C++ 内存模型存在 data race；`updated_` 是原子量并不能替旁边的普通枚举建立互斥或可见性。更不能把 release-only 的 `test_and_set()` 当成 acquire 屏障。
-
-所以应把两件事分开判断：`updated_` 的事件闩锁说明作者试图记住等待边界附近的通知；但要对整个状态转换作线程安全证明，还需要对 `state_` 本身建立一致的同步协议。可行方向包括让读写双方使用同一把锁，或将状态转换改成经过审慎设计的原子状态机；仅把字段类型机械替换成 `atomic<RoutineState>`，仍需重新验证“检查缓存—进入等待—通知”的整体时序。这里讨论的是固定源码可见的并发边界，不代表每次运行都会出现可观察故障。
-
-它不是一条消息对应一个计数的 semaphore，而是可合并事件：buffer 的 `head/tail` 保存“有几条数据”，事件闩锁只保证“非空 buffer 最终会被再次检查”。成功处理一条消息后，协程用 `Yield(READY)` 保持可运行，因此即使没有下一次通知，也能继续清理 backlog。
-
-自己实现类似机制时，可以用 event flag，也可以用递增 sequence counter。关键不是选哪个原语，而是维持同一个不变量：只要 buffer 从空变为非空，消费者最终一定会再次检查它；即使多次唤醒被合并，也不能让已有数据永久睡在队列里。
-
-## 通知怎样变成 Processor 上的一段 CPU 时间
-
-到这里，事件已经沿 task id 到达调度侧，但“任务可运行”仍不等于“任务正在运行”。接下来把 condition variable 的线程等待、Processor 的任务选择和 CRoutine 的用户态恢复分开看，避免把这些不同层次统称为一次唤醒。
-
-### 从通知到 CPU 执行还隔着操作系统调度
-
-“唤醒 worker”很容易被误解成“worker 立刻执行”。当 worker 没有任务时，若反复检查队列，它会忙等并白白占 CPU；`std::condition_variable`（条件变量）让线程在一个共享条件暂不成立时睡眠，生产者改变条件后再通知它重查。条件变量本身不保存消息也不累计通知，因此真正的事实必须放在由同一把 mutex 保护的谓词里；否则通知可能先发生、worker 后睡下而丢失。`std::unique_lock` 是可显式释放和重新取得 mutex 的 RAII 锁对象，`wait()` 需要用它在睡眠时释放锁、返回前重新加锁；普通 `lock_guard` 只在作用域结束时自动解锁。下面是**教学最小例子**：
-
-```cpp
-std::mutex mutex;
-std::condition_variable cv;
-bool has_work = false;
-
-void Worker() {
-  std::unique_lock<std::mutex> lock(mutex);
-  cv.wait(lock, [] { return has_work; });
-  has_work = false;
-  lock.unlock();
-  RunTask();
-}
-
-void Notify() {
-  {
-    std::lock_guard<std::mutex> lock(mutex);
-    has_work = true;
-  }
-  cv.notify_one();
-}
-```
-
-逐行看这个例子：worker 持锁检查 `has_work`；`wait(lock, predicate)` 在条件为假时释放锁并睡眠，返回前重新持锁，再次检查谓词；`Notify()` 也先持同一把锁把谓词设真，再在锁外调用 `notify_one()`。即使通知先于 worker 的 `wait()`，谓词仍为真，worker 不会睡过去；即使条件变量发生虚假唤醒，谓词形式也会让它继续检查，而不是误跑空任务。若 worker 原本正在等待，通知只会使它变成 runnable（可运行）；它还要等 Linux 调度器分配 CPU、重新取得 mutex，`wait()` 才返回，用户任务不会在 `notify_one()` 调用栈里执行。Linux 的常见 C++ 库实现可能在真正需要阻塞时借助 futex（fast userspace mutex）系统调用；futex 是针对用户态同步字的低层内核睡眠/唤醒接口，不是消息队列，也不是每次条件变量通知都必然进入内核。
-
-这不只是类比。固定提交中的 `ClassicContext::Wait()/Notify()` 正是用 condition variable 把空闲 Processor 停下来。下列为**固定提交源码摘录**，展示等待谓词和通知计数：
-
-```cpp
-// 固定提交源码摘录
-void ClassicContext::Wait() {
-  std::unique_lock<std::mutex> lk(mtx_wrapper_->Mutex());
-  cw_->Cv().wait_for(lk, std::chrono::milliseconds(1000),
-                     [&]() { return notify_grp_[current_grp] > 0; });
-  if (notify_grp_[current_grp] > 0) {
-    notify_grp_[current_grp]--;
-  }
-}
-
 void ClassicContext::Notify(const std::string& group_name) {
   (&mtx_wq_[group_name])->Mutex().lock();
   notify_grp_[group_name]++;
@@ -824,287 +623,50 @@ void ClassicContext::Notify(const std::string& group_name) {
 }
 ```
 
-`notify_grp_` 是由同一把 mutex 保护的等待谓词：通知先把计数加一再唤醒，worker 即使晚一点进入 `wait_for()`，也会先看到谓词为真而不睡下。1000 ms 超时则提供一次兜底重查，并不表示正常消息需要等待一秒。Choreography 的专用 context 使用同样的“计数 + condition variable”结构，只是通知目标是绑定的 Processor，而不是 Classic group 中任意一个空闲 worker。
+计数解决“线程还没等下去时通知先到了”的基本条件变量问题；`updated_` 则在另一层保存 task 应当重查的意图。两者都**不是数据消息计数器**。多条图像到达可能合并成一个更新意图，最终还有多少帧只能问 ring 和 DataVisitor。更深的竞态边界不能略过：固定提交的 `CRoutine::state_` 是普通枚举，通知线程读取它，Processor 线程可能同时修改它；代码没有用同一把锁保护这组访问，所以不能用另一个字段 `updated_` 的原子性证明整体状态迁移已经具备 C++ 内存模型下的完整同步。具体竞争时间线参见[等待态与事件位](croutine-wakeup.md)。
 
-条件变量允许虚假唤醒，所以 `wait(lock, predicate)` 会反复检查 `has_work`。这个布尔状态与 Cyber 的消息 ring / update flag 扮演相似角色：通知可以合并或偶然发生，正确性最终依赖一个可重新检查的状态条件，不能依赖“每次 notify 必须精确对应一次执行”。
+## Processor 把“有活可做”变成真正的执行
 
-通知不会把发送者的优先级“传”给被通知的线程。Linux 的 `SCHED_OTHER` 是普通分时调度：内核在可运行线程之间分配 CPU，Cyber 的 `SetSchedPolicy()` 对这一策略通过 `setpriority()` 设置 nice 值（影响分时权重的数值），而不是传入实时静态优先级。`SCHED_FIFO` 则是实时策略：固定优先级线程不会按普通时间片轮转，通常要等它阻塞、主动让出，或被更高优先级线程抢占才离开 CPU；配置错误可能饿死低优先级系统工作。Linux 的 [调度策略说明](https://man7.org/linux/man-pages/man7/sched.7.html)可对照 Cyber 的 `SetSchedPolicy()`。此处固定实现没有检查 `pthread_setschedparam()` 的返回值，系统权限也可能拒绝实时策略；配置文件写了 FIFO 并不能证明该线程实际运行在 FIFO 下。
+假设某只 Processor 正在 `Wait()`：条件变量返回只说明该 OS 线程得到了再次检查机会，Linux 仍决定它什么时候获得 CPU。下一步 `ClassicContext::NextRoutine()` 扫描所属 group 的优先级槽，尝试 `Acquire()` 防止同一 routine 被其他 Processor 同时执行，再调用 `UpdateState()` 根据事件位或定时到期把等待态转成 `READY`。`READY` 只是可被选取的资格；它不会抢占同一 Processor 上正在运行的长 `Proc()`。
 
-还要分清三种容易混叫“优先级”的东西：Cyber routine priority 决定 `ClassicContext` 扫描哪一组任务；OS policy/priority 决定 Linux 在线程层面何时给 Processor CPU；CPU affinity（CPU 亲和性）只是允许线程运行的 CPU 集合，不是优先级，也不预留这些 CPU。Cyber 的 `SetSchedAffinity()` 调用 `pthread_setaffinity_np()` 设置掩码；[Linux 文档](https://man7.org/linux/man-pages/man3/pthread_setaffinity_np.3.html)说明实际集合还会受系统在线 CPU 和 cpuset 限制。固定辅助函数也不检查该系统调用的返回值，因此配置 affinity 仍不等于内核已接受。
-
-最后，priority inversion（优先级反转）不是“高优先级设置失败”：低优先级线程先拿住 mutex，高优先级 Processor 随后等待它，而中优先级线程又不断抢占低优先级线程，于是高优先级工作被间接拖延。`notify_one()` 只通知等待者，不会自动提升锁持有者优先级；是否启用了优先级继承必须另查 mutex 协议，不能从 Cyber task priority 推出。
-
-### `Processor` 才是 `Proc()` 所在的 OS 线程
-
-这时要把“工作放在哪里”和“谁在线程上取工作”分开。`ProcessorContext` 是策略接口，向 `Processor` 提供 `NextRoutine()`、`Wait()` 和关闭动作；它不是线程，也不是一个正在执行的任务。Classic 实现通过 context 访问按 group/priority 组织的 routine 表、锁和等待条件；`Processor` 持有 context 的共享引用，并运行真正的 OS 线程。接口与具体实现的关系在前面的对象关系图中已经给出；下面直接看 `Processor::Run()` 如何通过该接口取任务或等待。
-
-因此 Scheduler 先把 `CRoutine` 路由到某种策略维护的运行表；Processor 每轮向 context 要一个可执行 routine。若取不到，context 才让这条 OS 线程等待通知或超时，而不是让它持续空转。下列为固定源码中的 `Processor::Run()`：
+固定源码 `Processor::Run()` 的主循环显示了最后一次真正的执行权切换：
 
 ```cpp
-while (running_.load()) {
-  auto croutine = context_->NextRoutine();
-  if (croutine) {
-    croutine->Resume();
-    croutine->Release();
+while (cyber_likely(running_.load())) {
+  if (cyber_likely(context_ != nullptr)) {
+    auto croutine = context_->NextRoutine();
+    if (croutine) {
+      snap_shot_->execute_start_time.store(cyber::Time::Now().ToNanosecond());
+      snap_shot_->routine_name = croutine->name();
+      croutine->Resume();
+      croutine->Release();
+    } else {
+      snap_shot_->execute_start_time.store(0);
+      context_->Wait();
+    }
   } else {
-    context_->Wait();
+    std::unique_lock<std::mutex> lk(mtx_ctx_);
+    cv_ctx_.wait_for(lk, std::chrono::milliseconds(10));
   }
 }
 ```
 
-协程不能只靠一个“暂停”标志保存 C++ 函数走到哪一步：它还需要自己的栈和暂停点。Cyber 的 `RoutineContext` 持有独立栈与保存的栈指针 `sp`；`SwapContext()` 把 ABI 要求跨调用保留的寄存器保存到该栈，再装入另一份栈指针和寄存器现场。ABI（应用二进制接口）规定函数调用时哪些寄存器由调用方保存、哪些必须由被调用方保持。这个交换发生在同一条 Processor OS 线程内，不创建线程，也不请求内核切换到另一条线程。`current_routine_` 是 `thread_local`（线程局部变量），每个 OS 线程各有一份，用来让当前 Processor 上正在运行的代码找到自己的 CRoutine。
+`Resume()` 通过 `SwapContext` 在当前 Processor 线程上切到这只 routine 保存的用户态栈。它不是启动另一条 OS 线程。RoutineFactory 的单输入函数会先把自己标成 `DATA_WAIT`，然后用 `dv->TryFetch(msg)` 尝试从私有游标读第 42 帧。如果读到，调用最初包装的 `f(msg)`；Component 的 `f` 再经 `Process(msg)` 检查关闭标志并进入业务 `Proc(msg)`。若读不到，routine `Yield()` 把执行权还给 Processor，等待下一次状态更新。
 
-有了这个最小模型再读代码：`Resume()` 做的不是“通知协程”，而是从当前 Processor 的主栈切到这个 CRoutine 保存的栈。**固定提交源码摘录：**`CRoutine::Resume()` 设置当前线程的 `current_routine_`，交换栈指针；协程之后调用 `Yield()` 时，执行流回到这一行之后，`Resume()` 才清除线程局部指针并返回：
+至此才真正完成第 42 帧的运行时故事：它原本在 transport 线程的局部句柄里，经过 Dispatcher 被复制为各只 ring 的共享句柄；Notifier 和 Scheduler 从未运送它；Processor 上的 DataVisitor 后来才从自己的 ring 取出共享句柄并进入业务代码。缓存覆盖、事件合并、任务选择与协程恢复是四种不同事件，不能简单合并为“消息到达触发 Proc”。
 
-```cpp
-// 固定提交源码摘录
-RoutineState CRoutine::Resume() {
-  if (cyber_unlikely(force_stop_)) {
-    state_ = RoutineState::FINISHED;
-    return state_;
-  }
-  if (cyber_unlikely(state_ != RoutineState::READY)) {
-    AERROR << "Invalid Routine State!";
-    return state_;
-  }
-  current_routine_ = this;
-  SwapContext(GetMainStack(), GetStack());  // 主栈 -> routine 栈
-  current_routine_ = nullptr;               // routine yield/finish 后返回
-  return state_;
-}
-```
+关于 Classic 的完整优先级表、`NextRoutine/Wait`、`Resume/Yield` 寄存器与栈边界、停止时如何等待正在执行的 routine，继续看[Processor 与上下文切换](processor-context-switch.md)。本文只需要一个性能结论：从 `notify_one` 到 `Proc` 之间仍有 Linux 调度延迟、调度器扫描、可能排在前面的非抢占工作和用户态切栈成本。
 
-协程那一侧的 `Yield()` 做相反方向的交换。**固定提交源码摘录：**`CRoutine::Yield()` 先按需更新状态，再把当前 routine 的保存位置写回 `RoutineContext::sp`，切回 Processor 主栈：
+## 过载、动态注册与关闭：正常回放之外的三条分支
 
-```cpp
-inline void CRoutine::Yield(const RoutineState& state) {
-  auto routine = GetCurrentRoutine();
-  routine->set_state(state);
-  SwapContext(routine->GetStack(), GetMainStack());  // routine 栈 -> 主栈
-}
-```
+**慢消费者。** 相机以 100 Hz 发帧、某 Component 以 30 ms 处理一帧时，单 worker 的处理速率最多约为 33.3 帧/秒，不可能靠无限期追加通知保持完整输入。有限 ring 允许旧样本被覆盖，消费者的独立游标帮助控制内存上界；但数据年龄和跨输入时间差仍需要业务检查。`pending_queue_size` 不是越大越安全：增大容量减少短突发丢帧，却可能让控制算法读取更旧状态。容量与精确游标恢复规则见[有界缓存](pending-queue-ring.md)。
 
-为什么一组保存位置能继续执行？普通 C++ 函数调用按 ABI 约定使用寄存器和栈：调用者保存可丢弃的临时寄存器，被调用者必须保留约定寄存器。Cyber 的 `RoutineContext` 直接内嵌 `char stack[2 * 1024 * 1024]` 和一个栈指针 `sp`，所以每个 CRoutine 的上下文对象带有约 2 MiB 的栈存储预算；100 个 routine 的这些栈按对象大小合计约 200 MiB，物理驻留量则取决于实际访问过哪些页。`Proc()` 的大型局部数组或深递归会消耗这只 routine 栈，而不是 Processor 主栈。
+**运行中注册。** `AtomicHashMap` 的并发查找并不保护作为 value 的 `vector`；DataNotifier 的登记回调也不能靠 `std::function` 默认空值建立跨线程同步。在需要在线添加、删除 Reader 的产品里，应补充注册/注销协议，或者限定注册只发生在接收线程启动前；不能把固定源码的接口存在等同于“任意时刻热插拔安全”。实现级例子见[注册表与通知回调](dispatcher-notifier.md)。
 
-进程看到的虚拟地址由操作系统按页映射；“缺页”表示 CPU 访问的页当前需要内核处理，可能是首次为匿名内存建立映射，并不必然意味着从磁盘读数据。内核处理后会重试触发访问的指令。因而 routine 第一次触碰新的栈页时，可能额外经历缺页处理并造成调度抖动；“协程切换只换几个寄存器”不等于整个执行路径没有内存延迟。栈页、page fault 与上下文切换成本的展开见[调度与协程专题](croutine-wakeup.md)。`MakeContext()` 第一次构造 context 时，还在新栈顶摆好入口函数 `CRoutineEntry` 与参数，使首次 `Resume()` 能像返回到一个已经准备好的调用现场那样进入协程。
+**关闭。** 固定 `ComponentBase::Shutdown()` 先设置 `is_shutdown_`，再调用业务 `Clear()`，随后关闭 Reader，最后移除 task。置位只会阻止之后进入 `Process` 的调用，**不会打断已经运行的 `Proc`**。由于 `Clear()` 在任务移除/等待之前，如果派生类释放了在途 `Proc` 正在使用的资源，业务自身还需要同步。再往外一层，`ModuleController::Clear()` 应让组件释放后才卸载动态库；如果旧 callback 仍持有可能调用旧代码的函数地址，就还要核对它是否已与任务和库的生命周期脱钩。这些问题不是“有一个 Shutdown 函数”就能一次性解决。
 
-固定提交的 x86-64 `ctx_swap` 通过保存源 `%rsp`、装入目标 `%rsp`、恢复 ABI 要求保留的寄存器并 `ret`，在两个已准备好的用户栈之间切换。首次进入协程时，`MakeContext()` 预置入口和参数；之后则从上次 `Yield()` 留下的返回位置继续。这里保留调用链所需的含义，不重复展开逐条汇编；寄存器清单、栈布局和首次 trampoline 的完整解释见[CRoutine 上下文切换专题](croutine-wakeup.md)。
+## 如何继续沿源码追踪
 
-这和内核线程切换有清楚边界：这里没有创建或切换 Linux 线程，也不需要让内核调度另一个线程；同一个 Processor OS 线程仍在运行，只是换了用户态栈和少量寄存器。它也没有保存完整 CPU 状态、信号屏蔽字或任意线程局部资源，因此不是通用的线程迁移机制。切换很轻，但若 routine 调用阻塞式系统调用，阻塞的是承载它的整个 Processor 线程，同线程上的其他协程也会停住。`context_` 由 CRoutine 持有的 `shared_ptr` 管理；栈帧中的局部对象会一直留在该栈上，直到协程恢复后正常退出/析构，不能把 `Yield()` 当成函数返回。
+本篇保留了传输接收的三条实际路径，并以 Dispatcher、Notifier、Scheduler、Processor 和 Component 的固定代码把它们接回到 `Proc()`。需要逐槽复现第 42 帧为什么被覆盖，进入[CacheBuffer 与 ChannelBuffer](pending-queue-ring.md)；需要深挖弱引用登记、无参回调何时安全发布，进入[Dispatcher 与 Notifier](dispatcher-notifier.md)；需要写出缩小版任务状态机，先读[CRoutine 的等待与通知](croutine-wakeup.md)，再读[Processor 的选择与上下文切换](processor-context-switch.md)。
 
-只有 `Resume()` 真正恢复栈之后，循环中的 `TryFetch()` 才可能取得 `shared_ptr<M0>` 并调用组件闭包，闭包再进入 `Process()`。下列是固定提交源码摘录：
-
-```cpp
-bool Component<M0, NullType, NullType, NullType>::Process(
-    const std::shared_ptr<M0>& msg) {
-  if (is_shutdown_.load()) {
-    return true;
-  }
-  return Proc(msg);
-}
-```
-
-至此才能准确回答最初的问题：`Proc()` 通常运行在 Cyber scheduler 创建的 `Processor` OS 线程中，不在 SHM dispatcher、RTPS listener 或 INTRA publisher 的调用栈上。前者负责执行，后者负责生产数据和事件。
-
-#### 协程和线程不是同一种调度对象
-
-`Processor` 是操作系统能够看见的内核线程，拥有内核调度实体、线程栈和 OS 优先级。`CRoutine` 是 Cyber 在用户态管理的协程：它保存自己的栈、寄存器现场和运行状态，却必须借用某个 Processor 才能执行。
-
-可以把关系理解为：
-
-```text
-一个进程
-  ├─ RTPS / SHM 接收线程
-  └─ 多个 Processor 内核线程
-       └─ 每个线程轮流 Resume 多个 CRoutine
-```
-
-从协程 A 切到协程 B，通常只需在用户态保存和恢复寄存器、栈指针，不必让内核完成一次完整线程调度，所以成本可以较低。但这不意味着协程可以安全调用任意阻塞函数。如果 A 在某个 Processor 上执行阻塞式 socket read，内核阻塞的是整个 Processor 线程；挂在同一线程上的 B、C 协程也无法运行。合作式调度要求业务代码尽快返回或在框架认可的位置 yield。
-
-`CRoutine::Resume()` 也不是新建线程。它把当前 Processor 的执行流切换到协程保存的栈；`Yield()` 再保存当前位置并返回调度循环。因此 `Proc()` 中的普通局部变量位于协程栈上，yield 后仍需保留；组件成员则位于进程堆对象中，可能被其他线程访问，需要另外分析同步关系。
-
-这也是 transport 与 scheduler 分层的核心价值。网络接收线程不需要承担不可预测的业务 WCET（Worst-Case Execution Time，最坏执行时间：在明确的硬件、输入和系统负载假设下，一段任务可能消耗的最大执行时间；它不是平均耗时，也不是脱离运行条件的绝对常数）；组件可以使用统一的 task priority、group、CPU affinity 和调度策略；同一套 `DataVisitor` 还能接入 INTRA、SHM、RTPS 三种上游。
-
-代价是一次消息至少多出缓存写入、事件分发、worker 唤醒、run queue 选择和协程切换。它减少了接收线程被业务阻塞的风险，却没有让延迟凭空消失，而是把延迟变成更容易配置和隔离的几个阶段。
-
-### Classic scheduler 的 priority 不是抢占式实时调度
-
-Classic 策略按优先级从高到低扫描持久化的 routine vector。核心选择逻辑实际位于 `ClassicContext::NextRoutine()`，下列为固定提交源码摘录：
-
-```cpp
-for (int i = MAX_PRIO - 1; i >= 0; --i) {
-  ReadLockGuard<AtomicRWLock> lk(lq_->at(i));
-
-  for (auto& cr : multi_pri_rq_->at(i)) {
-    if (!cr->Acquire()) {
-      continue;
-    }
-    if (cr->UpdateState() == RoutineState::READY) {
-      return cr;
-    }
-    cr->Release();
-  }
-}
-```
-
-这里不是“READY task 被弹出、运行后排到队尾”的典型队列，而是从高优先级 vector 前端反复扫描。选择成本与扫描到目标前经过的 routine 数量相关；同优先级任务也没有从这段代码中得到显式 round-robin 游标。若靠前任务持续保持 READY，靠后任务可能承受额外等待。
-
-尚未开始运行的 routine 受 `NextRoutine()` 的扫描顺序影响；已经进入 `Proc()` 的 routine 则受合作式执行约束。一个 `Proc()` 在返回或主动 yield 之前，同一 Processor 不会因为另一只更高优先级 Cyber task 就强行抢占它。因此需要区分四个层次：
-
-1. 控制业务认为谁更重要；
-2. Cyber run queue 中的 task priority；
-3. Processor OS 线程采用的 policy、priority 和 CPU affinity；
-4. SHM/RTPS 等 transport 线程自己的 OS 调度属性。
-
-只调高第 2 层，不会缩短正在执行的低优先级 `Proc()`，也不会自动提高 transport listener 的优先级。把 Processor 设成 `SCHED_FIFO` 同样不能消除普通 mutex 引起的优先级反转。
-
-Choreography 策略把指定任务绑定到更明确的 Processor，隔离性比共享扫描更直观，但应用仍需约束 callback 的最坏执行时间（WCET）、阻塞行为和内存分配。这里说的“软实时”是指错过截止时间会降低控制或感知质量、但系统不把每次超时都定义为灾难性安全事故；Cyber 提供的是构建这种执行拓扑的工具，不是端到端截止时间证明，也不会替应用证明每个 callback 都能按时完成。
-
-多输入版本会在 M0 buffer 上安装 `AllLatest` 融合 callback：M0 触发，其他输入只提供当时的 latest snapshot。这是“主输入到来时采样并保持其他输入最新值”的 sample-and-hold，不是时间同步器；其锁序、tuple 分配和数据年龄需要单独沿多输入链展开。
-
-## 有界内存下的过载与丢数据语义
-
-设 producer 周期为 `Tp`，某个 visitor 的逻辑队列深度为 `P`。消费者没有落后时，它可以按序读取保留窗口；最老样本仅由队列造成的数据年龄上限接近 `(P - 1) * Tp`。一旦落后超过 ring 窗口，下一次 fetch 会追到当前尾部，跳过已覆盖历史。
-
-过载链可以按源码行为写成：
-
-```text
-producer 继续 Dispatch
-  -> ring 满时最旧逻辑消息退出可读区（物理 shared_ptr 可能下一次写槽才释放）
-  -> 多次通知可以合并
-  -> routine 每处理一条后保持 READY，尝试清 backlog
-  -> visitor 游标落到 head 之前时跳到 tail
-```
-
-所以它的取舍是“有界内存 + producer 通常不等待业务消费者 + 允许丢旧数据”。但 producer 仍可能在 `Dispatch()` 中等待 buffer mutex 和 notifier 扇出；不能把它称为完整的 non-blocking data path。
-
-对于 100 Hz 输入，`P=10` 代表约 90 ms 的历史窗口。若控制器逐条追赶，这些旧状态通常已经失去价值；`P=1` 更接近 keep-last。对于 1 kHz 输入，同样的深度也意味着约 9 个控制周期。队列深度不是单纯的吞吐参数，而是在“保留连续历史”和“保证数据新鲜”之间选择。
-
-端到端 callback 启动时间可以拆成下面这些区段。它们不是固定常数；在不同 transport 和调度策略下，有些区段可能为零、互相重叠或受批处理影响：
-
-```text
-Lstart = Ltransport_decode
-       + Ldispatcher_fanout_and_buffer_locks
-       + Lnotifier_and_scheduler_bookkeeping
-       + Lprocessor_wakeup
-       + Lrunqueue_scan
-       + Lcurrent_nonpreemptive_callback
-       + Lcoroutine_resume
-       + Lvisitor_fetch
-```
-
-闭环完成时间还要再加 `Cproc` 和下游 actuator path。尤其是 `Lcurrent_nonpreemptive_callback`：若同一 Processor 正在执行另一个 2 ms 的 `Proc()`，新到达的高优先级 task 即使已经被唤醒，也可能先承担这段剩余执行时间。RTPS 字符串分配、protobuf 解析、shared pointer 原子计数、mutex 竞争、condition-variable 唤醒、page fault 和 OS 抢占也会形成长尾。协程切换通常比内核线程切换轻，但它无法抵消链路其他部分的不确定性。
-
-## 关闭标志先挡住后续入口，但不等于已经排空在途 Proc
-
-`ComponentBase::Shutdown()` 的拆解顺序与初始化大致成镜像：
-
-```text
-设置 Component shutdown flag
-  -> Clear()
-  -> Reader::Shutdown(): topology / receiver 引用 / Reader task
-  -> 移除 Component task，并等待正在持有执行权的 routine
-  -> DataVisitor 与 CacheBuffer 析构
-  -> Dispatcher 中 weak buffer 仍可能留槽，但 lock() 失败
-```
-
-入口处的 `Process()` 检查使在 shutdown flag 设为 true 之后才进入该检查的消息不再调用 `Proc()`。它并不会中断已经越过检查、正在执行的业务函数。注意两个动作的区别：原子布尔值解决的是关闭标志本身的并发读写；“等所有在途 Proc 退出”需要另一个明确的同步边界。
-
-**固定提交源码摘录：**ComponentBase::Shutdown() 的顺序是先调用派生类 `Clear()`，再逐个关闭 Reader，最后移除 Component task。单输入组件的 Component::Process() 则在读取标志后直接进入 `Proc(msg)`，没有在这两步之间加锁，也没有先等待 task 排空。
-
-例如 `Proc()` 正在访问派生类的 `detector_`，此时 mainboard 线程进入 `Shutdown()` 并在 `Clear()` 中释放它，正在运行的 `Proc()` 仍可能继续使用已经释放的对象。随后发生的 `RemoveTask()` 确实会停止并移除 CRoutine；Classic 策略在 ClassicContext::RemoveCRoutine() 中等待 routine 释放执行标志，但等待发生在 `Clear()` 之后，所以不能反过来保护 `Clear()` 已经释放的资源。
-
-因此，应把源码事实和推荐协议区分开：Cyber 先置关闭标志，再执行业务 `Clear()`、关闭 Reader，最后等待并移除 Component task；如果重新设计关闭协议，更安全的常见顺序是先禁止新输入，再停止输入侧 task，等待可能已进入 `Proc()` 的 Component task 退出，最后释放 `Proc()` 使用的资源。后一顺序是依据在途访问风险提出的设计建议，不是当前 Apollo 的执行顺序。派生组件若沿用现有 API，不能假设 `Clear()` 被调用时 `Proc()` 已经结束，应核查资源是否共享，并自行建立必要同步。
-
-`Reader::Shutdown()` 退出 topology、释放自己的 receiver/channel manager 引用，并删除 Reader task。task 消失后，其 `DataVisitor` 和缓存可以析构；Dispatcher 中相应 `weak_ptr::lock()` 随后失败，不再向该缓存写数据。
-
-不过 ReceiverManager 还可能长期持有按 channel 共享的 receiver，所以 `reader->receiver_ = nullptr` 不必然立即销毁底层 transport 对象。Notifier registry 也可能保留旧回调；回调使用 task id 查找 scheduler 状态，目标任务不存在时只能返回失败。这些残留项主要带来扫描开销，也说明完整的动态卸载设计需要显式注销，而不能只依赖弱引用兜底。
-
-移除正在运行的 routine 时，scheduler 需要等其 `Acquire()` 执行权释放。若某个 `Proc()` 永不返回，局部 shutdown 也可能被永久拖住。合作式调度把 callback 的终止责任交给业务代码，因此组件实现必须能响应自身停止条件，不能在 `Proc()` 中做无期限阻塞 I/O。
-
-全局 `Scheduler::Shutdown()` 则让各 context 退出等待、逐项移除 routine，再停止并 join Processor 线程。全局 `cyber::IsShutdown()` 与单个组件的 `is_shutdown_` 是两层条件：一个控制进程级数据入口，一个保护局部业务对象，不能混为同一个生命周期开关。
-
-## 从完整消息链提取运行时设计
-
-如果从零实现一个 Cyber-like 最小运行时，最稳妥的顺序不是先造一个庞大 scheduler，而是沿依赖逐层闭合：
-
-先实现固定容量的 `shared_ptr` ring，写清 overwrite-oldest、消费者私有游标和落后时的跳转规则。再用 `ChannelBuffer` 把 channel identity 与存储组合起来，让多个 visitor 能独立消费。
-
-随后实现 `channel_id -> weak buffer list` 的 Dispatcher registry。若系统允许运行中注册和注销，必须从一开始定义 snapshot 或读写同步，而不是假设 vector 永远不变。Notifier 只传事件，不传 payload，并返回可注销句柄。
-
-有了数据面，再实现“设为 WAIT → 检查 buffer → yield”的 consumer loop和防丢唤醒 event latch。`ProcessorContext` 只负责选择 ready routine，`Processor` 只负责 OS 线程上的 select/resume/wait；这种分层让 Classic、绑定式或 deadline-aware 策略能够替换，而业务对象不知道具体 scheduler。
-
-最后再接 Component wrapper 和不同 transport。每接一种 transport，都标清 payload 第一次分配、复制或解析的位置，以及 listener 所在线程。到这一步，系统才真正拥有可解释的端到端延迟链。
-
-下面是一个可单独编译的**教学最小复刻**。它不实现协程、registry 和优先级，只保留发布线程不直接执行业务、缓存有界、等待条件可重查这三个性质。先选清楚缓存与所有权：`std::deque` 是可从两端插入和删除的序列，适合在容量满时从队首丢弃最旧样本、从队尾取最新样本；`std::shared_ptr<const T>` 让队列和正在处理的局部变量可以共同持有同一条消息，并通过这个只读句柄禁止消费者修改 `T`。`const` 只约束该句柄，并不能撤销生产者手里其他可写别名，所以生产者发布前必须完成写入，之后不再改动 payload。下面的 `std::thread` 构造会创建一个操作系统工作线程；析构里的 `join()` 阻塞当前析构线程，直到 `Run()` 真正返回。条件变量通知只让等待中的 worker 有机会重新检查谓词，不保证它此刻已经退出。
-
-```cpp
-// 教学最小例子：g++ -std=c++17 -pthread -c mini_runtime.cc
-#include <condition_variable>
-#include <cstddef>
-#include <deque>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <stdexcept>
-#include <string>
-#include <thread>
-#include <utility>
-
-template <class T>
-class LatestWorker {
- public:
-  using Message = std::shared_ptr<const T>;
-  LatestWorker(std::size_t cap, std::function<void(Message)> proc)
-      : cap_(cap), proc_(std::move(proc)) {
-    if (cap_ == 0) throw std::invalid_argument(std::string{});
-    worker_ = std::thread(&LatestWorker::Run, this);
-  }
-  ~LatestWorker() {
-    {
-      std::lock_guard<std::mutex> lock(mu_);
-      stop_ = true;
-    }
-    cv_.notify_one();
-    worker_.join();
-  }
-  void Publish(Message msg) {
-    {
-      std::lock_guard<std::mutex> lock(mu_);
-      if (queue_.size() == cap_) queue_.pop_front();
-      queue_.push_back(std::move(msg));
-    }
-    cv_.notify_one();
-  }
-
- private:
-  void Run() {
-    for (;;) {
-      Message msg;
-      {
-        std::unique_lock<std::mutex> lock(mu_);
-        cv_.wait(lock, [&] { return stop_ || !queue_.empty(); });
-        if (stop_ && queue_.empty()) return;
-        msg = std::move(queue_.back());
-        queue_.clear();  // 过载后直接追到最新样本
-      }
-      proc_(std::move(msg));  // 锁外执行
-    }
-  }
-  const std::size_t cap_;
-  std::function<void(Message)> proc_;
-  std::mutex mu_;
-  std::condition_variable cv_;
-  std::deque<Message> queue_;
-  bool stop_ = false;
-  std::thread worker_;
-};
-```
-
-析构函数先在 mutex 下置 `stop_`，再通知并 `join()`；worker 只有在 `stop_` 为真且队列为空时才退出，因此已经入队的最新样本会被处理完，`join()` 也会等待当前 `proc_` 返回。这个小例子没有实现“停止时丢弃待处理消息”，也没有让 `Publish()` 与对象析构并发安全：调用者必须先停止并 join 所有 producer，再销毁 `LatestWorker`。否则 producer 仍可能通过已经析构的 `this` 访问 mutex 或队列。真实框架要么明确这种外部生命周期协议，要么由更高层共享所有权和关闭状态阻止新的提交。
-
-这个缩小版只有一只 OS worker，所以不是 Cyber 源码的改写。继续演进时，可以给每位消费者建立独立实例，让 Dispatcher 只保存弱引用，再把 OS thread 拆成共享 Processor 与可挂起 routine。无论加多少层，都要守住同一边界：registry 不能与遍历无同步并发，payload 可见性由队列同步保证，通知只承诺“再检查一次”；在自建系统里，停止新任务与释放业务资源之间还必须有等待在途业务退出的明确边界。
-
-Cyber RT 这套设计最值得借鉴的地方，是把“消息是否存在”与“任务何时运行”拆成两个可独立演化的子系统：有界缓存保存事实，可合并事件推动调度。它带来了 transport 隔离、统一调度和新鲜度优先的过载行为；同时也留下弱引用表膨胀、共享 vector 的动态注册边界、持久 run queue 的公平性以及多输入时间一致性等工程代价。
-
-读完源码后，`Component::Proc()` 就不再是一个神秘 callback。它是一次 transport 接收、一次进程内缓存扇出、一次事件传播、一次 worker 唤醒、一次 routine 选择和一次协程恢复共同作用的终点。机器人闭环的可预测性，也正是由这些看似“不属于算法”的细节共同决定的。
+读源码时应分别记下四个时间戳：transport 实际得到消息、ring 写入完成、Processor 开始执行、业务 `Proc` 完成。它们之间的差异比单独报告“中间件一次传输用时”更能定位机器人闭环中的延迟与抖动；没有测量、负载和部署条件时，不应把这些结构上的可能成本写成固定的毫秒数。

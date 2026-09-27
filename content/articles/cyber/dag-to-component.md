@@ -1,8 +1,10 @@
 # 启动与装配：从 DAG 到 Component 实例
 
-上一篇把 Cyber RT 放回机器人系统中：DAG 是部署配置（名称来自有向无环图，Directed Acyclic Graph），在这里负责装配组件；Transport 负责移动数据；Scheduler 负责安排执行。现在只追第一段——当 `mainboard -d example.dag` 启动以后，源码究竟创建了哪些对象？`Component` 是业务模块实例，`Reader` 是订阅某个消息 channel 的运行时对象，`Node` 是该实例访问通信能力的门面；它们最终会接上 `DataVisitor`（按消费者游标从缓存取输入）和 task（调度器可执行的一次工作）。
+假设你已经写好一个点云感知算法，并希望同一份二进制在不同车辆上复用：A 车订阅前激光雷达，B 车改订阅侧向雷达；某辆车还想把感知和规划放进同一个进程。若所有 channel、队列和业务类都写死在 `main()`，每换一种部署就得重编运行时。Cyber RT 把这些决定移进 DAG（Directed Acyclic Graph，在这里是用于装配组件的部署配置），再让 `mainboard -d example.dag` 根据配置创建对象。问题随之变成：动态库如何变成具体 Component，Component 怎样得到 Node 与 Reader，Reader 又在什么时候与 DataVisitor 和调度任务接通？
 
-这个问题必须先于消息链。若还不知道 Component、Node、Reader、DataVisitor 和 task 从哪里来，阅读[完整消息链](message-to-proc.md)时就无法回答 `DataDispatcher::Dispatch()` “把消息交给谁”；若不知道谁拥有动态库和组件对象，也无法理解 shutdown 为什么要按特定顺序执行。本页先建立对象的出生、归属和退出关系，之后的 class loader 与 Node/Reader/Writer 章节再分别细读实现。
+先确定角色：`Component` 是业务模块实例；`Node` 是创建通信端点的命名门面；`Reader` 订阅某一路 channel；`DataVisitor` 让一个消费者按自己的游标从缓存取消息；task 是调度器能够恢复执行的工作。Transport 负责送达消息，Scheduler 负责安排 task，而 DAG 决定部署时创建哪些业务对象。本章只处理“第一条消息到达之前”的装配，不把通信线程与业务执行线程混为一谈。
+
+这个问题必须先于消息链。若还不知道 Component、Node、Reader、DataVisitor 和 task 从哪里来，阅读[完整消息链](message-to-proc.md)时就无法回答 `DataDispatcher::Dispatch()` “把消息交给谁”；若不知道谁拥有动态库和组件对象，也无法理解 shutdown 为什么要按特定顺序执行。本页先建立对象的出生、归属和退出关系；接下来的 [Node/Reader/Writer](node-reader-writer.md) 章节展开通信端点，而[动态装载与 ABI](class-loader-abi.md)留到消息链建立之后深入讨论。
 
 本章固定在 Apollo 提交 `d53aa3da47a06a08e6d0cd175d5623a34fa0d6aa`，以 `reality mode` 下的单输入 `Component<M0>` 为主线。这里的 `reality mode` 是 Cyber 的运行模式开关，不是“真实车辆”与“仿真”的同义词：该提交中开关为真时，Reader 只接收并入缓存，组件另建 DataVisitor 和 CRoutine task；为假时，Reader 直接带回调。`Component<M0>` 的尖括号表示编译期指定消息类型 M0。第一条消息尚未出现，我们只研究对象创建、所有权和注册关系。
 

@@ -2,7 +2,9 @@
 
 本文中的真实实现统一固定到 Apollo 提交 `d53aa3da47a06a08e6d0cd175d5623a34fa0d6aa`；关键代码直接粘贴在相应机制的讲解旁。
 
-上一章把 `CacheBuffer` 和 consumer cursor 拆到槽位级别。现在 producer 已经有一枚 `shared_ptr<Message>`，系统也已经有多只 DataVisitor buffer。新的问题是：怎样把这枚消息交给所有相关缓存，又怎样通知对应任务？
+同一条定位消息可能同时被规划、控制和诊断模块订阅。假如接收线程直接轮流执行三个模块的 callback，规划器一次 30 ms 的计算就会推迟控制器接收同一条消息；假如仅把消息放进一个共用队列，先运行的模块又可能把其他订阅者的数据取走。我们需要在“接收一条消息”和“每个消费者何时运行”之间增加一个边界：把同一枚消息句柄送进多只独立缓存，再向有数据的任务发出更新信号。
+
+此时 producer 已经有一枚 `shared_ptr<Message>`，多个 DataVisitor 各自拥有缓存和读取游标。新的源码问题是：Dispatcher 如何选择目标缓存、在谁的线程上写入、何时交给 Notifier，又有哪些并发假设不能从容器名字推导出来？
 
 这里 producer 是当前正在分发消息的一侧；consumer cursor 是每个消费者自己的逻辑读取序号。`shared_ptr<Message>` 是带共享引用计数的对象句柄，复制句柄通常不深复制 Message。registry 是“channel 标识到订阅对象”的登记表，fan-out 则表示一条输入向多只消费者缓存扇出。后文的 singleton 只是进程内统一访问这张表的实例，并不意味着跨进程共享。
 

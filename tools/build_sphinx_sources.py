@@ -55,12 +55,14 @@ ARTICLE_ORDER = {
         "overview",
         "architecture-map",
         "dag-to-component",
-        "class-loader-abi",
+        "node-reader-writer",
         "pending-queue-ring",
-        "multi-input-fusion",
         "dispatcher-notifier",
+        "multi-input-fusion",
         "croutine-wakeup",
+        "processor-context-switch",
         "message-to-proc",
+        "class-loader-abi",
         "cpp-type-runtime",
         "cpp-implementation-lab",
         "design-recap",
@@ -125,14 +127,17 @@ ARTICLE_ORDER = {
 
 CYBER_ARTICLE_SECTIONS = [
     ('从空目录建立系统全貌', ['architecture-map']),
-    ('第一条消息之前：装配、动态类型与通信端点',
-     ['dag-to-component', 'class-loader-abi', 'node-reader-writer']),
-    ('沿消息走完全程', ['message-to-proc']),
-    ('数据面：缓存、分发与多输入快照',
+    ('第一条消息之前：装配与通信端点',
+     ['dag-to-component', 'node-reader-writer']),
+    ('数据面：有界缓存、分发与输入组合',
      ['pending-queue-ring', 'dispatcher-notifier', 'multi-input-fusion']),
-    ('执行面：CRoutine、Scheduler 与 Processor', ['croutine-wakeup']),
-    ('语言设计、最小复刻与工程复盘',
-     ['cpp-type-runtime', 'cpp-implementation-lab', 'design-recap']),
+    ('执行面：从数据通知到真正获得 CPU',
+     ['croutine-wakeup', 'processor-context-switch']),
+    ('把整条消息链重新跑一遍', ['message-to-proc']),
+    ('生命周期、ABI 与 C++ 机制',
+     ['class-loader-abi', 'cpp-type-runtime']),
+    ('从源码原则到最小实现',
+     ['cpp-implementation-lab', 'design-recap']),
 ]
 
 GUIDE_ORDER: dict[str, list[str]] = {
@@ -262,7 +267,14 @@ def normalize_page(block: str) -> tuple[str, str]:
 
 
 def cyber_course_navigation() -> str:
-    blocks = []
+    blocks = ["""先认识组件：消息触发与周期触发
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. toctree::
+   :maxdepth: 2
+
+   overview
+"""]
     for title, slugs in CYBER_ARTICLE_SECTIONS:
         entries = '\n'.join(f'   {slug}' for slug in slugs)
         underline = '~' * 80
@@ -276,16 +288,6 @@ def cyber_course_navigation() -> str:
 {entries}
 '''
         )
-    blocks.append(
-        '''旧总览兼容入口
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. toctree::
-   :hidden:
-
-   overview
-'''
-    )
     return '\n'.join(blocks)
 
 
@@ -294,9 +296,9 @@ def cyber_learning_path() -> str:
 怎样使用这套课程
 ----------------
 
-第一次阅读，请从架构总览开始，先能画出对象、线程、缓存和依赖关系，再沿“装配 → 完整消息链 → 数据面 → 执行面”连续前进。带源码深读时，每到一个对象都记录 owner、所在执行上下文、锁域、消息复制和关闭动作。动手复刻时，则先实现有界 ring 与单 worker，再逐步加入类型擦除、事件闩锁、协程和配置装配；不要从完整框架接口倒推一个不可运行的玩具。
+第一次阅读，可以先用短篇组件入门区分消息触发与周期触发，再进入架构骨架画出对象、线程、缓存和依赖关系，之后沿“装配与端点 → 有界缓存 → 数据分发 → 多输入融合 → 任务唤醒 → Processor 执行 → 完整消息链回放”连续前进。带源码深读时，每到一个对象都记录 owner、所在执行上下文、锁域、消息复制和关闭动作。动手复刻时，则先实现有界 ring 与单 worker，再逐步加入类型擦除、事件闩锁、协程和配置装配；不要从完整框架接口倒推一个不可运行的玩具。
 
-源码章节依次进入端点创建、消息主链、数据面、执行面、语言设计与最小复刻。旧 `overview` URL 只作为兼容入口保留；第一次阅读应从架构总览进入。
+源码章节分别深入端点创建、消息主链、数据面、任务状态和 Processor 执行，语言设计与最小复刻放在最后。简明入口与源码长文各自回答不同问题，不需要在多篇文章中反复重讲同一组基础术语。
 '''
 
 

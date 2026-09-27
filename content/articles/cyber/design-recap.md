@@ -2,7 +2,7 @@
 
 本篇复盘的源码事实统一对应 Apollo 固定提交 `d53aa3da47a06a08e6d0cd175d5623a34fa0d6aa`；正文直接展示关键机制，不以源码链接或仓库路径代替代码。
 
-前六章从系统定位走到对象装配，再从 ring、Dispatcher、Notifier、CRoutine 和 Scheduler 组装出完整消息链。现在暂时离开单个函数，回到设计问题：这些层为什么存在，哪些思想值得复用，哪些实现只适合 Cyber RT 的约束？
+从系统边界进入组件装配，再从 ring、Dispatcher、Notifier、CRoutine 和 Processor 组装出消息链后，可以回到设计问题：这些层解决了哪些可观察的故障，哪些机制适合迁移到其他机器人运行时，哪些实现细节反而需要重新设计？调度专题分成[事件与任务状态](croutine-wakeup.md)和[Processor 上真正执行](processor-context-switch.md)，下面的复盘不重复两篇文章的逐行源码。
 
 总结不是再列一次类名。它要把源码事实压缩成可以迁移到其他机器人运行时的设计判断。
 
@@ -102,7 +102,7 @@ Scheduler 不保存每条消息，只保存 task state；消息数量由 ring �
 消费者处理一条后会继续检查 backlog
 ```
 
-Cyber 用 RoutineFactory 顺序和 `updated_` event latch 满足第二点。自己实现时可以用 sequence counter、eventfd 或受 mutex 保护的条件变量谓词，不必复制 atomic flag 的具体写法；真正需要保留的是不变量。
+Cyber 的 RoutineFactory 与 `updated_` 事件闩锁旨在避免“数据已经到达、任务却永久睡眠”；但这不等于当前固定提交已经证明了完整的无丢唤醒协议：`CRoutine::state_` 是跨线程访问的普通枚举，通知侧和运行侧缺少可见的统一同步约束。这里的三条是设计一个可靠运行时**必须保证的性质**，不是对当前实现所有竞争交错的无条件正确性背书。自己实现时可以用 sequence counter、eventfd 或受 mutex 保护的条件变量谓词，不必复制 atomic flag 的具体写法；先证明事件记录、状态改变、消费者检查三者在并发时不会留下永久睡眠窗口。
 
 ## 每个消费者独立 buffer，换来隔离也增加 producer 成本
 
