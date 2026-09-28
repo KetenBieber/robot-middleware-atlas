@@ -1,4 +1,4 @@
-"""Static closure checks for the fourteen public LCM pages.
+"""Static closure checks for the fifteen public LCM pages.
 
 This checks source-document structure and local Markdown links only.
 It does not claim the upstream LCM/Drake runtime or generated HTML is tested.
@@ -21,7 +21,8 @@ ARTICLE_NAMES = (
     "types-and-eventlog", "c-abi-cpp-design-lab", "design-recap",
 )
 GUIDE_NAMES = (
-    "use-environment", "use-pubsub-types", "use-operations", "case-study-drake",
+    "use-environment", "use-pubsub-types", "closed-loop-project",
+    "use-operations", "case-study-drake",
 )
 PAGES = tuple(ROOT / "content" / "articles" / "lcm" / (x + ".md")
               for x in ARTICLE_NAMES) + tuple(
@@ -33,6 +34,7 @@ EXAMPLE_FILES = (
     ROOT / "examples/lcm/closed_loop/src/sender.cpp",
     ROOT / "examples/lcm/closed_loop/src/receiver.cpp",
 )
+PROJECT_GUIDE = ROOT / "content/guides/lcm/closed-loop-project.md"
 LEGACY_BADGE = re.compile(
     r"^(?:仓库与提交：|符号：|对应的上游实现如下：|"
     r"\*\*(?:代码身份|图示身份|固定源码摘录))", re.MULTILINE
@@ -52,6 +54,7 @@ REQUIRED = {
     "design-recap": ("Provider", "EventLog", "shutdown"),
     "use-environment": ("Provider URL", "handle"),
     "use-pubsub-types": ("schema", "subscribe", "callback"),
+    "closed-loop-project": ("joint_state_t", "atlas_sender", "atlas_receiver", "handleTimeout"),
     "use-operations": ("回放", "故障", "关闭"),
     "case-study-drake": ("Context", "LcmSubscriberSystem", "Simulator"),
 }
@@ -67,6 +70,22 @@ def article_order() -> tuple[str, ...]:
                 order = ast.literal_eval(node.value)
                 return tuple(order["lcm"])
     raise RuntimeError("ARTICLE_ORDER missing from build_sphinx_sources.py")
+
+
+def guide_order() -> tuple[str, ...]:
+    path = ROOT / "tools" / "build_sphinx_sources.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        if isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.target.id == "GUIDE_ORDER":
+                order = ast.literal_eval(node.value)
+                return tuple(order["lcm"])
+        if isinstance(node, ast.Assign):
+            if any(isinstance(t, ast.Name) and t.id == "GUIDE_ORDER"
+                   for t in node.targets):
+                order = ast.literal_eval(node.value)
+                return tuple(order["lcm"])
+    raise RuntimeError("GUIDE_ORDER missing from build_sphinx_sources.py")
 
 
 def main() -> int:
@@ -143,6 +162,17 @@ def main() -> int:
             errors.append("LCM must introduce foundations after the user-facing overview")
     except (SyntaxError, OSError, RuntimeError, ValueError) as exc:
         errors.append(f"navigation: {exc}")
+    try:
+        guides = guide_order()
+        if set(guides) != set(GUIDE_NAMES) or len(guides) != len(GUIDE_NAMES):
+            errors.append(f"LCM navigation does not contain five unique guides: {guides}")
+        if guides[1:4] != ("use-pubsub-types", "closed-loop-project", "use-operations"):
+            errors.append(
+                "LCM guide path must move from typed pub/sub to the full project "
+                "before operations"
+            )
+    except (SyntaxError, OSError, RuntimeError, ValueError) as exc:
+        errors.append(f"guide navigation: {exc}")
 
     examples_present = 0
     for example in EXAMPLE_FILES:
@@ -160,6 +190,14 @@ def main() -> int:
             errors.append("LCM example sender does not publish expected channel")
         if "handler.received != 20" not in receiver or "handler.gaps != 0" not in receiver:
             errors.append("LCM example receiver must fail on incomplete delivery")
+        project_source = PROJECT_GUIDE.read_text(encoding="utf-8-sig")
+        for example in EXAMPLE_FILES:
+            snippet = example.read_text(encoding="utf-8").strip()
+            if snippet not in project_source:
+                errors.append(
+                    "LCM project guide drifted from example file: "
+                    f"{example.relative_to(ROOT)}"
+                )
 
     print(f"LCM_STATIC_PAGES={source_count}/{len(PAGES)}")
     print(f"LCM_LOCAL_LINKS_CHECKED={link_count}")

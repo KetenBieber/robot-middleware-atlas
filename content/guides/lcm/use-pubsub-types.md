@@ -275,6 +275,8 @@ void Handler::onState(const lcm::ReceiveBuffer* rbuf,
 
 本仓库的 `examples/lcm/closed_loop/` 包含完整的 `.lcm` schema、CMake 配置、`atlas_sender` 和 `atlas_receiver`。建议先逐行读懂例子，再在已安装 LCM CMake package 和 C/C++ 开发依赖的环境中，从**仓库根目录**执行：
 
+四个核心文件的完整源码、逐段调用链、对象生命周期、退出码设计与故障实验已经单独整理为[端到端闭环工程详解](closed-loop-project.md)。本节只保留最短的构建与验收入口；第一次实践建议直接按项目页从 schema 读到 receiver。
+
 ~~~bash
 cmake -S examples/lcm/closed_loop -B build/lcm-closed-loop \
   -DCMAKE_PREFIX_PATH=/path/to/lcm/install
