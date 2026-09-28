@@ -184,10 +184,11 @@ def main() -> int:
                 + ", ".join(str(path.relative_to(ROOT)) for path in leaked)
             )
 
+    # .internal is intentionally local-only and ignored by Git.  When the
+    # research index exists, validate it as an additional authoring-time gate;
+    # CI/public builds must not require private research material.
     case_index = ROOT / ".internal" / "research" / "soem" / "case-index.md"
-    if not case_index.is_file():
-        errors.append("missing internal SOEM external-case index")
-    else:
+    if case_index.is_file():
         case_text = case_index.read_text(encoding="utf-8-sig")
         for term in (
             PINNED_SOEM,
