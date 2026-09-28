@@ -28,9 +28,13 @@
    * - LCM
      - ``ad0c54cee0ec048ef12357c34349ec1443158864``
      - https://github.com/lcm-proj/lcm
+   * - IgH EtherCAT Master
+     - ``61cc654f5b721ddd54df0f58bdd34106d91c5359`` （stable-1.6 / 1.6.13）
+     - https://gitlab.com/etherlab.org/ethercat
 
 阅读方式
 --------
 
 正文中的源码片段用于解释局部控制流和数据结构，固定提交 permalink 用于查看完整上下文。
 同名类型或函数在不同版本中可能已经变化，因此跨章节对照时应先核对本页列出的提交。
+EtherCAT Master 已固定到本地 ``stable-1.6`` 的 1.6.13 提交；后续源码片段统一从该提交核对。

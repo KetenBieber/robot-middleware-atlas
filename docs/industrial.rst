@@ -8,3 +8,4 @@
    generated/orocos/index
    generated/yarp/index
    generated/ecal/index
+   generated/ethercat/index

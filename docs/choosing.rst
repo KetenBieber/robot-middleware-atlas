@@ -28,6 +28,10 @@ Choosing a middleware project
      - Zenoh
      - pub/sub、query、storage 与跨网路由
      - 不是硬实时控制执行器
+   * - 实时工业总线/主站栈
+     - IgH EtherCAT Master
+     - 周期过程数据、从站状态机、时钟同步与网卡数据面
+     - 不是通用进程间消息总线
 
 建议路径
 --------
@@ -36,9 +40,10 @@ Choosing a middleware project
 * 硬实时控制：Orocos RTT → eCAL → LCM。
 * 研究机器人平台：YARP → LCM → Zenoh。
 * 学习完整可审计内核：先读 LCM，再与其他大型框架对照。
+* 工业伺服与 I/O 实时链路：Orocos RTT / 专用 RT loop → EtherCAT Master → 驱动与从站对象字典。
 
-六个项目解决的不是同一个问题
-----------------------------
+六个中间件与一个主站栈解决的不是同一个问题
+------------------------------------------
 
 .. list-table::
    :header-rows: 1
@@ -86,6 +91,12 @@ Choosing a middleware project
      - 无中心 UDPM 或其他 provider
      - 极小内核、类型生成与日志回放
      - 可靠交付、认证和全局发现
+   * - IgH EtherCAT Master
+     - Master / Domain / PDO
+     - 应用实时线程 + 主站/device 执行路径
+     - EtherCAT 线性总线、从站状态与 DC
+     - 周期过程数据与工业伺服链路
+     - 上层组件调度、通用消息语义
 
 这张表不能替代容量与故障分析。例如 Cyber 和 Orocos 都能执行组件，但前者强调大型数据流和协程调度，后者强调 Activity、Port policy 与可推理的实时组件生命周期。eCAL 和 LCM 都能做发布订阅，但 eCAL 用发现与多 transport 承担更多运行时工作，LCM 则把事件循环、丢包恢复和应用确认更多留给使用者。
 
@@ -176,6 +187,8 @@ YARP 的 Port、Name Server 和 Carrier 允许实验期间动态改变连接，�
 
 这种组合需要在适配边界明确命名、类型、时间戳、顺序、重复、背压、认证和关闭。中间件叠加不会自动叠加优点；如果两个层都缓存、重试和重排，尾延迟与重复状态反而更难推理。
 
+EtherCAT Master 应放在另一条更靠近设备的数据路径上：控制线程通过 process image 读写 PDO，主站负责把这些字节转换成周期 EtherCAT 帧并与从站状态机、邮箱协议和分布式时钟协同。它可以与 Orocos、ROS 2 或自研控制框架组合，但不能把 EtherCAT 的周期通信能力直接等同于上层组件调度或消息语义。
+
 源码学习的推荐起点
 ------------------
 
@@ -184,5 +197,6 @@ YARP 的 Port、Name Server 和 Carrier 允许实验期间动态改变连接，�
 * 学习发现和多传输：阅读 :doc:`eCAL <generated/ecal/index>`，重点比较控制面与数据面。
 * 学习可插拔协议与命名：阅读 :doc:`YARP <generated/yarp/index>` 的 PortCore、Protocol 和 Carrier。
 * 学习 Rust 异步路由：阅读 :doc:`Zenoh <generated/zenoh/index>` 的 Session、Resource、Route cache 和 Query Final。
+* 学习工业实时主站：从 :doc:`IgH EtherCAT Master <generated/ethercat/index>` 的周期数据路径开始，随后进入 Domain/process image、datagram/FSM、device/NIC 与 DC。
 
 每个专题首页都按“功能需求 → 组件地图 → 源码主链 → 语言机制 → 设计取舍与性能 → 最小复刻 → 实际案例”给出入口。选择项目之后不必再从文件名猜阅读顺序。

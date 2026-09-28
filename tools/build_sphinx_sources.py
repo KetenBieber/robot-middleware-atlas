@@ -9,6 +9,7 @@ ARTICLES = CONTENT / "articles"
 GUIDES = CONTENT / "guides"
 DOCS = ROOT / "docs"
 GENERATED = DOCS / "generated"
+PENDING_SOURCE = "PENDING_LOCAL_SOURCE"
 
 
 def write_if_changed(path: Path, text: str) -> None:
@@ -25,6 +26,7 @@ PROJECTS = {
     "ecal": ("Eclipse eCAL", "1ec0ea2fe5e5e61e3e492be6128c27cc6026d717"),
     "zenoh": ("Eclipse Zenoh", "9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5"),
     "lcm": ("LCM", "ad0c54cee0ec048ef12357c34349ec1443158864"),
+    "ethercat": ("IgH EtherCAT Master", "61cc654f5b721ddd54df0f58bdd34106d91c5359"),
 }
 
 PROJECT_OVERVIEWS = {
@@ -46,6 +48,7 @@ PROJECT_OVERVIEWS = {
     "yarp": """YARP 把机器人网络抽象成 Port。PortCore 管理输入输出连接和生命周期，OutputUnit/InputUnit 把每条连接的执行状态隔离开，Protocol 与 Carrier 则把握手、framing、确认和具体传输协议从端口 API 中剥离。Name Server 把逻辑名字解析成可连接的 Contact。
 
 阅读 YARP 的主线是一次 ``Port::write`` 如何序列化并扇出到多条连接，以及对端怎样经 InputUnit 进入 PortReader。同步写、后台写、不同 Carrier、慢连接与断开竞态会改变 buffer 所有权和调用者阻塞时间，也决定它更适合可靠数据流还是只关心最新状态的控制链路。""",
+    "ethercat": """IgH EtherCAT Master 把 Linux 主机、网卡、EtherCAT 帧、从站状态机和周期过程数据组织成一条面向工业控制的实时通信链。应用层看到 Master、Domain、PDO 与周期收发 API；源码层真正决定抖动、数据年龄和故障恢复的，是 FMMU/process image、datagram queue、非阻塞 FSM、Device/NIC 与 Distributed Clocks 怎样协同。\n\n本专题固定到 stable-1.6 / 1.6.13（61cc654f）。课程明确分成两部分：前半先从协议与控制系统第一性原理建立 EtherCAT 软件栈理论，后半再沿 ``ecrt_*`` public API 进入 Master/Domain、Datagram、FSM、Device/NIC 和 DC 的真实源码实现。""",
 }
 
 PROJECT_EXTRAS: dict[str, list[str]] = {}
@@ -123,8 +126,27 @@ ARTICLE_ORDER = {
         "cpp-design-lab",
         "design-recap",
     ],
-}
+    "ethercat": [
+        "overview",
+        "theory-stack",
+        "theory-frame-datagram",
+        "theory-pdo-process-image",
+        "theory-state-mailbox",
+        "theory-distributed-clocks",
+        "theory-realtime",
+        "architecture-map",
+        "master-lifecycle",
+        "domain-process-image",
+        "cyclic-send-receive",
+        "datagram-frame",
+        "slave-fsm-mailbox",
+        "device-nic-runtime",
+        "distributed-clocks",
+        "realtime-concurrency",
+        "design-recap",
+    ],
 
+}
 CYBER_ARTICLE_SECTIONS = [
     ('从空目录建立系统全貌', ['architecture-map']),
     ('第一条消息之前：装配与通信端点',
@@ -140,6 +162,29 @@ CYBER_ARTICLE_SECTIONS = [
      ['cpp-implementation-lab', 'design-recap']),
 ]
 
+ETHERCAT_ARTICLE_SECTIONS = [
+    ("EtherCAT 软件栈理论", [
+        "theory-stack",
+        "theory-frame-datagram",
+        "theory-pdo-process-image",
+        "theory-state-mailbox",
+        "theory-distributed-clocks",
+        "theory-realtime",
+    ]),
+    ("IgH 主站源码实现解剖", [
+        "architecture-map",
+        "master-lifecycle",
+        "domain-process-image",
+        "cyclic-send-receive",
+        "datagram-frame",
+        "slave-fsm-mailbox",
+        "device-nic-runtime",
+        "distributed-clocks",
+        "realtime-concurrency",
+        "design-recap",
+    ]),
+]
+
 GUIDE_ORDER: dict[str, list[str]] = {
     "cyber": ["use-environment", "use-pubsub", "closed-loop-project", "use-component-operations", "case-study-apollo-planning"],
     "ecal": ["use-environment", "use-pubsub", "closed-loop-project", "use-operations", "case-study-mqtt-bridge"],
@@ -147,6 +192,7 @@ GUIDE_ORDER: dict[str, list[str]] = {
     "lcm": ["use-environment", "use-pubsub-types", "closed-loop-project", "use-operations", "case-study-drake"],
     "orocos": ["use-environment", "use-component-ports", "use-operations", "case-study-rtt-ros"],
     "yarp": ["use-environment", "use-ports-rpc", "use-operations", "case-study-icub-navigation"],
+    "ethercat": ["use-environment", "closed-loop-project", "real-hardware-deployment"],
 }
 
 PROJECT_STORIES = {
@@ -168,6 +214,7 @@ PROJECT_STORIES = {
     "zenoh": """先在 :doc:`Key Expression 入门 <foundations>` 中理解数据集合与单条消息，再沿 :doc:`Session 的建立 <session-runtime>` 追踪 API、内部实体和 Runtime；随后在 :doc:`Resource 与路由缓存 <resource-route-cache>` 中解释为什么通配匹配不应每帧重算。
 
 有了对象与路由模型，再走一次 :doc:`Publisher 到 Transport <publisher-routing>`，随后进入 :doc:`Query、Reply 和 Final <query-lifecycle>`，亲自模拟两路回复、一条超时和最后的回收。完成 :doc:`背压与关闭 <backpressure-close>` 的故障回放以后，再读 :doc:`Rust/C++ 设计实验 <rust-cpp-design-lab>` 以及 :doc:`rmw_zenoh 案例 <case-study-rmw-zenoh>`。""",
+    "ethercat": """先读 :doc:`软件栈总图 <theory-stack>`，把 EtherCAT 与普通 Ethernet、CAN/CANopen、ROS 2 pub/sub 的职责边界分开；随后沿 :doc:`帧与 Datagram <theory-frame-datagram>`、:doc:`PDO/FMMU/过程映像 <theory-pdo-process-image>`、:doc:`AL 状态与邮箱 <theory-state-mailbox>`、:doc:`Distributed Clocks <theory-distributed-clocks>` 和 :doc:`实时性 <theory-realtime>` 建立协议与控制系统直觉。\n\n进入源码以后，从 :doc:`对象架构 <architecture-map>` 和 :doc:`Master 生命周期 <master-lifecycle>` 建立 ownership，再追 :doc:`Domain 与 process image <domain-process-image>`、:doc:`周期收发 <cyclic-send-receive>` 和 :doc:`Datagram/Frame <datagram-frame>` 的数据面；最后进入 :doc:`Slave FSM 与 mailbox <slave-fsm-mailbox>`、:doc:`Device/NIC <device-nic-runtime>`、:doc:`DC 实现 <distributed-clocks>` 与 :doc:`实时并发 <realtime-concurrency>`。读完源码后进入 :doc:`FakeEtherCAT 环境 <use-environment>` 与 :doc:`双进程闭环工程 <closed-loop-project>`，用 controller/plant 把 PDO 和 process image 真正跑成闭环；最后按 :doc:`真机部署 <real-hardware-deployment>` 把同一应用骨架迁移到独立 NIC、真实从站、WKC、DC 和实时调度。所有源码结论统一锁定 stable-1.6 / 1.6.13 的 ``61cc654f5b721ddd54df0f58bdd34106d91c5359``。""",
 }
 
 INTERNAL_ONLY_SLUGS = {"reconstruction"}
@@ -280,13 +327,56 @@ def cyber_learning_path() -> str:
 '''
 
 
+def ethercat_course_navigation() -> str:
+    blocks = ['''先看总路线：为什么实时控制需要主站软件栈
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. toctree::
+   :maxdepth: 2
+
+   overview
+''']
+    for title, slugs in ETHERCAT_ARTICLE_SECTIONS:
+        entries = '\n'.join(f'   {slug}' for slug in slugs)
+        underline = '~' * 80
+        blocks.append(
+            f'''{title}
+{underline}
+
+.. toctree::
+   :maxdepth: 2
+
+{entries}
+'''
+        )
+    return '\n'.join(blocks)
+
+
+def ethercat_learning_path() -> str:
+    return '''
+怎样读这个主站专题
+------------------
+
+前半部分先把 EtherCAT 本身讲清楚：Ethernet frame 为什么还能容纳多个 EtherCAT datagram，PDO/FMMU/process image 怎样把设备寄存器变成连续控制内存，AL 状态与 mailbox 为什么必须和周期过程数据分层，Distributed Clocks 怎样处理采样与执行相位，以及 Linux 实时性真正受哪些调度边界限制。
+
+后半部分固定在 IgH EtherCAT Master 1.6.13 的 61cc654f 提交上。阅读顺序不是目录顺序，而是沿一个控制周期和一次配置生命周期前进：request/activate → PDO 注册与 Domain 完成 → receive/process → queue/send → frame packing → slave FSM/mailbox → Device/NIC → DC → 并发与关闭。每个核心对象都回答 owner、内存布局、执行上下文、锁、复制、失败路径与控制系统后果。
+'''
+
+
 def write_project_index(
     project: str,
     pages: list[tuple[str, str]],
     guides: list[tuple[str, str]],
 ) -> None:
+    name, commit = PROJECTS[project]
+    if commit == PENDING_SOURCE:
+        version_line = (
+            "源码版本状态：本地上游源码尚未纳入 source-audit；"
+            "固定提交将在首次源码核验时写入。"
+        )
+    else:
+        version_line = f"固定源码版本：``{commit}``"
     if project == 'cyber':
-        name, commit = PROJECTS[project]
         folder = GENERATED / project
         folder.mkdir(parents=True, exist_ok=True)
         guide_entries = '\n'.join(f'   {slug}' for slug, _ in guides)
@@ -302,7 +392,7 @@ def write_project_index(
         text = f'''{name}
 {'=' * len(name)}
 
-固定源码版本：``{commit}``
+{version_line}
 
 {PROJECT_OVERVIEWS[project]}
 
@@ -320,7 +410,6 @@ def write_project_index(
         write_if_changed(folder / 'index.rst', text)
         return
 
-    name, commit = PROJECTS[project]
     folder = GENERATED / project
     folder.mkdir(parents=True, exist_ok=True)
     underline = "=" * len(name)
@@ -359,10 +448,13 @@ def write_project_index(
 
 这些文章中的短代码用于一步步推导机制；只有上下文明确说明取自固定上游版本时，才是项目原始源码。文字图呈现概念或运行时关系，而不是从源码自动生成的类图。
 """
+    if project == 'ethercat':
+        source_navigation = ethercat_course_navigation()
+        learning_path = ethercat_learning_path()
     text = f"""{name}
 {underline}
 
-固定源码版本：``{commit}``
+{version_line}
 
 {PROJECT_OVERVIEWS[project]}
 

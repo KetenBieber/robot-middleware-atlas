@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from build_sphinx_sources import ARTICLE_ORDER, GUIDE_ORDER, PROJECTS
+from build_sphinx_sources import ARTICLE_ORDER, GUIDE_ORDER, PENDING_SOURCE, PROJECTS
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,7 +45,7 @@ def main() -> int:
             content = path.read_text(encoding="utf-8-sig")
             if not content.startswith("# "):
                 problems.append(f"MISSING_H1 {path.relative_to(ROOT)}")
-            if upstream_commit[:8] not in content:
+            if upstream_commit != PENDING_SOURCE and upstream_commit[:8] not in content:
                 problems.append(f"MISSING_UPSTREAM_COMMIT {path.relative_to(ROOT)}")
             if "\n## " not in content:
                 problems.append(f"MISSING_SECTION {path.relative_to(ROOT)}")
