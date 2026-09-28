@@ -3,11 +3,12 @@ SPHINXBUILD ?= $(PYTHON) -m sphinx
 SOURCEDIR = docs
 BUILDDIR = site
 
-.PHONY: html html-full package-site check-editorial check-baselines check-examples check-lcm check-links clean
+.PHONY: html html-full package-site check-editorial check-baselines check-examples check-lcm check-cyber check-links clean
 
 html:
 	$(PYTHON) tools/build_sphinx_sources.py
 	$(PYTHON) tools/check_lcm_closure.py
+	$(PYTHON) tools/check_cyber_closure.py
 	$(PYTHON) tools/check_source_baselines.py
 	$(PYTHON) tools/check_editorial_language.py
 	$(SPHINXBUILD) -b html -W --keep-going $(SOURCEDIR) $(BUILDDIR)
@@ -15,6 +16,7 @@ html:
 html-full:
 	$(PYTHON) tools/build_sphinx_sources.py
 	$(PYTHON) tools/check_lcm_closure.py
+	$(PYTHON) tools/check_cyber_closure.py
 	$(PYTHON) tools/check_source_baselines.py
 	$(PYTHON) tools/check_editorial_language.py
 	$(PYTHON) tools/check_cpp_examples.py
@@ -38,6 +40,10 @@ check-examples:
 
 check-lcm:
 	$(PYTHON) tools/check_lcm_closure.py
+	$(PYTHON) tools/check_cpp_examples.py
+
+check-cyber:
+	$(PYTHON) tools/check_cyber_closure.py
 	$(PYTHON) tools/check_cpp_examples.py
 
 clean:

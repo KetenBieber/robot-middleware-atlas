@@ -206,6 +206,8 @@ callback 模式由消息到达驱动；Observe 模式由调用者周期驱动。
 
 ## BUILD 依赖形状
 
+如果已经能独立写出本章的 Writer/Reader，不要立刻跳到大型 Planning 源码。下一步先做[Publisher → DAG Component → Observer 闭环工程](closed-loop-project.md)：它把 Proto、Bazel、Writer、Component、DAG、输出 channel 和严格 observer 放在同一条链中，正好可以验证“Reader callback”和“Component::Proc”为什么属于两种不同的业务入口。
+
 固定提交的官方示例使用 Apollo 自己的 `proto_library` 与 `apollo_cc_binary` 宏。把 schema 放在独立 Bazel package，可以让生成代码同时被 writer、reader 和其他模块复用。
 
 `demo/proto/BUILD`：

@@ -109,6 +109,29 @@ return true;
 
 还要保留两个读源码时不可省略的限制。第一，有界 ring 的 `pending_queue_size` 决定能保留多少历史，慢消费者会遇到覆盖或游标调整，而不是保留每一帧。第二，固定版本的 Dispatcher 注册表与 Notifier 登记存在运行时并发和注销方面的边界；`CRoutine::state_` 的跨线程访问也不能只靠另一个 `atomic_flag` 证明安全。因此这套实现可以用于学习实际工业系统如何取舍，却不应被抽象成所有平台通用的无锁、无丢唤醒或确定性实时模板。
 
+## 先把源码知识压进一个完整工程
+
+只读完单篇机制文章，还容易产生一种错觉：知道 `DataVisitor`、`CRoutine`、`ClassLoader` 分别做什么，就等于知道它们怎样在同一个程序里协作。真正的闭环应该回到一个可以从入口追到底的工程：
+
+~~~text
+status_source
+  -> Writer<Status> /atlas/status/raw
+  -> DAG Component
+  -> DataVisitor / Scheduler / CRoutine
+  -> StatusTransformComponent::Proc
+  -> Writer<Status> /atlas/status/processed
+  -> status_observer
+~~~
+
+完整文件、BUILD、Proto、DAG 和逐行解释见[端到端闭环工程](../../guides/cyber/closed-loop-project.md)。读这个工程时，不再新增名词，而是要求自己从任意一行代码继续回答：
+
+1. 这个对象是谁创建、谁持有、谁先析构？
+2. 当前代码运行在业务线程、transport 上下文还是 Processor worker？
+3. 消息本体现在存在哪里，唤醒信号又存在哪里？
+4. 慢消费者、动态注册或关闭竞争发生时，哪一个不变量先失效？
+
+若这四问能从 source 一路回答到 observer，再回头读下面的专题文章，类名就不会再是孤立知识点。
+
 ## 按问题选择源码章节
 
 | 现在想弄清什么 | 阅读入口 |

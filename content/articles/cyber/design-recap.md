@@ -260,6 +260,21 @@ ready selection 可以使用真正的 per-priority ready deque 或 rotating curs
 
 这个顺序有意把“并发正确性”放在“框架外观”之前。先做漂亮的 Node/Component API，却没有稳定的 queue、wakeup 和 lifetime，不会得到可用中间件。
 
+## 固定版本四个仍应保持 OPEN 的并发边界
+
+文档和教学工程已经能够闭环，不代表固定源码里的并发边界因此消失。当前至少有四处不能被“示例跑通”覆盖掉：
+
+| 边界 | 固定源码中的问题形状 | 从零重写时应先定义什么 |
+|---|---|---|
+| Dispatcher registry | `AddBuffer()` 修改内层 vector，而 `Dispatch()` 遍历没有共享同一锁 | topology freeze、读写锁或 immutable snapshot |
+| DataNotifier registry | Add/Notify 与 callback 注册缺少完整注销静默期 | registration token、in-flight counter、quiescence |
+| `CRoutine::state_` | 通知侧读取、执行侧写普通枚举，缺少明显共同同步 | 原子状态机或同锁下的状态迁移协议 |
+| 多输入 fusion 安装 | buffer 先注册，AllLatest callback 后安装，动态创建时存在可见窗口 | 私有构造后一次发布，或显式初始化 barrier |
+
+这四项对应内部审查的 I-004 至 I-007。它们之所以重要，是因为 Cyber RT 的正常使用通常在启动阶段建立拓扑，很多竞态在稳定运行时不容易触发；一旦把系统扩展成“运行中热插拔 Reader/Component”，原本隐含的静态拓扑假设就会成为 API 契约问题。
+
+因此，[端到端闭环工程](../../guides/cyber/closed-loop-project.md)有意采用“先启动 Component 和 Observer，再启动 source”的顺序。这个工程验证的是正常数据链与生命周期，不把运行时热注册安全性作为已证明性质。若未来真的要实现动态拓扑，应该先解决上述 registry、状态机和初始化可见性问题，再谈 API 外观。
+
 ## 完整理解 Cyber RT 的能力边界
 
 看到一个 Component 配置，应该能说出 mainboard 如何找到 `.so` 和类工厂，Node、Reader、DataVisitor 与 task 在什么时候创建。

@@ -338,14 +338,14 @@ class Channel {
   using Callback = std::function<void(std::shared_ptr<const T>)>;
 
   void Subscribe(std::weak_ptr<void> lifetime, Callback callback) {
-    std::lock_guard<std::mutex> lock(mu_);
+    [[maybe_unused]] std::lock_guard<std::mutex> lock(mu_);
     subscribers_.push_back({std::move(lifetime), std::move(callback)});
   }
 
   void Publish(std::shared_ptr<const T> message) {
     std::vector<Callback> callbacks;
     {
-      std::lock_guard<std::mutex> lock(mu_);
+      [[maybe_unused]] std::lock_guard<std::mutex> lock(mu_);
       for (auto it = subscribers_.begin(); it != subscribers_.end();) {
         if (it->lifetime.expired()) {
           it = subscribers_.erase(it);
@@ -385,7 +385,7 @@ class Reader final : public ReaderBase,
 
   void Stop() override {
     {
-      std::lock_guard<std::mutex> lock(mu_);
+      [[maybe_unused]] std::lock_guard<std::mutex> lock(mu_);
       if (stopped_) return;
       stopped_ = true;
     }
@@ -407,7 +407,7 @@ class Reader final : public ReaderBase,
 
   void Enqueue(std::shared_ptr<const T> message) {
     {
-      std::lock_guard<std::mutex> lock(mu_);
+      [[maybe_unused]] std::lock_guard<std::mutex> lock(mu_);
       if (stopped_) return;
       queue_.push(std::move(message));
     }
@@ -458,7 +458,7 @@ class Node {
       Callback&& callback) {
     auto reader = Reader<T>::Create(
         std::move(channel), std::forward<Callback>(callback));
-    std::lock_guard<std::mutex> lock(mu_);
+    [[maybe_unused]] std::lock_guard<std::mutex> lock(mu_);
     if (!readers_.emplace(name, reader).second) return nullptr;
     return reader;
   }
@@ -472,7 +472,7 @@ class Node {
   ~Node() {
     std::vector<std::shared_ptr<ReaderBase>> snapshot;
     {
-      std::lock_guard<std::mutex> lock(mu_);
+      [[maybe_unused]] std::lock_guard<std::mutex> lock(mu_);
       for (auto& entry : readers_) snapshot.push_back(entry.second);
       readers_.clear();
     }

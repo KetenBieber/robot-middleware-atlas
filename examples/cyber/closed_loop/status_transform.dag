@@ -1,0 +1,12 @@
+module_config {
+  module_library: "cyber/examples/atlas_closed_loop/libstatus_transform_component.so"
+  components {
+    class_name: "StatusTransformComponent"
+    config {
+      name: "atlas_status_transform"
+      readers {
+        channel: "/atlas/status/raw"
+      }
+    }
+  }
+}

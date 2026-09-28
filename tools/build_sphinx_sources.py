@@ -141,7 +141,7 @@ CYBER_ARTICLE_SECTIONS = [
 ]
 
 GUIDE_ORDER: dict[str, list[str]] = {
-    "cyber": ["use-environment", "use-pubsub", "use-component-operations", "case-study-apollo-planning"],
+    "cyber": ["use-environment", "use-pubsub", "closed-loop-project", "use-component-operations", "case-study-apollo-planning"],
     "ecal": ["use-environment", "use-pubsub", "use-operations", "case-study-mqtt-bridge"],
     "zenoh": ["use-environment", "use-pubsub-query", "use-operations", "case-study-rmw-zenoh"],
     "lcm": ["use-environment", "use-pubsub-types", "closed-loop-project", "use-operations", "case-study-drake"],
@@ -150,6 +150,9 @@ GUIDE_ORDER: dict[str, list[str]] = {
 }
 
 PROJECT_STORIES = {
+    "cyber": """从 :doc:`总览 <overview>` 中的一帧消息开始，先分清 Node、Reader/Writer、Component 和 Processor 分别属于通信、业务与执行哪一层。随后沿 :doc:`DAG 装配 <dag-to-component>`、:doc:`通信端点 <node-reader-writer>`、:doc:`数据分发 <dispatcher-notifier>` 和 :doc:`调度唤醒 <croutine-wakeup>` 追踪同一条消息如何从 transport 走到 Proc。
+
+读完基础 API 后进入 :doc:`端到端闭环工程 <closed-loop-project>`：把 Proto、Bazel、Publisher、DAG Component、输出 Writer 与严格 Observer 放在同一条链里，再回到 :doc:`最小 C++ Runtime <cpp-implementation-lab>` 亲自编译 Node/Reader/Writer 的缩小版。最后用 :doc:`Apollo Planning 案例 <case-study-apollo-planning>` 检查这些机制如何进入真实规划流水线。""",
     "ecal": """把问题收敛到一次相机消息：先在 :doc:`入门 <foundations>` 中分清发布端与订阅端，再读 :doc:`注册和软状态 <registration-soft-state>`，理解它们如何发现彼此。只有端点已经匹配，:doc:`Publisher 发送 <publisher-discovery-send>` 中的 SHM、UDP 和 TCP 选择才有实际意义。
 
 接着追 :doc:`共享内存与消息寿命 <shm-memory-protocol>`：同一帧何时被复制、哪一个槽位能被覆盖，为什么 zero-copy 不等于无条件零拷贝；最后沿 :doc:`Subscriber 交付 <subscriber-delivery>` 把网络线程与业务回调分开。写自己的版本之前，带着这些状态关系进入 :doc:`C++ 实现实验 <cpp-design-lab>` 和 :doc:`MQTT Bridge 案例 <case-study-mqtt-bridge>`。""",
