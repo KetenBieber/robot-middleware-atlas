@@ -9,3 +9,4 @@
    generated/yarp/index
    generated/ecal/index
    generated/ethercat/index
+   generated/soem/index

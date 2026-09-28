@@ -27,6 +27,7 @@ PROJECTS = {
     "zenoh": ("Eclipse Zenoh", "9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5"),
     "lcm": ("LCM", "ad0c54cee0ec048ef12357c34349ec1443158864"),
     "ethercat": ("IgH EtherCAT Master", "61cc654f5b721ddd54df0f58bdd34106d91c5359"),
+    "soem": ("SOEM", "304d1c05eab77dc0d426f1a5cf09c8cc7dc03713"),
 }
 
 PROJECT_OVERVIEWS = {
@@ -49,6 +50,7 @@ PROJECT_OVERVIEWS = {
 
 阅读 YARP 的主线是一次 ``Port::write`` 如何序列化并扇出到多条连接，以及对端怎样经 InputUnit 进入 PortReader。同步写、后台写、不同 Carrier、慢连接与断开竞态会改变 buffer 所有权和调用者阻塞时间，也决定它更适合可靠数据流还是只关心最新状态的控制链路。""",
     "ethercat": """IgH EtherCAT Master 把 Linux 主机、网卡、EtherCAT 帧、从站状态机和周期过程数据组织成一条面向工业控制的实时通信链。应用层看到 Master、Domain、PDO 与周期收发 API；源码层真正决定抖动、数据年龄和故障恢复的，是 FMMU/process image、datagram queue、非阻塞 FSM、Device/NIC 与 Distributed Clocks 怎样协同。\n\n本专题固定到 stable-1.6 / 1.6.13（61cc654f）。课程明确分成两部分：前半先从协议与控制系统第一性原理建立 EtherCAT 软件栈理论，后半再沿 ``ecrt_*`` public API 进入 Master/Domain、Datagram、FSM、Device/NIC 和 DC 的真实源码实现。""",
+    "soem": """SOEM 是轻量的用户态 EtherCAT MainDevice C Library。它不建立独立内核 Master，而是把 ``ecx_contextt``、固定容量 slave/group/frame 数组、IOmap、raw socket OSHW 与 OSAL 组合成可直接嵌入控制应用的协议运行时。\n\n本专题固定到 v2.0.0（304d1c05）。阅读重点不是重复 EtherCAT 协议名词，而是把同一套 PDO/FMMU/WKC/DC 语义和 IgH 做架构对照：Context 与对象图、固定 frame slot 与 Datagram queue、application IOmap 与 Domain、raw socket 与 net_device，以及应用自己承担的实时线程和恢复策略。""",
 }
 
 PROJECT_EXTRAS: dict[str, list[str]] = {}
@@ -146,6 +148,25 @@ ARTICLE_ORDER = {
         "design-recap",
     ],
 
+    "soem": [
+        "overview",
+        "architecture-map",
+        "context-fixed-arrays",
+        "linux-raw-socket",
+        "frame-buffer-index",
+        "datagram-primitives",
+        "slave-discovery",
+        "pdo-sm-fmmu",
+        "iomap-cyclic",
+        "mailbox-coe",
+        "distributed-clocks",
+        "redundancy",
+        "realtime-osal",
+        "fault-recovery",
+        "soem-vs-igh",
+        "design-recap",
+    ],
+
 }
 CYBER_ARTICLE_SECTIONS = [
     ('从空目录建立系统全貌', ['architecture-map']),
@@ -185,6 +206,33 @@ ETHERCAT_ARTICLE_SECTIONS = [
     ]),
 ]
 
+
+SOEM_ARTICLE_SECTIONS = [
+    ("运行时骨架：Context、网卡与 Frame Slot", [
+        "architecture-map",
+        "context-fixed-arrays",
+        "linux-raw-socket",
+        "frame-buffer-index",
+        "datagram-primitives",
+    ]),
+    ("配置编译：从 Slave 到 IOmap", [
+        "slave-discovery",
+        "pdo-sm-fmmu",
+        "iomap-cyclic",
+    ]),
+    ("控制面与工业能力", [
+        "mailbox-coe",
+        "distributed-clocks",
+        "redundancy",
+    ]),
+    ("实时、故障与架构对照", [
+        "realtime-osal",
+        "fault-recovery",
+        "soem-vs-igh",
+        "design-recap",
+    ]),
+]
+
 GUIDE_ORDER: dict[str, list[str]] = {
     "cyber": ["use-environment", "use-pubsub", "closed-loop-project", "use-component-operations", "case-study-apollo-planning"],
     "ecal": ["use-environment", "use-pubsub", "closed-loop-project", "use-operations", "case-study-mqtt-bridge"],
@@ -193,6 +241,7 @@ GUIDE_ORDER: dict[str, list[str]] = {
     "orocos": ["use-environment", "use-component-ports", "use-operations", "case-study-rtt-ros"],
     "yarp": ["use-environment", "use-ports-rpc", "use-operations", "case-study-icub-navigation"],
     "ethercat": ["use-environment", "closed-loop-project", "real-hardware-deployment"],
+    "soem": ["case-study-official-ec-sample", "case-study-leggedrobotics-soem-interface", "case-study-elfin-robot-ros2", "case-study-ipe-ros2-control"],
 }
 
 PROJECT_STORIES = {
@@ -215,6 +264,7 @@ PROJECT_STORIES = {
 
 有了对象与路由模型，再走一次 :doc:`Publisher 到 Transport <publisher-routing>`，随后进入 :doc:`Query、Reply 和 Final <query-lifecycle>`，亲自模拟两路回复、一条超时和最后的回收。完成 :doc:`背压与关闭 <backpressure-close>` 的故障回放以后，再读 :doc:`Rust/C++ 设计实验 <rust-cpp-design-lab>` 以及 :doc:`rmw_zenoh 案例 <case-study-rmw-zenoh>`。""",
     "ethercat": """先读 :doc:`软件栈总图 <theory-stack>`，把 EtherCAT 与普通 Ethernet、CAN/CANopen、ROS 2 pub/sub 的职责边界分开；随后沿 :doc:`帧与 Datagram <theory-frame-datagram>`、:doc:`PDO/FMMU/过程映像 <theory-pdo-process-image>`、:doc:`AL 状态与邮箱 <theory-state-mailbox>`、:doc:`Distributed Clocks <theory-distributed-clocks>` 和 :doc:`实时性 <theory-realtime>` 建立协议与控制系统直觉。\n\n进入源码以后，从 :doc:`对象架构 <architecture-map>` 和 :doc:`Master 生命周期 <master-lifecycle>` 建立 ownership，再追 :doc:`Domain 与 process image <domain-process-image>`、:doc:`周期收发 <cyclic-send-receive>` 和 :doc:`Datagram/Frame <datagram-frame>` 的数据面；最后进入 :doc:`Slave FSM 与 mailbox <slave-fsm-mailbox>`、:doc:`Device/NIC <device-nic-runtime>`、:doc:`DC 实现 <distributed-clocks>` 与 :doc:`实时并发 <realtime-concurrency>`。读完源码后进入 :doc:`FakeEtherCAT 环境 <use-environment>` 与 :doc:`双进程闭环工程 <closed-loop-project>`，用 controller/plant 把 PDO 和 process image 真正跑成闭环；最后按 :doc:`真机部署 <real-hardware-deployment>` 把同一应用骨架迁移到独立 NIC、真实从站、WKC、DC 和实时调度。所有源码结论统一锁定 stable-1.6 / 1.6.13 的 ``61cc654f5b721ddd54df0f58bdd34106d91c5359``。""",
+    "soem": """从 :doc:`总览 <overview>` 开始先回答“为什么同样是 EtherCAT Master，SOEM 可以只是一套用户态 C Library”。随后沿 :doc:`Context 与固定数组 <context-fixed-arrays>`、:doc:`Linux RAW Socket <linux-raw-socket>`、:doc:`Frame Buffer/Index <frame-buffer-index>` 和 :doc:`Datagram 原语 <datagram-primitives>` 建立用户态数据面。\n\n配置链继续走 :doc:`Slave Discovery <slave-discovery>` → :doc:`PDO/SM/FMMU <pdo-sm-fmmu>` → :doc:`IOmap 与周期收发 <iomap-cyclic>`；控制面再进入 :doc:`CoE/SDO <mailbox-coe>`、:doc:`Distributed Clocks <distributed-clocks>` 与 :doc:`双网口冗余 <redundancy>`。最后用 :doc:`OSAL 与实时线程 <realtime-osal>`、:doc:`WKC 与故障恢复 <fault-recovery>`、:doc:`SOEM vs IgH <soem-vs-igh>` 和 :doc:`设计复盘 <design-recap>` 闭环。\n\n主站本体读完后，真实案例按“原生 API → 工程封装 → 机器人驱动 → ros2_control/CiA-402”递进：先看 :doc:`官方 ec_sample <case-study-official-ec-sample>`，再看 :doc:`ETH RSL soem_interface <case-study-leggedrobotics-soem-interface>`、:doc:`Elfin ROS2 机械臂 <case-study-elfin-robot-ros2>` 与 :doc:`IPE ros2_control <case-study-ipe-ros2-control>`。案例只用于验证设计机制怎样进入实际项目，SOEM v2.0.0 本体仍以 ``304d1c05eab77dc0d426f1a5cf09c8cc7dc03713`` 为源码真值。""",
 }
 
 INTERNAL_ONLY_SLUGS = {"reconstruction"}
@@ -363,6 +413,42 @@ def ethercat_learning_path() -> str:
 '''
 
 
+def soem_course_navigation() -> str:
+    blocks = ['''先看总路线：同样是 EtherCAT，SOEM 为什么是另一种主站架构
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. toctree::
+   :maxdepth: 2
+
+   overview
+''']
+    for title, slugs in SOEM_ARTICLE_SECTIONS:
+        entries = '\n'.join(f'   {slug}' for slug in slugs)
+        underline = '~' * 80
+        blocks.append(
+            f'''{title}
+{underline}
+
+.. toctree::
+   :maxdepth: 2
+
+{entries}
+'''
+        )
+    return '\n'.join(blocks)
+
+
+def soem_learning_path() -> str:
+    return """
+怎样读这个主站专题
+------------------
+
+SOEM 专题不重复一遍 EtherCAT 协议词典，而是固定到 v2.0.0 / 304d1c05，从“用户态 Library 如何独立完成一个 Master”出发。先沿 Context、RAW Socket、固定 frame slot 与 Datagram primitive 建立运行时骨架，再进入 Slave Discovery、PDO/SM/FMMU 和 IOmap 的配置编译链；随后补齐 CoE/SDO、Distributed Clocks、双网口冗余、OSAL 实时边界和故障恢复。
+
+本体之后进入真实代码，而不是自制 Demo。官方 ec_sample 给出原生 SOEM 调用的基准线；ETH RSL soem_interface 展示 Bus/Slave/Manager、typed PDO staging 与 WKC 门控；Elfin ROS2 展示应用自管 1 ms 周期线程、直接 IOmap 与 reconfig/recover；IPE ros2_control 案例继续展示 CiA-402、DC、PDO health 与 ROS 2 HardwareInterface 的责任分层。外部项目可能携带较老 SOEM API，因此用于审查工程设计，不替代 v2.0.0 本体源码真值。
+"""
+
+
 def write_project_index(
     project: str,
     pages: list[tuple[str, str]],
@@ -451,6 +537,19 @@ def write_project_index(
     if project == 'ethercat':
         source_navigation = ethercat_course_navigation()
         learning_path = ethercat_learning_path()
+    if project == 'soem':
+        source_navigation = soem_course_navigation()
+        learning_path = soem_learning_path()
+        if guide_entries:
+            guide_navigation = f'''
+真实工程案例
+------------
+
+.. toctree::
+   :maxdepth: 2
+
+{guide_entries}
+'''
     text = f"""{name}
 {underline}
 
@@ -468,6 +567,14 @@ def write_project_index(
 
 def main() -> None:
     GENERATED.mkdir(parents=True, exist_ok=True)
+    # docs/generated is disposable build input. Remove stale Markdown pages
+    # before regeneration so deleted/renamed source or guide pages cannot
+    # survive as orphan Sphinx documents.
+    for project in PROJECTS:
+        folder = GENERATED / project
+        if folder.is_dir():
+            for stale in folder.glob('*.md'):
+                stale.unlink()
     grouped: dict[str, list[tuple[str, str]]] = {key: [] for key in PROJECTS}
     guide_grouped: dict[str, list[tuple[str, str]]] = {key: [] for key in PROJECTS}
     for path in sorted(CONTENT.glob("*.md")):

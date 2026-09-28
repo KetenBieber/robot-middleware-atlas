@@ -29,7 +29,7 @@ Choosing a middleware project
      - pub/sub、query、storage 与跨网路由
      - 不是硬实时控制执行器
    * - 实时工业总线/主站栈
-     - IgH EtherCAT Master
+     - IgH EtherCAT Master、SOEM
      - 周期过程数据、从站状态机、时钟同步与网卡数据面
      - 不是通用进程间消息总线
 
@@ -42,8 +42,8 @@ Choosing a middleware project
 * 学习完整可审计内核：先读 LCM，再与其他大型框架对照。
 * 工业伺服与 I/O 实时链路：Orocos RTT / 专用 RT loop → EtherCAT Master → 驱动与从站对象字典。
 
-六个中间件与一个主站栈解决的不是同一个问题
-------------------------------------------
+六个中间件与两种 EtherCAT 主站实现解决的不是同一个问题
+------------------------------------------------------------
 
 .. list-table::
    :header-rows: 1
@@ -97,6 +97,12 @@ Choosing a middleware project
      - EtherCAT 线性总线、从站状态与 DC
      - 周期过程数据与工业伺服链路
      - 上层组件调度、通用消息语义
+   * - SOEM
+     - ``ecx_contextt`` / IOmap
+     - 应用自己的周期线程直接调用 SOEM Library
+     - EtherCAT 线性总线、用户态 RAW Socket
+     - 轻量、可移植、源码短且易嵌入控制进程
+     - 实时调度、故障策略与线程组织更多由应用承担
 
 这张表不能替代容量与故障分析。例如 Cyber 和 Orocos 都能执行组件，但前者强调大型数据流和协程调度，后者强调 Activity、Port policy 与可推理的实时组件生命周期。eCAL 和 LCM 都能做发布订阅，但 eCAL 用发现与多 transport 承担更多运行时工作，LCM 则把事件循环、丢包恢复和应用确认更多留给使用者。
 
@@ -198,5 +204,6 @@ EtherCAT Master 应放在另一条更靠近设备的数据路径上：控制线�
 * 学习可插拔协议与命名：阅读 :doc:`YARP <generated/yarp/index>` 的 PortCore、Protocol 和 Carrier。
 * 学习 Rust 异步路由：阅读 :doc:`Zenoh <generated/zenoh/index>` 的 Session、Resource、Route cache 和 Query Final。
 * 学习工业实时主站：从 :doc:`IgH EtherCAT Master <generated/ethercat/index>` 的周期数据路径开始，随后进入 Domain/process image、datagram/FSM、device/NIC 与 DC。
+* 学习轻量用户态 EtherCAT 主站：继续读 :doc:`SOEM <generated/soem/index>`，重点比较 Context/固定数组、RAW Socket、IOmap 与 frame-index 数据面如何替代 IgH 的内核对象图。
 
 每个专题首页都按“功能需求 → 组件地图 → 源码主链 → 语言机制 → 设计取舍与性能 → 最小复刻 → 实际案例”给出入口。选择项目之后不必再从文件名猜阅读顺序。

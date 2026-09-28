@@ -1,4 +1,4 @@
-"""Structural regression gate for the six pinned middleware courses.
+"""Structural regression gate for the pinned middleware and EtherCAT master courses.
 
 This verifies the editorial source tree, not the correctness of upstream code.
 Run deep source review separately before claiming that a mechanism is verified.

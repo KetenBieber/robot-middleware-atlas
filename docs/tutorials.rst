@@ -15,7 +15,7 @@ Tutorials
 
 第一次接触某个项目时，先读功能介绍与组件地图，知道它解决什么问题以及各模块为何存在；随后走完源码主链和语言机制，再用基础教程验证 API 现象，最后阅读真实项目案例。若本机环境暂时不可用，也可以先完成源码与最小复刻设计，不必把安装问题当成理解架构的前置条件。
 
-七类实现坐标
+八类实现坐标
 ------------
 
 * Apollo Cyber RT：自动驾驶组件运行时、协程调度与有界数据缓存。
@@ -25,6 +25,7 @@ Tutorials
 * Eclipse Zenoh：边缘数据空间、声明、路由与背压。
 * LCM：轻量 UDP 多播、分片、接收队列、类型与日志。
 * IgH EtherCAT Master：工业实时以太网主站、PDO 过程映像、datagram、从站状态机与周期收发。
+* SOEM：轻量用户态 EtherCAT MainDevice Library，Context、固定 frame slot、IOmap、RAW Socket 与 OSAL/OSHW。
 
 项目入口
 --------
@@ -57,6 +58,10 @@ Tutorials
    * - :doc:`IgH EtherCAT Master <generated/ethercat/index>`
      - Master/Domain/PDO 配置、周期收发、状态监测与 DC
      - process image、datagram、FSM、device/NIC、实时与关闭边界
+
+   * - :doc:`SOEM <generated/soem/index>`
+     - Context、IOmap、RAW Socket、frame index、PDO/FMMU、WKC/DC 与应用侧实时线程
+     - 真实案例：官方 ec_sample、ETH RSL soem_interface、Elfin ROS2、IPE ros2_control/CiA-402
 
 从最小单元到完整系统
 --------------------
