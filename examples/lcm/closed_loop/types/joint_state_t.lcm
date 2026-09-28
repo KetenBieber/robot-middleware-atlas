@@ -1,0 +1,7 @@
+package atlas;
+struct joint_state_t {
+    int64_t timestamp_us;
+    int64_t sequence;
+    int32_t joint_count;
+    double joints[joint_count];
+}

@@ -679,7 +679,7 @@ LCM 自身没有复杂路由计算，最容易主导尾延迟的是：应用多�
    | 网络 callback 为什么不能随意修改仿真状态？
 ~~~
 
-这些问题分别进入[类型编码与日志](types-and-eventlog.md)、[Provider](provider-vtable.md)、[UDPM 分片](udpm-publish-protocol.md)、[接收与缓冲](receive-reassembly.md)、[订阅与分发](subscription-dispatch.md)、[C ABI/C++ 对象设计](c-abi-cpp-design-lab.md)与[设计复盘](design-recap.md)。对应的实际操作则见[安装与网络](use-environment.md)、[类型与收发](use-pubsub-types.md)、[日志与故障演练](use-operations.md)和[Drake 仿真](case-study-drake.md)。
+这些问题分别进入[类型编码与日志](types-and-eventlog.md)、[Provider](provider-vtable.md)、[UDPM 分片](udpm-publish-protocol.md)、[接收与缓冲](receive-reassembly.md)、[订阅与分发](subscription-dispatch.md)、[C ABI/C++ 对象设计](c-abi-cpp-design-lab.md)与[设计复盘](design-recap.md)。对应的实际操作则见[安装与网络](../../guides/lcm/use-environment.md)、[类型与收发](../../guides/lcm/use-pubsub-types.md)、[日志与故障演练](../../guides/lcm/use-operations.md)和[Drake 仿真](../../guides/lcm/case-study-drake.md)。
 
 每完成一环，都试着不用背类名回答四个问题：**字节现在在哪里、由谁拥有、下一次执行在哪条线程、发生丢弃或关闭后谁负责释放。** 这四个答案能把“会用 LCM”与“能从零设计同类运行时”真正连起来。
 

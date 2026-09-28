@@ -16,7 +16,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = {
-    "content/articles/lcm/foundations.md": "### 一个能运行的 callback trampoline 实验",
+    "content/articles/lcm/c-abi-cpp-design-lab.md":
+        "### 用完整的 C++17 实验理解 trampoline，再进入真实模板",
+    "content/articles/lcm/foundations.md":
+        "### 一个能运行的 callback trampoline 实验",
     "content/articles/lcm/provider-vtable.md": "### 先写一个能运行的 C++17 缩小版",
     "content/articles/lcm/udpm-publish-protocol.md":
         "### 用独立 C++17 实验预测每一片的 offset",
@@ -30,6 +33,12 @@ C_EXAMPLES = {
     "content/articles/lcm/provider-vtable.md":
         "### 我们先用 C 写一个最小运行时分派，而不是背 vtable 的定义",
 }
+EXTRA_CPP_EXAMPLES = [
+    ("content/articles/lcm/subscription-dispatch.md",
+     "### 再追问一步：准入计数并没有记住“是哪一条消息”"),
+    ("content/articles/lcm/receive-reassembly.md",
+     "### 让重复片真正触发一次“假的重组成功”"),
+]
 
 
 def extract(path: Path, section: str, language: str = "cpp") -> str:
@@ -58,6 +67,9 @@ def main() -> int:
     samples = [
         (relative, section, "cpp", compiler, "c++17")
         for relative, section in EXAMPLES.items()
+    ] + [
+        (relative, section, "cpp", compiler, "c++17")
+        for relative, section in EXTRA_CPP_EXAMPLES
     ] + [
         (relative, section, "c", c_compiler, "c11")
         for relative, section in C_EXAMPLES.items()

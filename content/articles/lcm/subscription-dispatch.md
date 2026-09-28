@@ -196,6 +196,70 @@ int lcm_try_enqueue_message(lcm_t *lcm, const char *channel)
 这样节省 payload 内存，但并不等于每个订阅都有独立消费线程：如果 A 在 M1 的 callback 里耗费 20 ms，B 和 C 连 M1 都还没处理，更不可能越过它先处理 M2。**独立配额隔离的是消息准入，并非 CPU 时间。**
 
 真实代码里还有一个时序约束：上述对应关系依赖 provider 按接收顺序将完成的消息入队，再由单个 `handle()` 调用链按该顺序分发；它不是可在任意应用并发调度和订阅变更条件下使用的事务性投递承诺。要实现“控制器永远拿最新帧”，不能只把 A 配额设为 1；固定代码在已满时拒绝的是**新消息**，因此需要在应用自己的有界覆盖槽中进一步实现 drop-oldest/latest-only。
+### 再追问一步：准入计数并没有记住“是哪一条消息”
+
+上面的 M1/M2/M3 表有一个**隐藏前提**：三条消息都已经入队以后，应用才依次处理；接收线程没有在两次 handle 之间继续给同一订阅增加新资格。把这个前提去掉，固定源码中的两段计数操作会产生很值得研究的边界。
+
+`lcm_try_enqueue_message()` 只给有空位的 subscription 增加 `num_queued_messages`，并没有在消息描述符中保存“B 订阅被准入”这个事实；`lcm_dispatch_handlers()` 面对当前公共 FIFO 消息时，只检查 B **当时的计数**是否大于零，决定是否调用 B。于是，刚刚为 M2 预留的计数有机会被队首的 M1 消费。
+
+让 A 始终接收，B 只允许一条 pending，按照下面的时序安排 receiver 与 handle：
+
+| 时刻 | 动作 | B pending | 公共 FIFO | 对 B 的真实影响 |
+|---|---|---:|---|---|
+| t0 | 接收 M0，A/B 接受 | 1 | M0 | M0 预留 |
+| t1 | 接收 M1，B 满，A 接受 | 1 | M0,M1 | M1 被 B 拒绝 |
+| t2 | handle M0，B 计数减一 | 0 | M1 | B 执行 M0 |
+| t3 | 接收 M2，B 获得新资格 | 1 | M1,M2 | M2 预留 |
+| t4 | handle M1，发现 B 计数大于零 | 0 | M2 | **B 实际执行 M1** |
+| t5 | handle M2，B 已无资格 | 0 | 空 | **B 反而跳过 M2** |
+
+公共 FIFO 并没有乱序，错配的是**“哪条消息被允许交给 B”与“B 实际处理了哪条”之间的对应关系**。若只需要按容量限制大致采样，这种只存计数的方案很简洁；若每个被准入的业务命令都必须严格匹配 message ID，它不能提供这种逐消息的投递证明。
+
+用下面一份完全独立的 C++17 教学程序，在一条线程里按同样的交错次序执行，就能看到这个差异。`admitted` 是为了教学观测而额外保存的字段；固定 LCM 的共享消息队列没有对应的逐订阅标记。
+
+~~~cpp
+#include <cassert>
+#include <deque>
+#include <iostream>
+#include <string>
+
+struct Message {
+    std::string id;
+    bool admitted;
+};
+std::deque<Message> fifo;
+int b_pending = 0;
+
+void receive(const char* id) {
+    const bool admitted = b_pending < 1;
+    if (admitted) ++b_pending;
+    // A 无限制，总会为这条消息保留公共 payload。
+    fifo.push_back({id, admitted});
+}
+
+void handle_one() {
+    Message m = fifo.front();
+    fifo.pop_front();
+    const bool called = b_pending > 0;
+    if (called) --b_pending;
+    std::cout << m.id << ": reserved=" << m.admitted
+              << " called=" << called << '\n';
+    if (m.id == "M1") assert(!m.admitted && called);
+    if (m.id == "M2") assert(m.admitted && !called);
+}
+
+int main() {
+    receive("M0");
+    receive("M1");
+    handle_one();
+    receive("M2");
+    handle_one();
+    handle_one();
+    assert(b_pending == 0 && fifo.empty());
+}
+~~~
+
+如果重新设计一个**需要严格逐消息准入**的总线，可以把每条消息对应的订阅资格保存为位图/引用集合，或为重要订阅建立独立有界队列。两种方案都会增加索引和回收成本，但换来了“哪条消息被准入”可以独立验证的语义。工业控制的执行命令通常还需要跨进程 ACK、deadline 和幂等处理；订阅计数绝不等价于可靠命令投递。
 ## 单副本与订阅者隔离的折中
 
 一份 payload 对多个 handler 的设计节省内存：
@@ -591,7 +655,7 @@ GetHandlersLocked()  // caller already owns lock
 
 `max_num_queued_messages <= 0` 表示不设上限。默认值为 30，可按 subscription 修改。
 
-上限为 N 的真实含义是：最多 N 条尚未被该 subscription 消费的 provider 消息为它保留投递资格。达到上限后，新消息对该订阅者被丢弃，旧消息继续等待。
+上限为 N 的直接含义是：该 subscription 至多累计 N 次尚未消费的**准入计数**。达到上限时，接收端不再给它增加计数；但只要另一订阅仍接纳消息，这条消息仍可能进入公共 FIFO。由于计数并没有与具体消息 ID 绑定，在接收线程与 handle 交错运行时，刚刚为后续消息增加的计数也可能被队首另一条消息先消费。前面的 M0/M1/M2 实验给出了确切时序，因此这里不能把配额描述成严格的“逐消息保留 N 条”。
 
 这是 drop-newest 策略，而许多控制系统更希望 drop-oldest、只保留最新状态。LCM 的全局单副本 FIFO 很难为不同订阅者同时执行不同的 payload 淘汰策略；若需要 latest-only，应在 callback 后的应用队列中实现覆盖槽。
 
@@ -633,6 +697,16 @@ class SubscriptionIndex {
 使用 weak pointer 的 channel cache 可避免缓存反向延长已取消订阅寿命。dispatch 先锁定一组 shared pointer 快照，再释放 index mutex 执行 callback。
 
 仍需单独实现 pending quota，因为 shared pointer 只解决内存寿命，不解决过载策略。
+
+## 最后一道边界：C 层延迟删除并不等于 C++ 用户对象自动安全
+
+上一节的 `callback_scheduled` 与 `marked_for_deletion` 解决了一个非常具体的问题：当本轮分发已经保存了一组 subscription 指针时，不能在某只 callback 里立即删除其中一只，令下一次循环访问悬空地址。但这套协议保护的是 **LCM 自己的 subscription 节点**，不是用户自己分配的全部对象。
+
+假设 A 的 callback 调用 `unsubscribe(B)`，同时另一条应用线程认为 B 已经注销，于是马上 `delete b_handler`。如果正在执行中的 B callback 或另一次尚未完成的用户工作仍持有该对象地址，LCM 对 subscription 指针的延迟释放并不能让那根裸指针恢复安全。固定 C++ wrapper 的适配对象中仍然存放用户 `Handler*`；它不是自动管理 Handler 生命周期的共享所有权句柄。
+
+因此需要把应用的两层协议明确分开：第一层是 LCM 在一次 `lcm_dispatch_handlers()` 内冻结当前迭代范围、锁外执行 callback、最后回收标记的节点；第二层由应用负责停止其他 `handle` 调用、退出所有在途 Handler、管理异步队列及最终销毁业务对象。不能把 `unsubscribe()` 返回视为另一条线程上的所有用户操作都已结束，更不能从“持有 `handle_mutex`”推导出整个进程不存在其他并发访问。
+
+一个完整的订阅语义测试应同时记录：A 与 B 的注册顺序、回调内 A 取消 B、B 是否在本轮仍被跳过、回调中新加入 C 是否延迟到下一条消息、A/B/C 不同容量下哪条消息得到准入，以及正常和异常退出时有没有仍在使用 `userdata` 的业务代码。这些都是源码里的状态字段实际维护的因果关系，不是简单的“正则匹配成功”。
 
 ## 分发层的设计结论
 

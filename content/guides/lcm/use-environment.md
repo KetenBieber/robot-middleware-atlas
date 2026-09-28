@@ -6,6 +6,27 @@ LCM 的核心依赖很少。Unix 源码构建主要需要 GLib 与 CMake 或 Mes
 
 本文命令和 API 对照源码提交 `ad0c54ce`。教程先建立一个能够生成类型、运行 typed pub/sub、记录 Provider URL 的最小工程，再解释跨主机和日志 provider；这样网络问题、schema 问题与业务问题不会一开始就混在一起。
 
+## 先跑通最小链路，再逐步引入跨主机环境
+
+真正的第一次实验应从“本机两进程、同一 URL、同一 schema”开始，不要一开始就把组播、CMake、回放和控制线程混在一起。`LCM.good()` 只说明 provider 创建成功；`publish()` 返回值只反映该 provider 的本地调用结果；只有接收程序持续调用 `handle()` 并进入业务 callback，才说明一次真实分发已经完成。
+
+~~~text
+本机 publisher / subscriber
+    | 编码一致？channel 一致？URL 一致？
+    v
+打印 sequence、源时间、接收时间
+    | callback 有无执行？收到的数据是否新鲜？
+    v
+跨主机，先检查 multicast 路由、防火墙与网卡
+    | 抓包验证 datagram 是否真正到达接收主机
+    v
+测试丢包、callback 过载、退出与日志回放
+~~~
+
+建议初次实验显式指定 `udpm://239.255.76.67:7667?ttl=0`，并给项目另选独立地址和端口；改为跨主机时双方统一使用适当的 `ttl=1` 与组播设置。TTL 不是安全隔离，也不会自动选择正确网卡。若 `good()==true` 但没有收到数据，先检查 `handle()` 是否真正运行，再检查 channel、地址/端口与网卡，随后再看抓包与 schema；不要直接把这种情况判断为 UDP 丢包。源码里的接收线程只负责收包、重组、入队和通知，真正执行 callback 的仍是应用的 handle 线程。
+
+通过本机验证后，再沿[类型和发布订阅](use-pubsub-types.md)加入业务序号与时间戳，最后用[运维指南](use-operations.md)检查分片、队列容量及日志，不要依赖一条没有观测数据的“收到了”输出。
+
 ## 运行时模型
 
 LCM 没有独立的名字服务。使用相同 Provider URL 的进程加入同一通信域，发布者直接把带 channel 名的报文交给 provider：
@@ -246,8 +267,19 @@ user callback
 
 如果 `lcm-spy` 和抓包都看不到 channel，优先查 URL、组播接口、TTL、交换机与 sender；如果 spy 能看到而业务程序没有，问题已经缩到应用侧：订阅表达式、生成类型、handle 频率和 callback。若短消息稳定、大消息明显更差，再查 MTU、LC03/IP 分片与接收缓冲，而不是继续增大 subscription capacity。
 
-这个排查顺序和源码结构是一一对应的：发送端见 [UDPM 协议](udpm-publish-protocol.md)，接收缓冲与通知见 [接收与重组](receive-reassembly.md)，应用准入与回调见 [订阅与分发](subscription-dispatch.md)。当现象能被定位到其中一层，才调整该层参数。
+这个排查顺序和源码结构是一一对应的：发送端见 [UDPM 协议](../../articles/lcm/udpm-publish-protocol.md)，接收缓冲与通知见 [接收与重组](../../articles/lcm/receive-reassembly.md)，应用准入与回调见 [订阅与分发](../../articles/lcm/subscription-dispatch.md)。当现象能被定位到其中一层，才调整该层参数。
 
+
+## 先用四次实验，把网络问题和业务问题拆开
+
+第一次安装完成，不要马上把 LCM 塞进复杂的机器人节点。先单独启动一个短消息 Publisher 和一个只调用 `handleTimeout()` 的 Subscriber，打印发送序号、接收序号、源时间和本地接收时间。随后做四次有明确判据的实验：
+
+1. **同机同 URL：**发送者和接收者使用同一组播地址与端口，发送方每秒一条短消息；若发送正常而回调始终不运行，先确认 `handle()` 确实被调用，再检查订阅正则和生成类型指纹。
+2. **同机异 URL：**仅修改接收者端口，应看不到上一条消息。这样能证明你没有意外连接到别的 LCM 实例，而不是“spy 恰好显示了消息”。
+3. **跨机同 URL：**在发送端与接收端分别抓包；先确认 datagram 是否抵达另一台主机，再判断是组播路由、交换机 IGMP、操作系统防火墙还是 LCM 解码问题。发端 `publish() == 0` 绝不能当成收端已处理的证据。
+4. **回调停顿：**在接收侧人为增加一个仅供测试的 15 ms 延迟，并提高发送频率；分别记录接收数、处理序号、数据年龄和丢失区间。消息龄期不断增大时，优先检查 callback 与 `handle()` 频率，而不是先无限扩大 socket buffer。
+
+每次实验都保存规范化后的 Provider URL、channel、消息 schema 提交和操作系统/网卡信息。尤其不要把 TTL=0 的“仅本机”实验结果拿来断言跨网段组播可达。此处的验收针对通信边界；生产环境的端到端 deadline、认证以及可靠命令协议仍须独立设计。
 
 ## 环境验收
 

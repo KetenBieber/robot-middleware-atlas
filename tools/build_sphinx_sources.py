@@ -69,13 +69,13 @@ ARTICLE_ORDER = {
     ],
     "lcm": [
         "overview",
+        "foundations",
         "architecture-map",
         "provider-vtable",
         "udpm-publish-protocol",
         "receive-reassembly",
         "subscription-dispatch",
         "types-and-eventlog",
-        "foundations",
         "c-abi-cpp-design-lab",
         "design-recap",
     ],
@@ -219,6 +219,26 @@ def normalize_page(block: str) -> tuple[str, str]:
     if not inserted_contents:
         normalized[1:1] = ["", "```{contents} 本页目录", ":depth: 2", ":local:", "```", ""]
     return title, "\n".join(normalized).rstrip() + "\n"
+
+
+def rewrite_generated_project_links(page: str, project: str) -> str:
+    """Keep source-relative links valid after articles/guides share one folder.
+
+    content/articles/<project> and content/guides/<project> both become
+    docs/generated/<project>. Rewrite only explicit same-project crosslinks.
+    """
+    pattern = re.compile(
+        r"\]\(\.\./\.\./(?:articles|guides)/([^/]+)/"
+        r"([^/)#]+\.md)(#[^)]*)?\)"
+    )
+
+    def replace(match: re.Match[str]) -> str:
+        if match.group(1) != project:
+            return match.group(0)
+        return "](" + match.group(2) + (match.group(3) or "") + ")"
+
+    return pattern.sub(replace, page)
+
 
 
 def cyber_course_navigation() -> str:
@@ -388,6 +408,7 @@ def main() -> None:
         for path in paths:
             slug = path.stem
             title, page = normalize_page(path.read_text(encoding="utf-8"))
+            page = rewrite_generated_project_links(page, project)
             folder = GENERATED / project
             folder.mkdir(parents=True, exist_ok=True)
             write_if_changed(folder / f"{slug}.md", page)
@@ -407,6 +428,7 @@ def main() -> None:
         for path in paths:
             slug = path.stem
             title, page = normalize_page(path.read_text(encoding="utf-8"))
+            page = rewrite_generated_project_links(page, project)
             folder = GENERATED / project
             folder.mkdir(parents=True, exist_ok=True)
             write_if_changed(folder / f"{slug}.md", page)

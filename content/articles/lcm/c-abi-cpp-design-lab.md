@@ -335,6 +335,66 @@ LCMMHSubscription<state_t, Handler>
 同理，`MessageType msg` 只是 trampoline 栈上的临时对象；用户 callback 拿到的 `msg*` 只在该回调期间有效。若后台 worker 还要使用字段，应在 callback 内复制业务需要的数据，不能把这根指针直接保存起来。
 
 最后，解码失败和业务失败属于不同边界。固定 trampoline 在 `decode()<0` 时打印错误并返回，不调用用户 Handler；而用户 Handler 如果抛出 C++ 异常，固定代码没有 catch 将其转换为 C 错误码。应用最好在自身回调边界捕获异常并转成明确的停止/降级状态，而不是依赖异常跨越 C runtime 和资源回收路径传播。
+### 用完整的 C++17 实验理解 trampoline，再进入真实模板
+
+业务开发者的第一个问题是：`LCM::subscribe("POSE", &Handler::onPose, &handler)` 传入的是 C++ 成员函数，为什么 C 核心最终只保存一个普通函数指针和 `void* userdata`？这不是强制转换可以解决的问题。成员函数需要一只具体的 `this` 对象，而普通 C callback 并不隐含 `this`。
+
+先写一个没有网络、可以单独编译的小程序：
+
+~~~cpp
+#include <cassert>
+#include <cstddef>
+#include <string>
+using CCallback = void (*)(const void*, std::size_t, void*);
+struct CSubscription { CCallback callback; void* userdata; };
+void dispatch(CSubscription s, const void* data, std::size_t n) {
+    s.callback(data, n, s.userdata);
+}
+class Handler {
+public:
+    static void trampoline(const void* data, std::size_t n, void* context) {
+        auto* self = static_cast<Handler*>(context);
+        self->onPose(data, n);
+    }
+    CSubscription subscribe() { return {&trampoline, this}; }
+    void onPose(const void* data, std::size_t n) {
+        latest.assign(static_cast<const char*>(data), n);
+    }
+    std::string latest;
+};
+int main() {
+    Handler handler;
+    CSubscription subscription = handler.subscribe();
+    const char bytes[] = {'4', '2'};
+    dispatch(subscription, bytes, sizeof(bytes));
+    assert(handler.latest == "42");
+}
+~~~
+
+`trampoline` 是静态成员函数，没有隐含 `this`，因此签名能够匹配普通函数指针。`context` 保存业务对象地址；静态函数先用 `static_cast` 找回 Handler，再显式调用 `self->onPose`。C ABI 始终只看统一的 callback 签名。`static_cast` 不检查实际类型，也不会延长 Handler 的寿命；必须保证订阅取消和所有在途 callback 结束以后，才销毁被借用的 Handler。
+
+固定源码中的 `LCMMHSubscription<MessageType, MessageHandlerClass>` 把这一实验扩展为真正的**两级适配**：
+
+~~~text
+C runtime 保存：
+    cb_func + userdata(适配对象地址)
+                    |
+                    v
+LCMMHSubscription<MessageType, MessageHandlerClass>
+    | 保存用户 handler 的非拥有指针
+    | 保存成员函数指针 handlerMethod
+    | 保存 channel_buf 的独立 std::string
+    v
+cb_func():
+    恢复适配对象 -> 临时构造 MessageType
+    -> 从 rbuf->data 解码
+    -> (handler->*handlerMethod)(...)
+~~~
+
+每组模板参数让编译器生成正确的解码与成员函数调用。适配对象由 C++ LCM 的 `subscriptions` 指针数组管理，用户 Handler 则由调用者管理。数组扩容只移动适配器的**指针槽位**，不会移动单独在堆上 `new` 的适配对象，因此 C 核心持有的 userdata 地址仍稳定。
+
+尤其注意两个看似相近却完全不同的生命周期：C 核心的 `callback_scheduled` 延迟删除保护的是 `lcm_subscription_t`，不是 C++ 适配对象和用户 Handler。上游 `LCM::unsubscribe()` 在 C 层取消订阅后，立即从 C++ vector 擦除并 `delete` 适配对象；不要在另一个线程正调用其 trampoline 时并发执行这条释放路径。应用应先结束接收/分发线程，串行协调订阅生命周期，再释放 Handler 与 LCM。回调需要异步处理时还必须在返回前复制 `rbuf->data`，而不能保存借用指针。
+
 ## 回调桥接需要上下文指针
 
 C 回调不能直接保存捕获 lambda。常见桥接形式是函数指针加 `void* user`：

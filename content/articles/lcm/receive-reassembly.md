@@ -696,6 +696,30 @@ pipe 中不是“一条消息对应一个字节”的计数器。它表达的是
 
 这条通知 pipe 在 POSIX 上是真正的匿名 pipe；Windows 兼容层把它实现为一对本机 TCP socket。两者都提供可等待的内核缓冲字节流，均不是共享内存。pipe 也不同于 semaphore：这里靠“队列是否为空”的状态维持通知，不要求 pipe 字节数等于消息数。
 
+## 收到 UDP 报文，不代表它可以直接当协议头读取
+
+我们从最朴素的 socket 接收实现出发，容易写出这种危险的步骤：`recvmsg()` 返回多少字节都不看，直接把缓冲区强转为 `lcm2_header_long_t*`，然后读取偏移和分片数量。即使真正收到的 datagram 只有 8 字节，也可能被恶意或损坏的报文标成 LC03；如果没有先要求 `sz >= sizeof(lcm2_header_long_t)`，接下来的字段访问就会越过报文有效区域。
+
+固定版本的 `udp_read_packet()` 先检查 `sz < sizeof(lcm2_header_short_t)`，随后只根据 magic 选择 `_recv_short_message` 或 `_recv_message_fragment`。LC03 的真实 header 更长，`_recv_message_fragment()` 中直接把传入的缓冲区转换成 long header 并读取字段，且在首片用 `strlen(channel)` 查找 NUL。**不要把前面的短 header 长度检查误认为已经验证长 header 和首片字符串边界。**
+
+~~~text
+收到一枚 datagram
+   |
+   +-- sz < 8 ----------- 丢弃
+   |
+   +-- magic == LC02 ---- 仍须验证 channel NUL 处于报文范围内
+   |
+   +-- magic == LC03 ---- 必须先验证 sz >= 20
+                              |
+                         首片还必须验证
+                         channel NUL 位于当前 datagram 内
+                              |
+                         才能扣减 frag_size 并 memcpy
+~~~
+
+这是阅读固定源码时应当显式识别的**不可信输入边界**，不是说原实现已经完成了图中的全部校验。自己实现或加固 receiver 时，应先保证长 header 完整，再用长度受限的查找（例如 `memchr(data_start, '\0', available)`）确认首片的 channel 确实在当前 datagram 内，最后才使用 channel 长度更新 `frag_size`。不能让未终止的 channel 字符串把 `strlen` 带出接收缓冲，也不能等到 `memcpy` 前才第一次验证数据报边界。这个检查与后面避免 `offset + fraglen` 无符号溢出的范围检查是两个相互独立的不变量。
+
+
 ## LC03 的 key、分片计数和边界检查
 
 短消息可用一个 UDP datagram 装下；LC03 长消息由多片组成。接收方需要把同一个源地址和 msg_seqno 的片放进同一个未完成项。若只按序号索引，两个发送者恰好使用相同序号时会把不同消息混在一起；固定代码把 IPv4 地址、UDP 端口和消息序号一起作为 key。
@@ -820,6 +844,49 @@ static int _recv_message_fragment(lcm_udpm_t *lcm, lcm_buf_t *lcmb, uint32_t sz)
 以上固定摘录保留了实际分支、字段操作、边界检查、复制和所有权转移；为避开源注释中的外部链接，省略了只打印 Linux 内核接收缓冲区提示的条件编译块。调用者给 sz 的前提是 datagram 至少通过短 header 长度检查；长 header 在格式上更大，解析前还依赖该协议入口正确。data_size 有最大消息长度检查，fragment_offset 与当前片长度则用“先比较 offset，再比较 size 是否大于剩余范围”的方式避免无符号加法溢出。
 
 计数法会在分片重复时出错。例如总片数为 3，片 0、片 0、片 2 到达后，计数依次变成 2、1、0；实际缺少片 1，代码仍会把 buffer 判为完整并交给 decoder。可观察到的结果是解码失败，或者解码器读到那段从未写入的 heap 内容。固定代码没有 fragment_no bitmap 去证明每个编号只计一次，因此它依赖网络不会重复这一更强假设。教学复刻面对不可信报文时，应验证总片数与编号范围，用 bitmap 只在某编号首次到达时增加 count，并规定重叠区间怎么处理。
+
+### 让重复片真正触发一次“假的重组成功”
+
+上面的结论不必凭想象。下面是一个 40 行的**独立 C++17 教学实验**，把固定实现的“只减剩余片数”与显式记录 fragment number 的方案并排运行。这里不需要真实 socket，因为要证明的错误完全发生在数据结构与状态转移层。
+
+~~~cpp
+#include <array>
+#include <cassert>
+#include <iostream>
+
+struct CountOnly {
+    int remaining = 3;
+    void on_fragment(unsigned /*number*/) { --remaining; }
+    bool complete() const { return remaining == 0; }
+};
+
+struct Bitmap {
+    std::array<bool, 3> received{};
+    int unique_count = 0;
+    void on_fragment(unsigned number) {
+        if (number >= received.size() || received[number]) return;
+        received[number] = true;
+        ++unique_count;
+    }
+    bool complete() const { return unique_count == 3; }
+};
+
+int main() {
+    CountOnly naive;
+    Bitmap checked;
+    for (unsigned number : {0U, 0U, 2U}) {
+        naive.on_fragment(number);
+        checked.on_fragment(number);
+    }
+    assert(naive.complete());    // 错误地以为三个分片都到齐
+    assert(!checked.complete()); // 编号 1 仍未收到
+    checked.on_fragment(1U);
+    assert(checked.complete());
+    std::cout << "count-only: false complete; bitmap: verified" << '\n';
+}
+~~~
+
+这份实验只演示**接收进度证明**，不是完整的安全重组器。实际网络输入还要检查同一片编号对应的 offset/length 是否一致、不同片是否恶意重叠、累加长度是否等于原始数据大小，以及单个来源占用多少未完成消息内存。即使加入 bitmap，若尚未限制这些边界，也不能宣称“恶意 UDP 数据报已被安全处理”。
 
 还有一个很具体的边界条件：lcm_frag_buf_store_add() 在插入之前检查当前总字节数和现有条目数，故达到阈值时再添加一个刚好合法的新消息后，账面用量可以越过阈值一项。新片的 data 在入表前已经 malloc(data_size)，因此淘汰旧项和新分配可能短暂同时占内存。
 
@@ -965,6 +1032,33 @@ void lcm_buf_free_data(lcm_buf_t *lcmb, lcm_ringbuf_t *ringbuf)
 ring buffer 因容量用尽而被替换时，仍被未归还消息引用的旧 ring 暂时成为 orphan；最后一条旧 buffer 归还时才释放它。只存 buf 裸指针不够，因为同一个描述符既可能指向 ring 分配，也可能指向 malloc 的完整重组 payload；ringbuf 字段就是释放时必须维持的不变量。若新写一套 allocator，却在所有路径上都用 free()，轻则破坏 ring 的队列内部状态，重则释放无效地址。
 
 完整消息由接收线程搬到 filled queue，业务 callback 在调用 lcm_handle() 的线程执行。lcm_handle() 一次只消费一条消息，并同步运行该条匹配 handler；如果 callback 处理时间超过消息到达间隔，filled queue 和 subscription 计数会积压。换成额外工作线程虽能隔离业务耗时，但复制/移动 payload 后必须定义队列上限、丢弃策略与关闭 join 顺序。
+
+## 先把生命周期写成执行时序，才能理解关闭顺序
+
+使用者调用 `lcm_destroy()` 时，很容易只想到关 socket，却忘记另一条线程可能正从 `recvmsg()` 返回，应用线程也可能仍在 `handle()` 里面执行用户 callback。此时单独释放 `lcm_t` 或 provider 不是完整的关闭协议：线程、队列、payload 分配器和 userdata 分别持有不同的引用关系。
+
+~~~text
+控制线程                   receiver thread                 handle thread
+request_stop
+   |                       可能正阻塞 select/recv           可能正执行 callback
+   | 唤醒接收线程                |
+   +--------------------------->退出循环
+   |                             |
+   | join -----------------------+
+   |
+   |                  等 handle 线程完成当前 callback
+   +---------------------------------------------------> return
+   |
+   | 取消剩余订阅、释放队列、分片表与 provider
+   v
+安全销毁业务 Handler 与 LCM
+~~~
+
+上面是面向应用的**建议停机协议**，不是说固定版本 `lcm_destroy()` 会自动等待所有外部应用线程。尤其要区分：provider 能管理自己创建的 receiver thread，但无法代替应用管理正在调用 `handle()` 的线程，更不能保证用户在另一个线程中保存的 callback userdata 依然有效。
+
+有一项内存约束在正常收包时不明显，只有停机时才会暴露：当一条完整消息已经入队，描述符的 `buf` 可能来自当前 ring、已被替换的旧 ring，也可能来自独立 heap。释放描述符之前必须按**这条消息自己的来源字段**释放 payload；旧 ring 的已用量降到零，才能最终销毁那一整代分配器。若仅遍历队列后统一 `free(buf)`，不仅可能把 ring 内部地址错当成 heap 指针，还可能过早销毁仍被其他描述符使用的存储。
+
+所以测试不仅应覆盖“正常收到一条 LC02”，还应制造：最后一片始终不来、接收线程已建立但没有任何消息、callback 中途请求停机、ring 满后更换代际以及关闭时仍存在 filled 描述符。每种场景都应记录最后一次回收是否成功，以及是否有线程仍持有被销毁的对象。
 
 ## 关闭是一条有失败分支的协议
 

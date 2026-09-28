@@ -16,6 +16,7 @@ source-audit/
 # Sphinx output (all generated pages are recreated from content/ by the builder)
 docs/generated/
 site/
+build/
 
 # Sphinx transient output
 docs/_build/
