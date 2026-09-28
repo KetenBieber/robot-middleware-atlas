@@ -79,8 +79,8 @@ Windows 使用安装器时，优先从与 SDK 架构一致的 Visual Studio gene
 #include <thread>
 #include <ecal/ecal.h>
 
-int main(int argc, char** argv) {
-  if (eCAL::Initialize(argc, argv, "atlas_probe") != 0) {
+int main() {
+  if (!eCAL::Initialize("atlas_probe")) {
     std::cerr << "eCAL initialization failed\n";
     return 1;
   }
@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
 }
 ```
 
-初始化返回约定和头文件路径以所锁定主版本为准。探针的价值是把 SDK/配置/退出问题与 topic、schema 和 callback 问题分开。Monitor 应先看到这个进程，再继续发布订阅教程。
+本专题固定提交的 Core API 使用 `Initialize(unit_name)`；早期主版本常见的 `Initialize(argc, argv, ...)` 不应混进这套示例。探针的价值是把 SDK/配置/退出问题与 topic、schema 和 callback 问题分开。Monitor 应先看到这个进程，再继续发布订阅教程。
 
 ## 源码构建边界
 

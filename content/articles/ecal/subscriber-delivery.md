@@ -447,6 +447,67 @@ delivered to callback/read slot
 successfully decoded by application
 ```
 
+## Subscriber 内部的 STL：每个容器对应一种查询
+
+读 `CSubscriberImpl` 的成员表时，不要只看到“很多状态”。把容器换成问题句就清楚了：
+
+| 成员 | 固定类型 | 它回答的问题 |
+|---|---|---|
+| `m_connection_map` | `std::map<PublicationInfo, SConnection>` | 这个 Publisher endpoint 的 datatype 与 layer 状态是什么？ |
+| `m_id_set` | `std::set<long long>` | 当前 sample id 是否允许？ |
+| `m_read_buf` | `std::string` | callback 模式关闭时，最新 payload 是什么？ |
+| `m_publisher_message_counter_map` | 内部 `std::map` | 这个 Publisher 的 clock 是否已见过/是否单调？ |
+| `m_message_drop_map` | 内部 `std::map` | 每个 Publisher 的 sequence gap 统计是什么？ |
+| `m_sample_hash_queue` | `std::deque<size_t>` | 固定头文件里存在，但本提交实现中没有实际读写引用 |
+
+最后一项是很好的源码阅读提醒：看到成员名不等于它参与当前版本算法。固定提交全树搜索 `m_sample_hash_queue` 只有声明，不能因为名字像“去重队列”就替作者补出不存在的行为。
+
+### 为什么 receive callback mutex 和 connection map mutex 分开？
+
+`ApplySample()` 入口先获取 `m_receive_callback_mutex`，保护 callback 函数对象并串行同一 Subscriber 的交付；真正调用用户 callback 前，又取得 `m_connection_map_mtx`，因为需要从 connection map 取得 Publisher datatype。
+
+固定锁顺序是：
+
+~~~text
+m_receive_callback_mutex
+   -> m_connection_map_mtx
+      -> user callback
+~~~
+
+这有直接的 reentrancy 含义：`RemoveReceiveCallback()` 同样要获取非递归的 `m_receive_callback_mutex`。如果用户在自己的 receive callback 内对同一 Subscriber 直接调用 Remove，当前线程会再次请求自己已经持有的 mutex，存在自死锁路径。
+
+通用设计里更稳健的形状通常是：
+
+~~~text
+lock
+  -> copy callback + datatype snapshot
+unlock
+  -> invoke arbitrary user code
+~~~
+
+如果还要承诺“注销返回后绝无 in-flight callback”，再加 in-flight counter、generation 或 quiescence barrier。锁外调用与注销静默期是两件不同的事。
+
+### 为什么 atomic 不能替代 connection map mutex？
+
+`m_connection_count` 用 atomic 是因为它只是独立计数摘要。`SConnection` 却包含 datatype、layer states 与 state，这些字段必须组成一致快照。
+
+把每个字段都改成 atomic 可能产生：
+
+~~~text
+datatype = new
+layer = old
+state = established
+~~~
+
+这种逻辑混合状态。mutex 的价值是保护复合不变量，而不仅是保证一个整数不会“写一半”。
+
+### condition_variable 为什么和单槽 string 配对？
+
+Read 模式等待的是“最新值是否发生变化”，不是第 N 个历史样本。因此 `string + bool + condition_variable` 足够表达 latest-only。
+
+condition variable 的 notify 只表示状态可能改变；线程醒来仍要用谓词重新检查 `m_read_buf_received`，因为允许 spurious wakeup，也可能出现通知与真正进入 wait 的竞态。
+
+
 ## 热路径复杂度
 
 若同 topic 有 K 个本地 Subscriber：

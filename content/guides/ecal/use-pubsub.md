@@ -1,217 +1,303 @@
-# eCAL 使用教程：String 发布订阅与生命周期
+# eCAL 使用教程：从 Core Publisher/Subscriber 到可解释的 callback 生命周期
 
-eCAL Core 在底层传递二进制数据，string API 是其轻量封装。官方教程也建议先理解 binary/blob，再使用 string 或结构化类型。[eCAL Pub/Sub](https://eclipse-ecal.github.io/ecal/v6.1/getting_started/howto/pubsub.html)
+这一页统一按本地固定 eCAL 提交 `1ec0ea2fe5e5e61e3e492be6128c27cc6026d717` 的 Core API 编写。先用最小 Publisher/Subscriber 把环境跑通，再沿 public facade 追到 Gate、Impl 和 callback 线程；完整三进程工程放在下一页。
 
-## 先明确进程内对象关系
+## 先明确 public facade 并不是底层实现的唯一 owner
 
-```text
-eCAL Runtime（进程级）
-  ├── Publisher("atlas/status")
-  └── Subscriber("atlas/status") -> transport callback -> application queue
-```
+业务代码看见的是：
 
-`Initialize()` 与 `Finalize()` 管理进程级运行时，Publisher/Subscriber 是依赖它的实体。局部对象应在 `Finalize()` 之前析构；如果把实体做成静态全局变量，就可能出现 C++ 静态析构顺序与 eCAL Runtime 顺序相反的问题。
+~~~text
+CPublisher / CSubscriber
+       |
+       | public facade
+       v
+PublisherImpl / SubscriberImpl
+       |
+       v
+Gate / Registration / Transport
+~~~
 
-可以用作用域明确依赖：
+固定 `CPublisher` 构造函数先创建 `shared_ptr<CPublisherImpl>`，随后把它注册进 `PubGate`；而 facade 自己保存的是 `weak_ptr<CPublisherImpl>`。`CSubscriber` 使用相同方向的设计。
 
-**教学/复刻示例（不是固定提交源码摘录）：**
+这意味着：
 
-```cpp
-eCAL::Initialize(argc, argv, "atlas_process");
+- facade 不需要和 Gate 形成强引用环；
+- Gate 的 registry 是实现对象的长期 strong owner；
+- facade 每次 `Send()` / 设置 callback 时先 `weak_ptr::lock()` 临时取得强引用；
+- facade 析构通过 Gate `Unregister()` 结束 registry 所有权。
+
+这是很典型的 **Facade + Registry + weak handle** 组合。`weak_ptr` 不是为了“更快”，而是明确表达：公共句柄可以访问实现，但不能单独决定整个 runtime implementation 的寿命。
+
+## 固定版本的 Initialize 形状
+
+这一版主 API 是：
+
+~~~cpp
+if (!eCAL::Initialize("atlas_process")) {
+  return 1;
+}
+
 {
-  eCAL::string::CPublisher<std::string> publisher("atlas/status");
-  run(publisher);
-} // publisher 先析构
+  // Publisher / Subscriber 必须在 Finalize 前离开作用域
+}
+
 eCAL::Finalize();
-```
+~~~
 
-这不是语法风格问题，而是资源拓扑：底层 registration、transport 和 callback 基础设施必须活得比其实体更久。
+不要把旧主版本的 `Initialize(argc, argv, ...)` 示例混进这套固定源码分析。命令行配置如何传入应按对应版本的 Configuration/部署方式处理。
 
-## Publisher
+## 最小 Publisher：直接使用 eCAL::core
 
-**教学/复刻示例（不是固定提交源码摘录）：**
+~~~cpp
+#include <ecal/ecal.h>
+#include <ecal/pubsub/publisher.h>
 
-```cpp
 #include <chrono>
 #include <cstdint>
 #include <string>
 #include <thread>
 
-#include <ecal/ecal.h>
-#include <ecal/msg/string/publisher.h>
+int main() {
+  if (!eCAL::Initialize("atlas_sender")) {
+    return 1;
+  }
 
-int main(int argc, char** argv) {
-  eCAL::Initialize(argc, argv, "atlas_sender");
-  eCAL::string::CPublisher<std::string> publisher("atlas/status");
+  int result = 0;
+  {
+    const eCAL::SDataTypeInformation type{
+        "atlas.status", "text", "sequence text"};
+    eCAL::CPublisher publisher("/atlas/status", type);
 
-  std::uint64_t sequence = 0;
-  while (eCAL::Ok()) {
-    publisher.Send("seq=" + std::to_string(sequence++));
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::uint64_t sequence = 0;
+    while (eCAL::Ok()) {
+      const std::string payload = "seq=" + std::to_string(sequence++);
+      if (!publisher.Send(payload)) {
+        // 固定实现无订阅者时也会返回 false。
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
   }
 
   eCAL::Finalize();
+  return result;
 }
-```
+~~~
 
-先初始化，再创建实体；先销毁或停止使用实体，再 Finalize。循环条件使用 `eCAL::Ok()`，使 Ctrl+C 等关闭请求能结束发送。
+这里直接使用 Core `CPublisher::Send(const std::string&)`，不依赖额外 string message wrapper。
 
-`Send()` 的返回值应进入指标。一次发送调用成功只说明本地发布路径接受了数据，不等于某个远端业务 callback 已处理；subscriber 数、传输层状态与应用确认是不同层次的事实。
+固定 `CPublisher::Send()` 有一个很容易误解的语义：如果 `GetSubscriberCount()==0`，它会刷新发送统计，但直接返回 `false`，因为没有真正向任何订阅者发送。因此：
 
-## Subscriber
+~~~text
+Send == false
+不一定等于
+本地 Publisher 对象失效
+~~~
 
-**教学/复刻示例（不是固定提交源码摘录）：**
+它也可能只是当前 soft-state 连接表还没有任何 Subscriber。
 
-```cpp
+## 最小 Subscriber：callback 参数是 borrowed bytes
+
+~~~cpp
+#include <ecal/ecal.h>
+#include <ecal/pubsub/subscriber.h>
+
+#include <chrono>
 #include <iostream>
-#include <string>
-#include <ecal/ecal.h>
-#include <ecal/msg/string/subscriber.h>
+#include <string_view>
+#include <thread>
 
-int main(int argc, char** argv) {
-  eCAL::Initialize(argc, argv, "atlas_receiver");
-  eCAL::string::CSubscriber<std::string> subscriber("atlas/status");
+int main() {
+  if (!eCAL::Initialize("atlas_receiver")) {
+    return 1;
+  }
 
-  subscriber.SetReceiveCallback(
-      [](const eCAL::STopicId& topic_id,
-         const std::string& message,
-         long long time_usec) {
-        std::cout << topic_id.topic_name << " " << time_usec
-                  << " " << message << '\n';
-      });
+  {
+    const eCAL::SDataTypeInformation type{
+        "atlas.status", "text", "sequence text"};
+    eCAL::CSubscriber subscriber("/atlas/status", type);
 
-  while (eCAL::Ok()) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    subscriber.SetReceiveCallback(
+        [](const eCAL::STopicId& publisher_id,
+           const eCAL::SDataTypeInformation&,
+           const eCAL::SReceiveCallbackData& data) {
+          const auto* bytes = static_cast<const char*>(data.buffer);
+          const std::string_view payload(bytes, data.buffer_size);
+
+          std::cout << publisher_id.topic_name
+                    << " clock=" << data.send_clock
+                    << " payload=" << payload << '\n';
+
+          // payload 只是借用视图，不要保存到 callback 返回以后。
+        });
+
+    while (eCAL::Ok()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    subscriber.RemoveReceiveCallback();
   }
 
   eCAL::Finalize();
 }
-```
+~~~
 
-API 的精确 callback 签名会随主版本调整，编译时以安装版本头文件和官方对应版本示例为准。核心原则不变：callback 由接收执行上下文调用，应快速返回。
+`SReceiveCallbackData::buffer` 是 `const void*`，它没有给业务永久所有权。若 worker 要在 callback 返回后继续使用数据，必须复制到自己拥有的对象，或者建立明确的底层 buffer lease 协议。
 
-回调闭包捕获的对象必须比 Subscriber 活得更久。下面的成员声明顺序使队列先构造、后析构；关闭函数先移除/停止 callback，再销毁队列消费者：
+例如：
 
-**教学/复刻示例（不是固定提交源码摘录）：**
+~~~cpp
+std::string owned(
+    static_cast<const char*>(data.buffer),
+    data.buffer_size);
+worker_queue.try_push(std::move(owned));
+~~~
 
-```cpp
-class Receiver {
-public:
-  explicit Receiver(std::string topic)
-      : subscriber_(std::move(topic)) {
-    subscriber_.SetReceiveCallback(
-        [this](const auto& id, const std::string& value, auto time) {
-          on_message(id, value, time);
-        });
-  }
+复制有成本，但所有权最容易证明。Zero-copy 方案必须额外处理 buffer 何时可复用、慢 worker 是否拖住共享内存槽以及关闭时谁归还 lease。
 
-  void stop() {
-    if (stopping_.exchange(true)) return;
-    // 使用当前 eCAL 版本提供的 callback removal/实体销毁接口，
-    // 确认不再进入 on_message 后，再停止 worker。
-    queue_.close();
-    worker_.join();
-  }
+## callback 实际在哪个线程？
 
-private:
-  BoundedQueue<Sample> queue_;       // 先构造，最后析构
-  Worker worker_{queue_};
-  eCAL::string::CSubscriber<std::string> subscriber_;
-  std::atomic_bool stopping_{false};
-};
-```
+public Subscriber 不要求 main 线程手动 `handle()`。底层 UDP/TCP reader 或 SHM observer 取得数据后进入 SubGate，再进入 `CSubscriberImpl::ApplySample()`，最终调用用户 callback。
 
-C++ 成员按声明顺序构造、按相反顺序析构。如果 `subscriber_` 声明在队列之前，它可能在队列已经析构后仍触发回调。仅仅在 lambda 中捕获 `this` 不会延长对象生命周期。
+因此主线程和 callback 至少是两个独立执行上下文：
 
-## 回调中的有界交接
+~~~text
+main thread
+  -> lifecycle / control loop
 
-**教学/复刻示例（不是固定提交源码摘录）：**
+receive execution context
+  -> layer receive
+  -> SubGate
+  -> SubscriberImpl::ApplySample
+  -> user callback
+~~~
 
-```cpp
-subscriber.SetReceiveCallback([&queue, &drops](auto&, const auto& msg, auto) {
-  if (!queue.try_push(msg)) {
-    ++drops;
-  }
-});
-```
+这就是为什么 callback 与 main 同时读写普通变量时必须有 mutex/atomic；也解释了为什么 callback 内做磁盘 I/O、推理或同步 RPC 会把 transport delivery 延迟一起拉长。
 
-把数据库、磁盘和耗时推理移到 worker。队列必须有界，并明确满时丢新、覆盖旧或阻塞。状态流通常覆盖旧值，命令事件通常不能静默丢弃。
+## 固定实现的 receive callback mutex 是重要边界
 
-### 有界交接的数据结构
+`CSubscriberImpl::ApplySample()` 在入口获取 `m_receive_callback_mutex`，而且用户 callback 返回之前一直不释放。
 
-状态流可以使用单槽 mailbox：
+`SetReceiveCallback()` 与 `RemoveReceiveCallback()` 也使用同一把非递归 mutex。
 
-**教学/复刻示例（不是固定提交源码摘录）：**
+因此不要在 callback 内对同一个 Subscriber 直接调用 `RemoveReceiveCallback()` 或重新 `SetReceiveCallback()`：固定版本存在同线程重入自死锁路径。
 
-```cpp
+更通用的运行时设计通常会：
+
+~~~text
+lock
+  -> copy callback / owner snapshot
+unlock
+  -> invoke user code
+~~~
+
+但这只解决“不要持 registry lock 执行任意用户代码”。如果注销 API 还承诺返回后没有任何 in-flight callback，则还需要额外的 quiescence / in-flight 计数协议。
+
+## callback 模式与 Read 模式不是同一种数据语义
+
+固定 Subscriber 没有 callback 时，会把最新 payload 写入：
+
+~~~text
+std::string m_read_buf
+std::mutex m_read_buf_mutex
+std::condition_variable m_read_buf_cv
+bool m_read_buf_received
+~~~
+
+下一条消息可以覆盖上一条，所以同步 Read 本质是 **latest-value mailbox**，不是历史 FIFO。
+
+这很适合“我只需要最新状态”的控制/监控逻辑，却不适合“每个命令必须执行一次”的事件流。
+
+## callback 后面应该放什么 STL？
+
+不要默认使用无界 `std::queue`。
+
+| 数据语义 | 更合适的结构 | 主要行为 |
+|---|---|---|
+| 最新状态 | `optional<T> + mutex + version` | 新值覆盖旧值，内存 O(S) |
+| 有界事件队列 | `deque<T>` + capacity | 明确 drop-old/drop-new/block |
+| 固定高频环 | `array<Slot,N>` + head/tail | 稳态少分配，但并发协议更复杂 |
+
+例如状态流：
+
+~~~cpp
 class LatestSample {
-public:
+ public:
   void publish(Sample sample) {
-    std::lock_guard lock(mutex_);
-    value_ = std::move(sample);
+    std::lock_guard<std::mutex> lock(mutex_);
+    latest_ = std::move(sample);
     ++version_;
   }
 
   std::optional<Sample> read_after(std::uint64_t& seen) {
-    std::lock_guard lock(mutex_);
-    if (!value_ || seen == version_) return std::nullopt;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!latest_ || seen == version_) return std::nullopt;
     seen = version_;
-    return *value_;
+    return *latest_;
   }
-private:
+
+ private:
   std::mutex mutex_;
-  std::optional<Sample> value_;
+  std::optional<Sample> latest_;
   std::uint64_t version_{};
 };
-```
+~~~
 
-它的内存为 `O(S)`，过载时覆盖旧样本，适合姿态、温度和感知结果；事件队列则是 `O(C*S)`，需要容量 `C` 和明确丢弃方向。不要把二者都叫“异步队列”，因为它们对历史完整性的承诺完全不同。
+而事件流如果必须有历史完整性，就需要有界队列、sequence、overflow policy，必要时还要应用层 ACK。容器类型应该来自数据语义，而不是习惯。
 
-## 从 string 迁移到结构化消息
+## 为什么同 topic 可以有多个 Subscriber？
 
-string 示例的目标是验证环境，不应逐步演化成用分隔符拼接的生产协议。迁移步骤是：定义 schema、生成类型、把 schema target 加入 CMake、替换 publisher/subscriber 模板类型，再为跨版本兼容建立回放样本。
+固定 `CSubGate` 使用：
 
-结构化消息至少包含源时间戳、单调 sequence 和 frame/source identity。接收时间只说明本进程何时看到数据，不能替代数据产生时间；sequence gap 则能区分“值没变化”和“中间样本没有被观察到”。
+~~~cpp
+std::unordered_multimap<
+    std::string,
+    std::shared_ptr<CSubscriberImpl>>
+~~~
 
-## 运行与观察
+`unordered_multimap` 直接表达一个 topic 名对应多个本进程 Subscriber。分发时它在 shared lock 下通过 `equal_range` 找出目标，然后复制成 `vector<shared_ptr<...>>` 快照，释放 Gate 锁后再调用 `ApplySample()`。
 
-```bash
-./build/receiver
-./build/sender
-```
+这把“registry 结构保护”和“任意用户 callback 执行”拆开，是中间件 registry 设计里非常值得迁移的模式。
 
-同时打开 eCAL Monitor，确认 topic 名、类型、publisher/subscriber 数和频率。string 是 UTF-8 字节语义；复杂结构应换 protobuf 等 schema，不要自行拼接难以版本化的字符串。
+## 从基础 API 进入完整工程
 
-## 常见失败
+现在已经知道 Publisher/Subscriber 的外观和 callback 生命周期，下一步不要直接跳到 MQTT Bridge。先做[三进程 eCAL 闭环工程](closed-loop-project.md)：
 
-| 现象 | 检查 |
+~~~text
+source -> /atlas/raw -> relay -> /atlas/processed -> observer
+~~~
+
+项目页会完整展开 `unordered_multimap / map / set / vector / CExpirationMap / CExpandingVector`，以及 Linux `shm_open/mmap/flock` 与 Windows `CreateFileMapping/MapViewOfFile` 的对应关系。
+
+## 常见故障按层定位
+
+| 现象 | 第一检查层 |
 |---|---|
-| monitor 无进程 | `Initialize`、配置文件、进程是否立即退出 |
-| 有实体无数据 | topic 拼写、发送返回、callback 是否注册 |
-| 同机可用跨机不可用 | discovery、网卡选择、防火墙、host 配置 |
-| 大消息吞吐低 | SHM 是否启用、序列化、copy 与 subscriber 速度 |
-| 停止时崩溃 | callback 捕获对象生命周期、Finalize 顺序 |
-
-官方 String Hello World 给出了多语言对照，可用于验证跨语言互操作。[String Hello World](https://eclipse-ecal.github.io/ecal/v6.1/getting_started/howto/pubsub/string_hello_world.html)
+| Monitor 看不到进程 | Initialize / 配置 / 进程生命周期 |
+| 有 Publisher/Subscriber 但 Send false | soft-state connection count |
+| 同机通、跨机不通 | registration network / 网卡 / 防火墙 / transport |
+| callback 频率越来越低 | callback WCET / 接收线程阻塞 / 下游 I/O |
+| 大消息吞吐异常 | SHM 是否实际选中 / staging copy / zero-copy lease |
+| 退出卡住或死锁 | callback under mutex / worker join / Finalize 顺序 |
 
 ## 关闭顺序
 
-```text
-停止业务生产者
-  -> 停止接受新的后台任务
-  -> 注销/销毁 Subscriber，阻止新 callback
-  -> 关闭队列并 join worker
-  -> 销毁 Publisher/Subscriber 实体
+~~~text
+停止业务 producer
+  -> 不再接收新的应用任务
+  -> RemoveReceiveCallback / 销毁 Subscriber
+  -> drain/cancel 应用 worker queue
+  -> join worker threads
+  -> 销毁 Publisher/Subscriber facade
   -> eCAL::Finalize()
-```
+~~~
 
-如果 worker 仍使用 eCAL API，就必须在 Finalize 前 join。若 callback 正在运行，关闭过程还需要等待在途 callback 退出；仅设置一个布尔变量无法证明它已经离开捕获对象。
+如果 worker 还会调用 eCAL API，就必须在 Finalize 前结束。若 callback 正在执行，还要考虑 in-flight callback，而不是只设置一个 stopping flag。
 
-## 完整验收
+## 本页验收
 
-- 发送端无订阅者时仍能稳定运行，并正确报告本地发送结果；
-- 接收端晚启动后能被发现，停止后 registration 能收敛；
-- callback 洪泛时队列内存有上界，drop/overwrite 可观测；
-- 慢 worker 不在 transport callback 中反向阻塞磁盘或推理；
-- schema 不匹配、空 payload 和超大 payload 都有明确失败；
-- 重复停止不会重复 join，Finalize 后不再进入 callback。
+- Publisher 和 Subscriber 都按固定 Core API 编写；
+- callback 不保存 borrowed buffer；
+- main/callback 跨线程状态有同步；
+- callback 不在自身持有的 callback mutex 上做 Set/Remove 重入；
+- 数据语义决定 latest-slot、bounded queue 或 ring，而不是默认无界 queue；
+- Publisher/Subscriber 生命周期短于进程级 eCAL runtime。

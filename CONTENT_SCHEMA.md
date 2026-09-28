@@ -197,6 +197,63 @@ producer / network thread
 
 必须区分应用优先级、中间件队列优先级、worker/OS 调度优先级和互斥锁造成的优先级反转风险。
 
+## 数据结构选择必须回答“为什么是它”
+
+以后所有专题遇到 STL、Rust collection 或自定义容器时，不能只写“这里用了某个 map/vector/queue”。至少解释：
+
+- key/value 或元素分别代表什么运行时对象；
+- 查询模式是按 key 查找、顺序遍历、fan-out、FIFO、latest-only、LRU/过期还是固定槽位轮换；
+- 插入、删除、查找、遍历的复杂度是否位于热路径；
+- 节点式容器与连续容器的 cache locality、iterator/reference 稳定性差异；
+- 扩容、rehash、节点分配是否会把 allocator jitter 带入周期线程；
+- 容量是固定、有界动态还是无界，过载时 drop-old、drop-new、overwrite、block 还是 backpressure；
+- 容器本身是否也是 ownership root，例如 `map<Key, shared_ptr<T>>`；
+- 为什么不用最直觉的替代容器，例如 `vector`、`deque`、`list`、`map`、`unordered_map`、ring、object pool；
+- 如果源码声明了一个容器但当前固定提交没有实际读写路径，要明确说明，不能根据成员名臆造行为。
+
+讲容器时优先把它还原成一个问题。例如：
+
+~~~text
+unordered_multimap     -> 一个 topic 为什么能对应多个 Subscriber？
+vector<shared_ptr<T>>  -> 为什么需要锁内取快照、锁外 fan-out？
+map<Key, State>        -> 为什么复杂连接状态放控制面而不是每帧遍历？
+deque<T>               -> 是否真的需要保留历史 FIFO？
+optional<T>            -> 这个数据其实是不是 latest-only mailbox？
+array<Slot, N>         -> 容量是否需要编译期固定、避免稳态分配？
+map + list             -> 是否同时需要按 key 定位和按时间淘汰？
+~~~
+
+表面使用了相同 STL 的两个模块也可能承担完全不同语义，文章必须从不变量而不是类型名出发。
+
+## 线程、进程和 OS 层必须分别画边界
+
+中间件文章不得把“并发”笼统写成一层。每条核心链路至少辨认：
+
+~~~text
+同进程同线程调用
+    ↓
+同进程跨线程交接
+    ↓
+同机跨进程 IPC
+    ↓
+内核对象 / 共享页 / socket
+    ↓
+跨主机网络
+~~~
+
+每跨一层都要说明：地址空间是否相同、裸指针是否仍有意义、谁负责同步、是否发生系统调用、线程会变成 runnable 还是立即执行、OS 调度何时参与、缓存/页/缺页/上下文切换会带来什么延迟与抖动。
+
+特别要区分：
+
+- `std::mutex` 保护同进程 C++ 对象，不自动成为跨进程 mutex；
+- `shared_ptr` 只能管理当前进程控制块，不提供跨进程 ownership；
+- `mmap(MAP_SHARED)` / `CreateFileMapping` 让页可见，不自动形成完整消息提交协议；
+- `condition_variable::notify` 只让等待线程有机会变为 runnable，不等于 callback 立即运行；
+- socket send 成功只覆盖本地/内核发送路径，不是远端业务 ACK；
+- callback 线程、transport I/O 线程、worker/executor 线程、控制线程和 OS 调度优先级必须分开讨论。
+
+如果一个设计跨 Windows/Linux，优先并排展示抽象如何映射到不同 kernel primitive，而不是只讲其中一个平台后笼统写“其他平台类似”。
+
 ## 生命周期必须闭环
 
 文章不能只写稳定态。构造、注册、初始化、启动、正常执行、错误、关闭和析构要形成闭环，特别关注：

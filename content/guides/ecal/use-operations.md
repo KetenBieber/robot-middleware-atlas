@@ -43,8 +43,8 @@ Protobuf 生成类同时提供字段访问、序列化和解析，但它不自�
 #include <ecal/msg/protobuf/publisher.h>
 #include "state.pb.h"
 
-int main(int argc, char** argv) {
-  eCAL::Initialize(argc, argv, "state_sender");
+int main() {
+  if (!eCAL::Initialize("state_sender")) return 1;
   {
     eCAL::protobuf::CPublisher<atlas::demo::State> pub("atlas/state");
     std::uint64_t sequence = 0;

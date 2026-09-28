@@ -53,7 +53,22 @@ def main() -> int:
     checked = 0
     for path in sorted(set(source_files())):
         checked += 1
+        in_fence = False
+        fence_token: str | None = None
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            fence_match = re.match(r"^\s*(```|~~~)", line)
+            if fence_match:
+                token = fence_match.group(1)
+                if not in_fence:
+                    in_fence = True
+                    fence_token = token
+                elif token == fence_token:
+                    in_fence = False
+                    fence_token = None
+                continue
+            if in_fence:
+                # Editorial rules target prose, not literals inside code blocks.
+                continue
             for category, pattern in FORBIDDEN.items():
                 if pattern.search(line):
                     violations.append(

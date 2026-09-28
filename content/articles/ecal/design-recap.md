@@ -74,6 +74,131 @@ UDP 明确分片丢失和无确认；TCP 明确 per-session queue 与慢连接�
 
 K 为同 topic 本地订阅数，P 为同 topic Publisher 数，N 为发现实体数，B 为 SHM buffer 数，M 为 memfile 数，S 为 payload 大小。
 
+## 为什么这些 STL 不是随便挑一个容器
+
+如果只看类图，很容易把 `std::map`、`unordered_multimap`、`vector`、`set`、`string` 当成实现细节。实际上它们直接表达了查询方式、ownership、热路径和并发边界。
+
+### SubGate：`unordered_multimap<string, shared_ptr<SubscriberImpl>>`
+
+一个 topic 可以在同一进程里有多个 Subscriber，所以普通 `unordered_map<string, Subscriber>` 不够；key 不能唯一。`unordered_multimap` 让 `equal_range(topic)` 直接得到同 topic 的全部实现对象，平均查找接近 O(1)，fan-out 再付 O(K)。
+
+value 用 `shared_ptr` 也不是偶然。Gate 是实现对象的强 ownership root；公开 `CSubscriber` 只持 `weak_ptr`。因此“用户句柄还存在”和“运行时实体仍然注册”是两回事。
+
+分发时固定源码再复制到：
+
+~~~cpp
+std::vector<std::shared_ptr<CSubscriberImpl>> readers_to_apply;
+~~~
+
+vector 适合一次查找后顺序 fan-out，连续存放 shared_ptr，遍历 cache locality 好；每个 shared_ptr 又临时增加强引用。这样 Gate 解锁以后，即使另一个线程 `Unregister()`，本轮已经选中的 Impl 仍活到调用结束。
+
+如果直接拿 multimap iterator 解锁后继续遍历，另一线程 erase 会让 iterator 失效；若全程持 Gate 锁，则任意慢 callback 会阻塞整个进程注册/注销其他 Subscriber。
+
+### Connection table：为什么用 `std::map`
+
+Publisher 和 Subscriber 都用 `std::map<SampleIdentifier, Connection>` 保存远端 endpoint 状态。这里不是每帧按 topic 广播，而是 registration 到来时查一个具体 endpoint，并保存 datatype、layer state、selected layer 和连接状态。
+
+`std::map` 的节点稳定性和确定 O(log N) 很适合“控制面小集合 + 插入删除 + 复合状态”。它的 cache locality 不如平坦数组，但 registration 不是大 payload 热路径。
+
+eCAL 再把 Send 真正需要的信息压成：
+
+~~~cpp
+std::atomic<size_t> udp;
+std::atomic<size_t> shm;
+std::atomic<size_t> tcp;
+~~~
+
+复杂连接状态留在 map，每帧 Send 只读 O(1) 摘要。这就是“控制面富状态，数据面短路径”。
+
+### `std::set<long long>` 表达 membership，不是队列
+
+Subscriber 的 filter id 用 `std::set<long long>`。它要回答的是“这个 id 是否允许”，而不是“按到达顺序保存消息”。容器选择来自查询语义。
+
+### `std::string + mutex + condition_variable` 是 latest-value mailbox
+
+同步 `Read()` 不是 `deque<string>`。固定实现只有一个 `m_read_buf`、received flag、time、mutex 和 condition variable。新样本覆盖旧样本，所以空间是 O(S)，而不是 O(N*S)。
+
+这适合姿态、温度、最新检测结果；不适合“每个命令必须执行一次”。容器本身就是消息语义的一部分。
+
+### SHM Writer：`vector<shared_ptr<CSyncMemoryFile>>` 就是运行时槽位数组
+
+固定 Writer 保存：
+
+~~~cpp
+std::vector<std::shared_ptr<CSyncMemoryFile>> m_memory_file_vec;
+size_t m_write_idx;
+~~~
+
+Write 后 index 自增取模，形成 round-robin。vector 在这里合适，因为 buffer 数在配置/重建时整体创建，运行时需要 O(1) 下标访问与顺序遍历；list 会让按 index 轮换退化，deque 的首尾稳定插入也没有收益，固定 array 又失去运行时可配置数量。
+
+### `map<process_id, set<entity_id>>` 是跨进程资源引用关系
+
+同一订阅进程里可以有多个 Subscriber endpoint 共享一组 SHM memory files。Writer 不能因为其中一个 endpoint 注销就立刻 Disconnect 整个进程。
+
+所以：
+
+~~~text
+process_id
+   -> set<entity_id>
+~~~
+
+只有某进程对应 set 变空，才真正 Disconnect 该进程的 SHM 通知/ACK 资源。这里 map 是进程索引，set 是 endpoint membership，本质是一份层级 ownership 关系。
+
+### `CExpirationMap = map + list`：双索引换复杂度
+
+Soft-state 同时需要按 endpoint key 查找，又要按最后访问时间从最旧开始过期。
+
+只用 map，找最旧项要扫全表；只用 list，按 key refresh 是 O(N)。固定实现把 value 放在 map，并保存指向 timestamp list 节点的 iterator：
+
+~~~text
+map: key -> {value, iterator}
+                   |
+                   v
+list: oldest ... newest
+~~~
+
+refresh 先通过 map 定位，再 O(1) 移动 list 节点到尾部；expire 从 list 头连续删除。这和 LRU 的“双索引”思想相同。
+
+### `CExpandingVector`：用常驻内存换 allocator 抖动
+
+Registration 周期性构造 SampleList。`CExpandingVector` 保留底层 `std::vector<T> data` 的完整尺寸，另用 `internal_size` 表示逻辑元素数；clear 不把底层 slot 全释放，下一周期优先复用。
+
+收益是减少后台周期线程重复分配；代价是峰值容量可能长期驻留，而且 full_size 与逻辑 size 不同。它优化的是 allocator 行为，不是渐进复杂度。
+
+## 线程、进程与 OS 边界不能混成一个并发问题
+
+| 边界 | 共享对象 | 典型工具 | 不能靠什么解决 |
+|---|---|---|---|
+| 同进程多线程 | C++ 对象、普通地址空间 | mutex、atomic、condition_variable、shared_ptr | mmap 不能替代 C++ data-race 同步 |
+| 同机跨进程 | 命名共享内存与 kernel object | Linux `shm_open/ftruncate/mmap(MAP_SHARED)`；Windows `CreateFileMapping/MapViewOfFile` | 普通 std::mutex 不能跨独立进程保护共享页 |
+| 跨主机 | socket / 网络协议 | UDP/TCP、sequence、buffer、backpressure | shared_ptr 和虚拟地址没有跨主机意义 |
+
+Linux `mmap(MAP_SHARED)` 只让页内容对映射同一对象的进程可见，并不自动提供“writer 写完 header 后 reader 才读”的事务语义。仍然需要 eCAL 的 header、named synchronization 和提交顺序。
+
+Windows 用另一套 kernel object API，但两个进程得到的虚拟地址仍可完全不同，因此共享区里不能保存只对当前进程有效的裸指针。
+
+### ownership 最终要落实为关闭顺序
+
+~~~text
+Runtime / CGlobals
+   owns Gate + transport infrastructure
+Gate
+   owns Impl via shared_ptr
+public facade
+   borrows Impl via weak_ptr
+Impl
+   owns reader/writer resources
+callback
+   borrows incoming bytes only during invocation
+application worker
+   must own copied/loaned business data explicitly
+~~~
+
+安全关闭应按依赖图逆序：停止业务生产，阻止新 callback，等待或取消 in-flight 工作，drain/cancel worker，销毁 Publisher/Subscriber facade 触发 Gate unregister，释放 transport/SHM 资源，最后 Finalize Runtime。
+
+智能指针只解决对象何时析构，不会自动解决线程什么时候停止调用、跨进程 lease 什么时候归还、OS handle 什么时候能关闭。
+
+
 ## 端到端延迟组成
 
 ```text

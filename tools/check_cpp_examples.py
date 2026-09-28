@@ -43,6 +43,9 @@ EXTRA_CPP_EXAMPLES = [
     ("content/articles/lcm/receive-reassembly.md",
      "### 让重复片真正触发一次“假的重组成功”"),
 ]
+FILE_CPP_EXAMPLES = [
+    "examples/ecal/closed_loop/wire_codec_test.cpp",
+]
 
 
 def extract(path: Path, section: str, language: str = "cpp") -> str:
@@ -145,7 +148,29 @@ def main() -> int:
             print(f"TEACHING_EXAMPLE_PASS={index + 1}:{standard}:{relative}")
         except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
             failures.append(f"{relative}: {error}")
+    for relative in FILE_CPP_EXAMPLES:
+        path = ROOT / relative
+        try:
+            with tempfile.TemporaryDirectory(prefix="atlas-project-cxx-") as directory:
+                executable = Path(directory) / ("project_example.exe" if sys.platform == "win32" else "project_example")
+                command = [
+                    compiler, "-std=c++17", "-O0", "-Wall", "-Wextra", "-Werror",
+                    "-pedantic", str(path), "-I", str(path.parent), "-o", str(executable),
+                ]
+                result = subprocess.run(command, text=True, capture_output=True, timeout=35, check=False)
+                if result.returncode != 0:
+                    raise RuntimeError(f"compile returned {result.returncode}:\n{result.stderr}")
+                result = subprocess.run([str(executable)], text=True, capture_output=True, timeout=10, check=False)
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        f"program exited {result.returncode}: {result.stdout}\n{result.stderr}"
+                    )
+            print(f"PROJECT_EXAMPLE_PASS={relative}")
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+            failures.append(f"{relative}: {error}")
+
     print(f"TEACHING_EXAMPLES_TESTED={len(samples) - len(blocked)}")
+    print(f"PROJECT_EXAMPLES_TESTED={len(FILE_CPP_EXAMPLES)}")
     print(f"TEACHING_EXAMPLES_BLOCKED={len(blocked)}")
     print(f"CPP_EXAMPLES_FAILED={len(failures)}")
     for item in blocked:

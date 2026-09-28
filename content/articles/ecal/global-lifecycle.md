@@ -15,14 +15,14 @@ eCAL 的 Publisher、Subscriber、registration、reader layer、SHM observer 和
 **教学/复刻示例（不是固定提交源码摘录）：**
 
 ```cpp
-int main(int argc, char** argv) {
-  eCAL::Initialize(argc, argv, "camera_node");
+int main() {
+  if (!eCAL::Initialize("camera_node")) return 1;
   RunApplication();
   eCAL::Finalize();
 }
 ```
 
-业务库不应各自无条件 Initialize/Finalize。该生命周期不是每个调用者独立引用计数；某个库提前 Finalize 可能拆除整个进程共享运行时。
+本专题固定提交的 Core API 使用 `Initialize(unit_name)`，而不是旧主版本常见的 `Initialize(argc, argv, ...)`。业务库不应各自无条件 Initialize/Finalize。该生命周期不是每个调用者独立引用计数；某个库提前 Finalize 可能拆除整个进程共享运行时。
 
 ## Component mask 控制对象图裁剪
 
