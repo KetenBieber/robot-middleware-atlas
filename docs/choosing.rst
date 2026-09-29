@@ -28,6 +28,10 @@ Choosing a middleware project
      - Eclipse iceoryx2
      - 同机共享内存、offset descriptor、loan/reclaim 与 crash recovery
      - 不直接解决跨主机路由与完整分布式 QoS
+   * - 异构高性能数据面
+     - OpenUCX
+     - Endpoint lane、RDMA/GPU memory、protocol selection 与 progress
+     - 不提供完整 Topic/Discovery/QoS 或业务计算图调度
    * - DDS/RTPS 数据总线
      - Eclipse Cyclone DDS、eProsima Fast DDS
      - Participant/Endpoint 发现、QoS、可靠性、History 与 WaitSet
@@ -50,9 +54,10 @@ Choosing a middleware project
 * ROS 2 通信底层：先对照 Cyclone DDS 与 Fast DDS 的 RMW、History、可靠性、WaitSet 和共享内存，再与 Executor 调度分层分析。
 * 学习完整可审计内核：先读 LCM，再与其他大型框架对照。
 * 学习同机共享内存 IPC：Communication Foundations → iceoryx2 → eCAL/DDS 共享内存路径。
+* 学习跨 CPU/GPU/网络的异构数据面：Communication Foundations → UCX → dataflow runtime。
 * 工业伺服与 I/O 实时链路：Orocos RTT / 专用 RT loop → EtherCAT Master → 驱动与从站对象字典。
 
-九个中间件与两种 EtherCAT 主站实现解决的不是同一个问题
+十个中间件与两种 EtherCAT 主站实现解决的不是同一个问题
 ------------------------------------------------------------
 
 .. list-table::
@@ -107,6 +112,12 @@ Choosing a middleware project
      - Service static/dynamic state 与 endpoint connection
      - SharedMemory + PointerOffset + ZeroCopyConnection 的 zero-copy IPC
      - 跨主机路由、完整 DDS QoS 与应用计算调度
+   * - OpenUCX
+     - Context / Worker / Endpoint / Request
+     - 应用线程或通信线程显式驱动 Worker progress
+     - Wireup address exchange、Endpoint lane 与 transport capability matching
+     - SHM/TCP/RDMA/GPU transport、memory type 与协议自动选择
+     - Topic/Schema/Discovery/QoS 与完整业务调度
    * - Zenoh
      - key expression / Session
      - 异步 runtime 与 handler
@@ -164,6 +175,11 @@ Zenoh 用同一 key expression 空间连接 publication、subscription、query�
 
 若需求只是固定局域网内的高速 channel，不需要 query/storage 或跨域路由，LCM/eCAL 可能更容易审计。
 
+需要跨 CPU、GPU 与 RDMA 的大数据面
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+OpenUCX 适合把大 tensor、图像或其他 buffer 的物理位置纳入通信决策。它先为 peer 建立多条 lane，再以 operation、message length、memory type、system device 等信息选择 eager、zcopy、rendezvous 或具体 UCT transport。它尤其适合研究 GPU memory、RDMA registration、multi-lane 与显式 progress，但需要上层另行提供 topic/discovery/schema、业务 QoS 与计算图调度。
+
 需要最小、可读、可回放的总线
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -190,6 +206,9 @@ YARP 的 Port、Name Server 和 Carrier 允许实验期间动态改变连接，�
    * - 大图像/点云同机吞吐
      - iceoryx2、eCAL SHM、Cyber SHM、Zenoh SHM、Cyclone DDS PSMX/loan、Fast DDS Data Sharing/SHM/loan
      - “零复制”不等于全链无序列化和借用风险
+   * - 跨 GPU / NIC / 主机的大 Tensor
+     - OpenUCX，或在更高层 dataflow runtime 中使用 UCX 类数据面
+     - RDMA/GPU Direct 能力不等于自动获得最优调度或业务 QoS
    * - 不允许丢命令
      - 任一底层 + 应用 request id/ACK/幂等
      - TCP、Reliable 或 FIFO 不等于动作已执行
@@ -218,6 +237,9 @@ YARP 的 Port、Name Server 和 Carrier 允许实验期间动态改变连接，�
    机器内部数据总线
      iceoryx2 / eCAL SHM / Cyclone DDS / Fast DDS / LCM / YARP
              |
+       大 Tensor 数据面
+          OpenUCX
+             |
         gateway + schema
              v
    边缘与云
@@ -233,6 +255,7 @@ EtherCAT Master 应放在另一条更靠近设备的数据路径上：控制线�
 * 第一次学习中间件内核：从 :doc:`LCM <generated/lcm/index>` 开始，完整走通 provider、协议、队列、类型与日志。
 * 学习线程、进程、跨主机与异构内存的统一通信模型：先读 :doc:`Communication Foundations <communication-foundations/index>`，再进入具体实现。
 * 学习同机 zero-copy ownership：阅读 :doc:`iceoryx2 <generated/iceoryx2/index>`，沿 SharedMemory、PointerOffset、loan/send/receive/reclaim、backpressure 与 dead-node cleanup 走完整链。
+* 学习异构高性能数据面：阅读 :doc:`OpenUCX <generated/ucx/index>`，沿 Context/Worker/Endpoint、lane selection、request/protocol selection、progress、Memory Domain 与 rendezvous 走完整链。
 * 学习 C++ 组件和调度：对照 :doc:`Cyber RT <generated/cyber/index>` 与 :doc:`Orocos RTT <generated/orocos/index>`。
 * 学习发现和多传输：阅读 :doc:`eCAL <generated/ecal/index>`，重点比较控制面与数据面。
 * 学习可插拔协议与命名：阅读 :doc:`YARP <generated/yarp/index>` 的 PortCore、Protocol 和 Carrier。

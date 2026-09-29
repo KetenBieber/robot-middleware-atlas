@@ -15,7 +15,7 @@ Tutorials
 
 第一次接触某个项目时，先读功能介绍与组件地图，知道它解决什么问题以及各模块为何存在；随后走完源码主链和语言机制，再用基础教程验证 API 现象，最后阅读真实项目案例。若本机环境暂时不可用，也可以先完成源码与最小复刻设计，不必把安装问题当成理解架构的前置条件。
 
-十一类实现坐标
+十二类实现坐标
 ----------------
 
 * Apollo Cyber RT：自动驾驶组件运行时、协程调度与有界数据缓存。
@@ -29,6 +29,7 @@ Tutorials
 * Eclipse Cyclone DDS：DDS/RTPS、自动发现、QoS、可靠性、History Cache、WaitSet 与 ROS 2 RMW。
 * eProsima Fast DDS：DDS/RTPS、CacheChange/History、Discovery Server、FlowController、Data Sharing/SHM 与 ROS 2 RMW。
 * Eclipse iceoryx2：Rust zero-copy IPC、SharedMemory、PointerOffset、loan/reclaim、backpressure 与 crash recovery。
+* OpenUCX：异构高性能数据面、UCP/UCT、lane/protocol selection、RDMA/GPU memory 与显式 progress。
 
 项目入口
 --------
@@ -74,6 +75,9 @@ Tutorials
    * - :doc:`Eclipse iceoryx2 <generated/iceoryx2/index>`
      - Node/Service/Publisher/Subscriber、共享内存、loan 与 WaitSet
      - PointerOffset、ZeroCopyConnection、fan-out/backpressure、borrow/reclaim 与 dead-node cleanup
+   * - :doc:`OpenUCX <generated/ucx/index>`
+     - UCP Endpoint、Tag/AM/RMA、request、busy progress 与 eventfd wakeup
+     - UCT transport、Memory Domain、lane/protocol selection、Rendezvous 与 GPU/异构内存路径
 
 从最小单元到完整系统
 --------------------

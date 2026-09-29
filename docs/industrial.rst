@@ -12,3 +12,4 @@
    generated/soem/index
    generated/cyclonedds/index
    generated/fastdds/index
+   generated/ucx/index

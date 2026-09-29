@@ -43,6 +43,9 @@
    * - Eclipse iceoryx2
      - ``135d09dd8b29f321f1725920d434864c4e512378`` （v0.10.0）
      - https://github.com/eclipse-iceoryx/iceoryx2
+   * - OpenUCX
+     - ``8a6b06fb880accbb933a79cda893883872c68d9d`` （v1.22.0）
+     - https://github.com/openucx/ucx
 
 阅读方式
 --------
@@ -53,3 +56,4 @@ IgH EtherCAT Master 已固定到本地 ``stable-1.6`` 的 1.6.13 提交；SOEM �
 Cyclone DDS 已固定到 ``11.0.1`` 的 ``e54e991f``；ROS 2 集成案例另固定 ``rmw_cyclonedds`` 4.2.1 的 ``19478b0``，用于核对 RMW 到 DDS 的真实映射，不替代 Cyclone DDS 本体源码基线。
 Fast DDS 已固定到 ``v3.6.2`` 的 ``39303846``；ROS 2 集成案例另固定 ``rmw_fastrtps`` 的 ``a88ce42``，用于核对 ROS QoS、publish 与 waitset 到 Fast DDS 的真实适配链。
 iceoryx2 已固定到 ``v0.10.0`` 的 ``135d09dd``；本专题以 Node/Service、SharedMemory/DataSegment、PointerOffset/ZeroCopyConnection、WaitSet/Reactor 与 dead-node cleanup 为主要源码真值。
+OpenUCX 已固定到 ``v1.22.0`` 的 ``8a6b06fb``；源码核对以 UCP/UCT/UCS/UCM、Endpoint lane、protocol selection、memory type、progress 与 rendezvous 为主线。

@@ -3,7 +3,7 @@ SPHINXBUILD ?= $(PYTHON) -m sphinx
 SOURCEDIR = docs
 BUILDDIR = site
 
-.PHONY: html html-full package-site check-editorial check-baselines check-examples check-lcm check-cyber check-ecal check-ethercat check-soem check-cyclonedds check-fastdds check-iceoryx2 check-communication-foundations check-links clean
+.PHONY: html html-full package-site check-editorial check-baselines check-examples check-lcm check-cyber check-ecal check-ethercat check-soem check-cyclonedds check-fastdds check-iceoryx2 check-ucx check-communication-foundations check-links clean
 
 html:
 	$(PYTHON) tools/build_sphinx_sources.py
@@ -14,6 +14,7 @@ html:
 	$(PYTHON) tools/check_cyclonedds_closure.py
 	$(PYTHON) tools/check_fastdds_closure.py
 	$(PYTHON) tools/check_iceoryx2_closure.py
+	$(PYTHON) tools/check_ucx_closure.py
 	$(PYTHON) tools/check_communication_foundations.py
 	$(PYTHON) tools/check_ethercat_closure.py
 	$(PYTHON) tools/check_source_baselines.py
@@ -29,6 +30,7 @@ html-full:
 	$(PYTHON) tools/check_cyclonedds_closure.py
 	$(PYTHON) tools/check_fastdds_closure.py
 	$(PYTHON) tools/check_iceoryx2_closure.py
+	$(PYTHON) tools/check_ucx_closure.py
 	$(PYTHON) tools/check_communication_foundations.py
 	$(PYTHON) tools/check_ethercat_closure.py
 	$(PYTHON) tools/check_source_baselines.py
@@ -67,6 +69,9 @@ check-fastdds:
 
 check-iceoryx2:
 	$(PYTHON) tools/check_iceoryx2_closure.py
+
+check-ucx:
+	$(PYTHON) tools/check_ucx_closure.py
 
 check-communication-foundations:
 	$(PYTHON) tools/check_communication_foundations.py

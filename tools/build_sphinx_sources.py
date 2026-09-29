@@ -31,6 +31,7 @@ PROJECTS = {
     "cyclonedds": ("Eclipse Cyclone DDS", "e54e991f75a3e67f8e628da3171122e36ea5b872"),
     "fastdds": ("eProsima Fast DDS", "39303846fb8534ef69fa65f9fa4bcc9e6a7c995a"),
     "iceoryx2": ("Eclipse iceoryx2", "135d09dd8b29f321f1725920d434864c4e512378"),
+    "ucx": ("OpenUCX", "8a6b06fb880accbb933a79cda893883872c68d9d"),
 }
 
 PROJECT_OVERVIEWS = {
@@ -57,6 +58,7 @@ PROJECT_OVERVIEWS = {
     "cyclonedds": """Cyclone DDS 是 ROS 2 常用的 DDS/RTPS 实现之一。应用层看到 Participant、Writer、Reader、QoS 与 WaitSet；源码层真正决定数据年龄、可靠性、内存与调度边界的，是 DDSc Entity/RHC、DDSI discovery/WHC/RTPS、DDSRT socket/thread 以及 PSMX/loan 怎样协同。\n\n本专题固定到 Cyclone DDS 11.0.1（e54e991f）。阅读顺序沿一份样本真实前进：Entity 生命周期 → SPDP/SEDP → QoS matching → Writer/Reader 创建 → dds_write → WHC/Reliability → RTPS/UDP → receive/defrag/reorder → RHC → WaitSet/Listener → async/关闭 → PSMX/loan；最后用官方 ddsperf 与 ROS 2 rmw_cyclonedds 4.2.1 固定案例把机制重新落回工程。""",
     "fastdds": """Fast DDS 是 eProsima 的 DDS/RTPS 实现，也是 ROS 2 常用 RMW 后端之一。它以显式 C++ 对象图把 DDS façade、DataWriterImpl/DataReaderImpl、CacheChange、History、StatefulWriter/Reader、Proxy、FlowController 与 UDP/TCP/SHM Transport 串成运行时。\n\n本专题固定到 v3.6.2（39303846）。重点不是重讲一遍 DDS 术语，而是和 Cyclone DDS 做实现层对照：DataWriter::write 怎样在一次调用里完成锁、loan、序列化、CacheChange 与 History；Reliable 怎样落到 ReaderProxy/WriterProxy 与 TimedEvent；异步发送怎样由 FlowController 调度；SHM Transport、Data Sharing 与 loan_sample 为什么是三层不同优化。最后用官方 delivery_mechanisms 与 ROS 2 rmw_fastrtps 固定案例闭环。""",
     "iceoryx2": """iceoryx2 是以 Rust core 实现的 zero-copy IPC runtime。它把大 payload 放进共享内存 DataSegment，通过 PointerOffset 和 ZeroCopyConnection 传递跨进程稳定的 descriptor，再用 borrow/release/reclaim 闭环 sample 生命周期。\n\n本专题固定到 v0.10.0（135d09dd）。阅读重点不是 API，而是共享页、虚拟地址、offset pointer、pool allocator、fan-out ownership、backpressure、WaitSet/Reactor 与 dead-node cleanup 怎样共同组成一套生产级同机 IPC。""",
+    "ucx": """OpenUCX 是面向高性能异构数据面的通信框架。UCP 把 endpoint、request、tag/RMA/AM 与协议选择组织成高层语义，UCT 再把这些动作映射到 shared-memory、TCP、InfiniBand/RDMA、CUDA、ROCm、Level Zero 等 transport；UCS 提供数据结构与系统设施，UCM 负责内存事件相关机制。\n\n这一组文章固定到 UCX v1.22.0（8a6b06fb）。核心问题是同一个发送调用怎样依据 endpoint lane、消息尺寸、memory type、system device 与 transport capability 选择实际数据路径，以及 request、progress、registration、rendezvous 和 backpressure 怎样共同决定延迟与数据年龄。""",
 }
 
 PROJECT_EXTRAS: dict[str, list[str]] = {}
@@ -228,6 +230,21 @@ ARTICLE_ORDER = {
         "iceoryx2-vs-existing-shm",
         "design-recap",
     ],
+    "ucx": [
+        "overview",
+        "architecture-map",
+        "context-worker-endpoint",
+        "wireup-lane-selection",
+        "tag-send-request",
+        "protocol-selection",
+        "progress-engine",
+        "uct-transport-model",
+        "memory-domain-types",
+        "rendezvous-gpu-pipeline",
+        "backpressure-thread-safety",
+        "ucx-vs-message-middleware",
+        "design-recap",
+    ],
 
 }
 CYBER_ARTICLE_SECTIONS = [
@@ -307,6 +324,7 @@ GUIDE_ORDER: dict[str, list[str]] = {
     "cyclonedds": ["case-study-ddsperf", "case-study-rmw-cyclonedds"],
     "fastdds": ["case-study-delivery-mechanisms", "case-study-rmw-fastrtps"],
     "iceoryx2": ["official-examples-lab"],
+    "ucx": ["official-hello-world-lab"],
 }
 
 PROJECT_STORIES = {
@@ -333,6 +351,7 @@ PROJECT_STORIES = {
     "cyclonedds": """从 :doc:`总览 <overview>` 先建立 DDSc/DDSI/DDSRT 三层地图，再沿 :doc:`Entity 生命周期 <entity-lifecycle>`、:doc:`SPDP/SEDP <discovery-spdp-sedp>` 与 :doc:`QoS Matching <qos-matching>` 理清控制面如何建立 endpoint。随后从 :doc:`Writer/Reader 创建 <writer-reader-creation>` 进入 :doc:`dds_write 主链 <write-path>`、:doc:`WHC/Reliability <whc-reliability>`、:doc:`RTPS/UDP <rtps-network>`、:doc:`Receive/Reorder <receive-reorder>` 和 :doc:`RHC <rhc-read-take>`，最后用 :doc:`WaitSet/Listener <waitset-listener>`、:doc:`线程与关闭 <threads-async-close>` 和 :doc:`PSMX/Loan <psmx-loans>` 收束执行边界。\n\n源码本体读完后不再造教学 Demo，而是直接进入两条真实链：:doc:`官方 ddsperf <case-study-ddsperf>` 用 Reliability、History、Batching 和 WaitSet 验证性能机制；:doc:`ROS 2 rmw_cyclonedds <case-study-rmw-cyclonedds>` 则把 ROS Publisher/Subscription、QoS 与 Executor wait 一路映射到底层 DDS Writer/Reader、dds_write_ts 与 dds_waitset_wait。Cyclone DDS 本体结论统一以 e54e991f 为真值，RMW 案例固定到 19478b0。""",
     "fastdds": """从 :doc:`总览 <overview>` 建立 DDS façade → Impl → RTPS Endpoint → History → Transport 的对象图，再沿 :doc:`Participant/Endpoint 生命周期 <participant-endpoint-lifecycle>`、:doc:`PDP/EDP <discovery-pdp-edp>`、:doc:`Discovery Server <discovery-server>` 和 :doc:`QoS <qos-matching>` 理清控制面。数据面从 :doc:`Writer/Reader 创建 <writer-reader-creation>` 进入 :doc:`DataWriter::write <write-cachechange>`、:doc:`WriterHistory/Reliability <writerhistory-reliability>`、:doc:`ReaderHistory/Fragments <readerhistory-fragments>` 与 :doc:`Transport <transport-network>`，再用 :doc:`FlowController <flowcontroller-async>`、:doc:`Data Sharing vs SHM <datasharing-vs-shm>`、:doc:`Loan <loan-zero-copy>`、:doc:`WaitSet <waitset-listener>` 和 :doc:`线程/关闭 <threads-events-close>` 收束运行时。\n\n本体之后直接进入真实工程：:doc:`官方 delivery_mechanisms <case-study-delivery-mechanisms>` 用同一业务代码切换 SHM Transport、Data Sharing 与 loan；:doc:`ROS 2 rmw_fastrtps <case-study-rmw-fastrtps>` 把 ROS Publisher、QoS 和 Executor wait 映射到底层 DataWriter 与 Fast DDS WaitSet。最后用 :doc:`Fast DDS vs Cyclone DDS <fastdds-vs-cyclonedds>` 分清 DDS/RTPS 必需机制与两套实现自己的数据结构。""",
     "iceoryx2": """先从总览和架构地图建立 Node、Service、Port、DataSegment 与 ZeroCopyConnection 的对象关系，再沿 SharedMemory/PointerOffset、PoolAllocator、Publisher loan、offset delivery、Subscriber receive/reclaim 走完一条 sample 的完整生命周期。随后进入 fan-out/backpressure/history 与 Event/WaitSet，再用 Request/Response 理解 ChannelId/RequestId/PendingResponse/ActiveRequest 的双向状态机，用 Blackboard 理解共享 latest-state 与 UnrestrictedAtomic；最后进入 dead-node cleanup 和与 eCAL/Fast DDS/Cyclone DDS 的共享内存对照。读完源码后直接跑 :doc:`官方示例实验 <official-examples-lab>`，把 pub/sub、event、event multiplexing、request-response 与 blackboard 映射回真实运行现象。整个专题统一锁定 v0.10.0 的 135d09dd8b29f321f1725920d434864c4e512378。""",
+    "ucx": """从 :doc:`总览 <overview>` 与 :doc:`架构地图 <architecture-map>` 建立 UCP/UCS/UCT/UCM 的职责边界，再沿 :doc:`Context、Worker 与 Endpoint <context-worker-endpoint>` 和 :doc:`Lane 选择 <wireup-lane-selection>` 看一条 peer connection 如何由多个 transport lane 组成。数据面以 :doc:`Tag Send 与 Request <tag-send-request>` 为入口，进入 :doc:`协议选择 <protocol-selection>` 与 :doc:`Progress Engine <progress-engine>`；随后下沉到 :doc:`UCT Transport 模型 <uct-transport-model>`、:doc:`Memory Domain 与异构内存 <memory-domain-types>`，再用 :doc:`Rendezvous 与 GPU Pipeline <rendezvous-gpu-pipeline>` 理解大 tensor 如何绕开普通 eager copy。最后用 :doc:`背压与线程安全 <backpressure-thread-safety>`、:doc:`与消息中间件的边界 <ucx-vs-message-middleware>` 和 :doc:`设计复盘 <design-recap>` 收束；:doc:`官方 Hello World 实验 <official-hello-world-lab>` 把 endpoint、request、progress 与 eventfd 对回可运行代码。源码真值统一锁定 UCX v1.22.0 的 8a6b06fb880accbb933a79cda893883872c68d9d。""",
 }
 
 INTERNAL_ONLY_SLUGS = {"reconstruction"}
