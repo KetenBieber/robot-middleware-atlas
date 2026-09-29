@@ -25,7 +25,6 @@ ARTICLE_NAMES = (
     "blackboard-shared-state",
     "dead-node-recovery",
     "iceoryx2-vs-existing-shm",
-    "design-recap",
 )
 GUIDE_NAMES = ("official-examples-lab",)
 REQUIRED = {
@@ -45,7 +44,6 @@ REQUIRED = {
     "blackboard-shared-state": ("UnrestrictedAtomic", "generation", "EntryHandle", "Blackboard"),
     "dead-node-recovery": ("NodeState", "DeadNodeView", "VersionMismatch"),
     "iceoryx2-vs-existing-shm": ("eCAL", "Fast DDS", "Cyclone", "PointerOffset"),
-    "design-recap": ("ownership", "UCX", "GXF", "PointerOffset"),
 }
 GUIDE_REQUIRED = {
     "official-examples-lab": (
@@ -58,10 +56,10 @@ GUIDE_REQUIRED = {
 }
 FENCE = re.compile(r"^\s*~~~")
 PROCESS_LANGUAGE = re.compile(
-    r"下一步|接下来|本专题|这个专题|推荐阅读|专题源码阅读路径|"
-    r"后面(?:再|继续|研究|文章|专题)|未来(?:整套|将会|会逐渐)|"
-    r"值得[^。；]*?(?:学习|研究)|最适合作为[^。；]*?实例|"
-    r"更适合作为[^。；]*?研究对象|应该串起来读|对 Atlas 的意义"
+    r"用户提出|用户要求|你的要求|符合.*要求|本轮任务|本次任务|"
+    r"任务进度|当前进度|工作轮次|Agent|Reviewer|ChatGPT|Codex|"
+    r"审计报告|复审结论|质量门禁|quality\s+gate",
+    re.I,
 )
 MALFORMED_TEX_ESCAPE = re.compile(r"\\\\(?:times|text|approx)")
 

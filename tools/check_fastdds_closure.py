@@ -30,7 +30,6 @@ ARTICLE_NAMES = (
     "waitset-listener",
     "threads-events-close",
     "fastdds-vs-cyclonedds",
-    "design-recap",
 )
 GUIDE_NAMES = (
     "case-study-delivery-mechanisms",
@@ -63,7 +62,6 @@ REQUIRED = {
     "waitset-listener": ("WaitSetImpl", "Notifier", "condition_variable"),
     "threads-events-close": ("ResourceEvent", "TimedEvent", "m_network_Factory.Shutdown"),
     "fastdds-vs-cyclonedds": ("Cyclone DDS", "CacheChange_t", "FlowController"),
-    "design-recap": ("CacheChange_t", "ReaderProxy", "FlowController", "rmw_fastrtps"),
     "case-study-delivery-mechanisms": ("delivery_mechanisms", "SharedMemTransportDescriptor", "loan_sample"),
     "case-study-rmw-fastrtps": ("rmw_publish", "write_w_timestamp", "rmw_wait", "Fast DDS WaitSet"),
 }

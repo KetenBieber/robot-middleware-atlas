@@ -3,10 +3,11 @@ SPHINXBUILD ?= $(PYTHON) -m sphinx
 SOURCEDIR = docs
 BUILDDIR = site
 
-.PHONY: html html-full package-site check-editorial check-baselines check-examples check-lcm check-cyber check-ecal check-ethercat check-soem check-cyclonedds check-fastdds check-iceoryx2 check-ucx check-communication-foundations check-links clean
+.PHONY: html html-full package-site check-editorial check-baselines check-examples check-lcm check-cyber check-ecal check-ethercat check-soem check-cyclonedds check-fastdds check-iceoryx2 check-ucx check-communication-foundations check-document-hygiene check-links clean
 
 html:
 	$(PYTHON) tools/build_sphinx_sources.py
+	$(PYTHON) tools/check_document_hygiene.py
 	$(PYTHON) tools/check_lcm_closure.py
 	$(PYTHON) tools/check_cyber_closure.py
 	$(PYTHON) tools/check_ecal_closure.py
@@ -23,6 +24,7 @@ html:
 
 html-full:
 	$(PYTHON) tools/build_sphinx_sources.py
+	$(PYTHON) tools/check_document_hygiene.py
 	$(PYTHON) tools/check_lcm_closure.py
 	$(PYTHON) tools/check_cyber_closure.py
 	$(PYTHON) tools/check_ecal_closure.py
@@ -75,6 +77,9 @@ check-ucx:
 
 check-communication-foundations:
 	$(PYTHON) tools/check_communication_foundations.py
+check-document-hygiene:
+	$(PYTHON) tools/build_sphinx_sources.py
+	$(PYTHON) tools/check_document_hygiene.py
 check-cyclonedds:
 	$(PYTHON) tools/check_cyclonedds_closure.py
 

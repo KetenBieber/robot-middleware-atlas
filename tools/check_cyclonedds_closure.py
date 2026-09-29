@@ -27,7 +27,6 @@ ARTICLE_NAMES = (
     "waitset-listener",
     "threads-async-close",
     "psmx-loans",
-    "design-recap",
 )
 GUIDE_NAMES = (
     "case-study-ddsperf",
@@ -57,7 +56,6 @@ REQUIRED = {
     "waitset-listener": ("dds_waitset_wait", "condition variable", "observer"),
     "threads-async-close": ("SENDQ_MAX", "sendq", "ddsi_start"),
     "psmx-loans": ("PSMX", "loan", "DDS_PSMX_FEATURE_SHARED_MEMORY"),
-    "design-recap": ("WHC", "RHC", "rmw"),
     "case-study-ddsperf": ("ddsperf", "writer_batching", "dds_waitset_wait"),
     "case-study-rmw-cyclonedds": ("rmw_publish", "dds_write_ts", "dds_waitset_wait"),
 }

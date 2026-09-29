@@ -16,12 +16,6 @@ Robot Middleware Source Tutorials
 
 .. toctree::
    :maxdepth: 3
-   :caption: 工业级中间件
+   :caption: 实现专题
 
-   industrial
-
-.. toctree::
-   :maxdepth: 3
-   :caption: 轻量与边缘中间件
-
-   experimental
+   implementations
