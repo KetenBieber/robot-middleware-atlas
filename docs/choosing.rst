@@ -25,7 +25,7 @@ Choosing a middleware project
      - 发现、序列化、缓存与传输
      - 通常不提供完整控制调度
    * - DDS/RTPS 数据总线
-     - Eclipse Cyclone DDS
+     - Eclipse Cyclone DDS、eProsima Fast DDS
      - Participant/Endpoint 发现、QoS、可靠性、History 与 WaitSet
      - 不负责 ROS 2 Executor 的业务调度，也不等于硬实时控制环
    * - 数据空间/边缘路由
@@ -43,11 +43,11 @@ Choosing a middleware project
 * 自动驾驶运行时：Cyber RT → eCAL → Zenoh。
 * 硬实时控制：Orocos RTT → eCAL → LCM。
 * 研究机器人平台：YARP → LCM → Zenoh。
-* ROS 2 通信底层：RMW → Cyclone DDS → RTPS/UDP/PSMX，再与 Executor 调度分层分析。
+* ROS 2 通信底层：先对照 Cyclone DDS 与 Fast DDS 的 RMW、History、可靠性、WaitSet 和共享内存，再与 Executor 调度分层分析。
 * 学习完整可审计内核：先读 LCM，再与其他大型框架对照。
 * 工业伺服与 I/O 实时链路：Orocos RTT / 专用 RT loop → EtherCAT Master → 驱动与从站对象字典。
 
-七个中间件与两种 EtherCAT 主站实现解决的不是同一个问题
+八个中间件与两种 EtherCAT 主站实现解决的不是同一个问题
 ------------------------------------------------------------
 
 .. list-table::
@@ -90,6 +90,12 @@ Choosing a middleware project
      - SPDP/SEDP、RTPS endpoint matching
      - 标准 DDS QoS、可靠性、WHC/RHC 与 ROS 2 RMW 生态
      - 业务级 ACK、Executor WCET 与硬实时调度边界
+   * - Fast DDS
+     - DomainParticipant / DataWriter / DataReader
+     - 应用写线程、Transport receiver、ResourceEvent/FlowController 与上层 Executor
+     - PDP/EDP、Discovery Server、RTPS endpoint matching
+     - CacheChange/History、FlowController、SHM/Data Sharing/loan 与 rmw_fastrtps
+     - 业务级 ACK、共享内存命中条件、Executor WCET 与硬实时调度边界
    * - Zenoh
      - key expression / Session
      - 异步 runtime 与 handler
@@ -136,7 +142,7 @@ eCAL 是更直接的起点：registration 让端点相遇，同机优先使用 S
 
 Cyber RT 也有 SHM，但它通常与 Component、DataVisitor 和 Scheduler 一起出现。若只需要通用 IPC，单独引入整套 Apollo 运行时可能成本过高。
 
-Cyclone DDS 则适合需要 DDS/RTPS 互操作或 ROS 2 RMW 的系统。PSMX/loan 可以降低同机大消息复制，但是否真正命中共享内存、类型是否可借用、是否还需要同时服务网络 Reader，都必须从实际 endpoint 与数据路径核对。
+Cyclone DDS 与 Fast DDS 都适合需要 DDS/RTPS 互操作或 ROS 2 RMW 的系统。Cyclone DDS 通过 PSMX/loan/local delivery 优化同机路径；Fast DDS 则需要分清 SHM Transport、Data Sharing 和 loan_sample 三层机制。无论哪一个实现，是否真正命中共享内存、类型是否可借用、是否同时服务网络 Reader，都必须从实际 endpoint 与数据路径核对。
 
 需要跨边缘的数据空间
 ^^^^^^^^^^^^^^^^^^^^
@@ -169,7 +175,7 @@ YARP 的 Port、Name Server 和 Carrier 允许实验期间动态改变连接，�
      - Orocos RTT，或独立实时环 + 其他中间件
      - 使用 SHM、Rust 或 lock-free 不等于有 WCET
    * - 大图像/点云同机吞吐
-     - eCAL SHM、Cyber SHM、Zenoh SHM、Cyclone DDS PSMX/loan
+     - eCAL SHM、Cyber SHM、Zenoh SHM、Cyclone DDS PSMX/loan、Fast DDS Data Sharing/SHM/loan
      - “零复制”不等于全链无序列化和借用风险
    * - 不允许丢命令
      - 任一底层 + 应用 request id/ACK/幂等
@@ -197,7 +203,7 @@ YARP 的 Port、Name Server 和 Carrier 允许实验期间动态改变连接，�
         bounded adapter
              v
    机器内部数据总线
-     eCAL SHM / Cyclone DDS / LCM / YARP
+     eCAL SHM / Cyclone DDS / Fast DDS / LCM / YARP
              |
         gateway + schema
              v
@@ -217,6 +223,7 @@ EtherCAT Master 应放在另一条更靠近设备的数据路径上：控制线�
 * 学习可插拔协议与命名：阅读 :doc:`YARP <generated/yarp/index>` 的 PortCore、Protocol 和 Carrier。
 * 学习 Rust 异步路由：阅读 :doc:`Zenoh <generated/zenoh/index>` 的 Session、Resource、Route cache 和 Query Final。
 * 学习 ROS 2 DDS/RTPS 底层：阅读 :doc:`Cyclone DDS <generated/cyclonedds/index>`，沿 SPDP/SEDP、QoS matching、WHC/RHC、RTPS、WaitSet 一路追到 rmw_cyclonedds。
+* 学习另一套 ROS 2 DDS/RTPS 实现：阅读 :doc:`Fast DDS <generated/fastdds/index>`，重点对照 CacheChange/History、StatefulWriter/Reader、Discovery Server、FlowController、Data Sharing/SHM/loan 与 rmw_fastrtps。
 * 学习工业实时主站：从 :doc:`IgH EtherCAT Master <generated/ethercat/index>` 的周期数据路径开始，随后进入 Domain/process image、datagram/FSM、device/NIC 与 DC。
 * 学习轻量用户态 EtherCAT 主站：继续读 :doc:`SOEM <generated/soem/index>`，重点比较 Context/固定数组、RAW Socket、IOmap 与 frame-index 数据面如何替代 IgH 的内核对象图。
 

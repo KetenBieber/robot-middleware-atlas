@@ -11,3 +11,4 @@
    generated/ethercat/index
    generated/soem/index
    generated/cyclonedds/index
+   generated/fastdds/index

@@ -1,6 +1,6 @@
 # Robot Middleware Atlas
 
-Robot Middleware Atlas 是一组中文机器人中间件与工业通信源码深度博客，聚焦源码导读、运行时架构、工程设计与控制系统影响。当前研究对象包括 Apollo Cyber RT、Orocos RTT、YARP、Eclipse eCAL、Eclipse Zenoh、LCM、Eclipse Cyclone DDS，以及 IgH EtherCAT Master 与 SOEM。
+Robot Middleware Atlas 是一组中文机器人中间件与工业通信源码深度博客，聚焦源码导读、运行时架构、工程设计与控制系统影响。当前研究对象包括 Apollo Cyber RT、Orocos RTT、YARP、Eclipse eCAL、Eclipse Zenoh、LCM、Eclipse Cyclone DDS、eProsima Fast DDS，以及 IgH EtherCAT Master 与 SOEM。
 
 文章不按目录罗列模块，而是沿真正的问题进入源码：一条消息怎样从 public API 穿过 transport、queue、scheduler 到达 callback；对象由谁创建和拥有；哪个线程执行；数据在哪里复制；消费者过载时发生什么；这些选择怎样影响机器人闭环的延迟、抖动和数据新鲜度。
 
