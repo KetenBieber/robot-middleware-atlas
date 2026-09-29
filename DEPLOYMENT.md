@@ -5,7 +5,7 @@
 ## 仓库边界
 
 - **上传**：`content/` 中的文章、`docs/` 中手写导航/主题、`tools/` 构建及检查工具、`requirements.txt`、本仓库的 `.github/workflows/pages.yml` 和维护规范。
-- **只在本机保留**：`source-audit/` 的七套上游源码、`.internal/` 的 Agent 审查材料和事实索引、虚拟环境、`docs/generated/`、`site/` 和 `dist/`。
+- **只在本机保留**：`source-audit/` 的九套项目上游源码与固定案例、`.internal/` 的 Agent 审查材料和事实索引、虚拟环境、`docs/generated/`、`site/` 和 `dist/`。
 - **不接触**：`E:\Keten.github.io\Keten.github.io` 个人网站的 Git 仓库、`latex-notes` 和其他个人网站源文件。两个仓库的 Git/CI 构建和部署完全独立。
 
 `docs/generated/` 的文章与各项目 `index.rst` 均可由 `tools/build_sphinx_sources.py` 根据 `content/` 重新生成。独立仓库首次检出后，先运行生成器，再运行 Sphinx；不能仅靠静态仓库里已经存在生成文件。

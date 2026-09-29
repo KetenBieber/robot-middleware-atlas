@@ -3,7 +3,7 @@ SPHINXBUILD ?= $(PYTHON) -m sphinx
 SOURCEDIR = docs
 BUILDDIR = site
 
-.PHONY: html html-full package-site check-editorial check-baselines check-examples check-lcm check-cyber check-ecal check-ethercat check-soem check-links clean
+.PHONY: html html-full package-site check-editorial check-baselines check-examples check-lcm check-cyber check-ecal check-ethercat check-soem check-cyclonedds check-links clean
 
 html:
 	$(PYTHON) tools/build_sphinx_sources.py
@@ -11,6 +11,7 @@ html:
 	$(PYTHON) tools/check_cyber_closure.py
 	$(PYTHON) tools/check_ecal_closure.py
 	$(PYTHON) tools/check_soem_closure.py
+	$(PYTHON) tools/check_cyclonedds_closure.py
 	$(PYTHON) tools/check_ethercat_closure.py
 	$(PYTHON) tools/check_source_baselines.py
 	$(PYTHON) tools/check_editorial_language.py
@@ -22,6 +23,7 @@ html-full:
 	$(PYTHON) tools/check_cyber_closure.py
 	$(PYTHON) tools/check_ecal_closure.py
 	$(PYTHON) tools/check_soem_closure.py
+	$(PYTHON) tools/check_cyclonedds_closure.py
 	$(PYTHON) tools/check_ethercat_closure.py
 	$(PYTHON) tools/check_source_baselines.py
 	$(PYTHON) tools/check_editorial_language.py
@@ -52,6 +54,9 @@ check-cyber:
 	$(PYTHON) tools/check_cyber_closure.py
 check-soem:
 	$(PYTHON) tools/check_soem_closure.py
+
+check-cyclonedds:
+	$(PYTHON) tools/check_cyclonedds_closure.py
 
 check-ecal:
 check-ecal:

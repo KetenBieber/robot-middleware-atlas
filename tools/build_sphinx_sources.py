@@ -28,6 +28,7 @@ PROJECTS = {
     "lcm": ("LCM", "ad0c54cee0ec048ef12357c34349ec1443158864"),
     "ethercat": ("IgH EtherCAT Master", "61cc654f5b721ddd54df0f58bdd34106d91c5359"),
     "soem": ("SOEM", "304d1c05eab77dc0d426f1a5cf09c8cc7dc03713"),
+    "cyclonedds": ("Eclipse Cyclone DDS", "e54e991f75a3e67f8e628da3171122e36ea5b872"),
 }
 
 PROJECT_OVERVIEWS = {
@@ -51,6 +52,7 @@ PROJECT_OVERVIEWS = {
 阅读 YARP 的主线是一次 ``Port::write`` 如何序列化并扇出到多条连接，以及对端怎样经 InputUnit 进入 PortReader。同步写、后台写、不同 Carrier、慢连接与断开竞态会改变 buffer 所有权和调用者阻塞时间，也决定它更适合可靠数据流还是只关心最新状态的控制链路。""",
     "ethercat": """IgH EtherCAT Master 把 Linux 主机、网卡、EtherCAT 帧、从站状态机和周期过程数据组织成一条面向工业控制的实时通信链。应用层看到 Master、Domain、PDO 与周期收发 API；源码层真正决定抖动、数据年龄和故障恢复的，是 FMMU/process image、datagram queue、非阻塞 FSM、Device/NIC 与 Distributed Clocks 怎样协同。\n\n本专题固定到 stable-1.6 / 1.6.13（61cc654f）。课程明确分成两部分：前半先从协议与控制系统第一性原理建立 EtherCAT 软件栈理论，后半再沿 ``ecrt_*`` public API 进入 Master/Domain、Datagram、FSM、Device/NIC 和 DC 的真实源码实现。""",
     "soem": """SOEM 是轻量的用户态 EtherCAT MainDevice C Library。它不建立独立内核 Master，而是把 ``ecx_contextt``、固定容量 slave/group/frame 数组、IOmap、raw socket OSHW 与 OSAL 组合成可直接嵌入控制应用的协议运行时。\n\n本专题固定到 v2.0.0（304d1c05）。阅读重点不是重复 EtherCAT 协议名词，而是把同一套 PDO/FMMU/WKC/DC 语义和 IgH 做架构对照：Context 与对象图、固定 frame slot 与 Datagram queue、application IOmap 与 Domain、raw socket 与 net_device，以及应用自己承担的实时线程和恢复策略。""",
+    "cyclonedds": """Cyclone DDS 是 ROS 2 常用的 DDS/RTPS 实现之一。应用层看到 Participant、Writer、Reader、QoS 与 WaitSet；源码层真正决定数据年龄、可靠性、内存与调度边界的，是 DDSc Entity/RHC、DDSI discovery/WHC/RTPS、DDSRT socket/thread 以及 PSMX/loan 怎样协同。\n\n本专题固定到 Cyclone DDS 11.0.1（e54e991f）。阅读顺序沿一份样本真实前进：Entity 生命周期 → SPDP/SEDP → QoS matching → Writer/Reader 创建 → dds_write → WHC/Reliability → RTPS/UDP → receive/defrag/reorder → RHC → WaitSet/Listener → async/关闭 → PSMX/loan；最后用官方 ddsperf 与 ROS 2 rmw_cyclonedds 4.2.1 固定案例把机制重新落回工程。""",
 }
 
 PROJECT_EXTRAS: dict[str, list[str]] = {}
@@ -166,6 +168,23 @@ ARTICLE_ORDER = {
         "soem-vs-igh",
         "design-recap",
     ],
+    "cyclonedds": [
+        "overview",
+        "architecture-map",
+        "entity-lifecycle",
+        "discovery-spdp-sedp",
+        "qos-matching",
+        "writer-reader-creation",
+        "write-path",
+        "whc-reliability",
+        "rtps-network",
+        "receive-reorder",
+        "rhc-read-take",
+        "waitset-listener",
+        "threads-async-close",
+        "psmx-loans",
+        "design-recap",
+    ],
 
 }
 CYBER_ARTICLE_SECTIONS = [
@@ -242,6 +261,7 @@ GUIDE_ORDER: dict[str, list[str]] = {
     "yarp": ["use-environment", "use-ports-rpc", "use-operations", "case-study-icub-navigation"],
     "ethercat": ["use-environment", "closed-loop-project", "real-hardware-deployment"],
     "soem": ["case-study-official-ec-sample", "case-study-leggedrobotics-soem-interface", "case-study-elfin-robot-ros2", "case-study-ipe-ros2-control"],
+    "cyclonedds": ["case-study-ddsperf", "case-study-rmw-cyclonedds"],
 }
 
 PROJECT_STORIES = {
@@ -265,6 +285,7 @@ PROJECT_STORIES = {
 有了对象与路由模型，再走一次 :doc:`Publisher 到 Transport <publisher-routing>`，随后进入 :doc:`Query、Reply 和 Final <query-lifecycle>`，亲自模拟两路回复、一条超时和最后的回收。完成 :doc:`背压与关闭 <backpressure-close>` 的故障回放以后，再读 :doc:`Rust/C++ 设计实验 <rust-cpp-design-lab>` 以及 :doc:`rmw_zenoh 案例 <case-study-rmw-zenoh>`。""",
     "ethercat": """先读 :doc:`软件栈总图 <theory-stack>`，把 EtherCAT 与普通 Ethernet、CAN/CANopen、ROS 2 pub/sub 的职责边界分开；随后沿 :doc:`帧与 Datagram <theory-frame-datagram>`、:doc:`PDO/FMMU/过程映像 <theory-pdo-process-image>`、:doc:`AL 状态与邮箱 <theory-state-mailbox>`、:doc:`Distributed Clocks <theory-distributed-clocks>` 和 :doc:`实时性 <theory-realtime>` 建立协议与控制系统直觉。\n\n进入源码以后，从 :doc:`对象架构 <architecture-map>` 和 :doc:`Master 生命周期 <master-lifecycle>` 建立 ownership，再追 :doc:`Domain 与 process image <domain-process-image>`、:doc:`周期收发 <cyclic-send-receive>` 和 :doc:`Datagram/Frame <datagram-frame>` 的数据面；最后进入 :doc:`Slave FSM 与 mailbox <slave-fsm-mailbox>`、:doc:`Device/NIC <device-nic-runtime>`、:doc:`DC 实现 <distributed-clocks>` 与 :doc:`实时并发 <realtime-concurrency>`。读完源码后进入 :doc:`FakeEtherCAT 环境 <use-environment>` 与 :doc:`双进程闭环工程 <closed-loop-project>`，用 controller/plant 把 PDO 和 process image 真正跑成闭环；最后按 :doc:`真机部署 <real-hardware-deployment>` 把同一应用骨架迁移到独立 NIC、真实从站、WKC、DC 和实时调度。所有源码结论统一锁定 stable-1.6 / 1.6.13 的 ``61cc654f5b721ddd54df0f58bdd34106d91c5359``。""",
     "soem": """从 :doc:`总览 <overview>` 开始先回答“为什么同样是 EtherCAT Master，SOEM 可以只是一套用户态 C Library”。随后沿 :doc:`Context 与固定数组 <context-fixed-arrays>`、:doc:`Linux RAW Socket <linux-raw-socket>`、:doc:`Frame Buffer/Index <frame-buffer-index>` 和 :doc:`Datagram 原语 <datagram-primitives>` 建立用户态数据面。\n\n配置链继续走 :doc:`Slave Discovery <slave-discovery>` → :doc:`PDO/SM/FMMU <pdo-sm-fmmu>` → :doc:`IOmap 与周期收发 <iomap-cyclic>`；控制面再进入 :doc:`CoE/SDO <mailbox-coe>`、:doc:`Distributed Clocks <distributed-clocks>` 与 :doc:`双网口冗余 <redundancy>`。最后用 :doc:`OSAL 与实时线程 <realtime-osal>`、:doc:`WKC 与故障恢复 <fault-recovery>`、:doc:`SOEM vs IgH <soem-vs-igh>` 和 :doc:`设计复盘 <design-recap>` 闭环。\n\n主站本体读完后，真实案例按“原生 API → 工程封装 → 机器人驱动 → ros2_control/CiA-402”递进：先看 :doc:`官方 ec_sample <case-study-official-ec-sample>`，再看 :doc:`ETH RSL soem_interface <case-study-leggedrobotics-soem-interface>`、:doc:`Elfin ROS2 机械臂 <case-study-elfin-robot-ros2>` 与 :doc:`IPE ros2_control <case-study-ipe-ros2-control>`。案例只用于验证设计机制怎样进入实际项目，SOEM v2.0.0 本体仍以 ``304d1c05eab77dc0d426f1a5cf09c8cc7dc03713`` 为源码真值。""",
+    "cyclonedds": """从 :doc:`总览 <overview>` 先建立 DDSc/DDSI/DDSRT 三层地图，再沿 :doc:`Entity 生命周期 <entity-lifecycle>`、:doc:`SPDP/SEDP <discovery-spdp-sedp>` 与 :doc:`QoS Matching <qos-matching>` 理清控制面如何建立 endpoint。随后从 :doc:`Writer/Reader 创建 <writer-reader-creation>` 进入 :doc:`dds_write 主链 <write-path>`、:doc:`WHC/Reliability <whc-reliability>`、:doc:`RTPS/UDP <rtps-network>`、:doc:`Receive/Reorder <receive-reorder>` 和 :doc:`RHC <rhc-read-take>`，最后用 :doc:`WaitSet/Listener <waitset-listener>`、:doc:`线程与关闭 <threads-async-close>` 和 :doc:`PSMX/Loan <psmx-loans>` 收束执行边界。\n\n源码本体读完后不再造教学 Demo，而是直接进入两条真实链：:doc:`官方 ddsperf <case-study-ddsperf>` 用 Reliability、History、Batching 和 WaitSet 验证性能机制；:doc:`ROS 2 rmw_cyclonedds <case-study-rmw-cyclonedds>` 则把 ROS Publisher/Subscription、QoS 与 Executor wait 一路映射到底层 DDS Writer/Reader、dds_write_ts 与 dds_waitset_wait。Cyclone DDS 本体结论统一以 e54e991f 为真值，RMW 案例固定到 19478b0。""",
 }
 
 INTERNAL_ONLY_SLUGS = {"reconstruction"}

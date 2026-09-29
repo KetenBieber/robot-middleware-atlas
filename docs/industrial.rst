@@ -10,3 +10,4 @@
    generated/ecal/index
    generated/ethercat/index
    generated/soem/index
+   generated/cyclonedds/index
