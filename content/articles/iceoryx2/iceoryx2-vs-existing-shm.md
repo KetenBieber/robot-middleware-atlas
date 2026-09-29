@@ -2,7 +2,7 @@
 
 固定 iceoryx2 源码版本：135d09dd8b29f321f1725920d434864c4e512378（v0.10.0）。
 
-这篇不做优劣排名，只把几种“共享内存”放到同一坐标系。
+比较重点放在共享内存机制的层级、所有权与数据路径，不进行整体优劣排序。
 
 ## 第一问：共享的是哪一层
 
@@ -111,13 +111,13 @@ iceoryx2 也有 Service discovery、capacity contract、history、safe overflow 
 
 但它没有把目标扩展成 DDS 那样完整的标准化 QoS/RTPS interoperability。
 
-因此它更适合学习：
+因此 iceoryx2 的关注中心是：
 
 ~~~text
 IPC mechanism first
 ~~~
 
-DDS 更适合学习：
+DDS 的关注中心则是：
 
 ~~~text
 distributed data bus semantics
@@ -131,25 +131,25 @@ local fast path
 
 iceoryx2 把 NodeState::Dead 与 cleanup API 直接做成公开 runtime concept。
 
-这非常适合研究 shared-memory ownership 的失败路径。
+这使 shared-memory ownership 的失败路径在 API 层就可以被直接观察和验证。
 
-## 对 Atlas 的意义
+## 四种实现放到同一机制层级
 
-四个项目应该串起来读：
+从底层机制到完整数据总线，可以整理为：
 
 ~~~text
 Communication Foundations
 ↓
 iceoryx2
-理解纯共享内存 ownership
+纯共享内存 ownership
 
 ↓
 eCAL
-理解 discovery + multi-transport
+discovery + multi-transport
 
 ↓
 Cyclone DDS / Fast DDS
-理解标准 DDS 语义如何叠加 local fast path
+标准 DDS 语义叠加 local fast path
 ~~~
 
 这样 zero-copy 就不再是宣传词，而变成可追踪的数据结构和生命周期。

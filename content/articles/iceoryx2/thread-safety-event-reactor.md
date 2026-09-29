@@ -32,7 +32,7 @@ ipc_threadsafe::Service 使用同样的 IPC Connection/Event/Monitoring/Reactor�
 同一个 Port 对象可以任意跨线程并发使用
 ~~~
 
-这是一个非常值得借鉴的 API 设计。
+这种设计把“是否跨进程”和“是否允许同一对象跨线程并发访问”拆成两个独立能力维度。
 
 ## 为什么不用“所有对象都默认加锁”
 
@@ -173,4 +173,4 @@ application worker / scheduler
 
 把数据存储、事件唤醒和任务调度分开。
 
-这正是后面研究 GXF/Holoscan 时需要继续沿用的分析框架。
+同样的分层也适用于 GXF/Holoscan 一类 dataflow runtime：数据存储、事件唤醒和任务调度应分别分析。

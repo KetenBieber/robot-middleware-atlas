@@ -52,7 +52,7 @@ pub struct PoolAllocator {
 }
 ~~~
 
-这里最值得注意的是：
+关键字段是：
 
 ~~~text
 buckets: UniqueIndexSet
@@ -114,7 +114,7 @@ self.buckets
 
 因此 pool 的逻辑身份其实是 bucket index，而不是 pointer。
 
-这和后面的 PointerOffset 非常一致：
+这一设计与 PointerOffset 的相对地址语义一致：
 
 ~~~text
 进程内 allocator

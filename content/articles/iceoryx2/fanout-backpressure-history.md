@@ -133,14 +133,14 @@ fan-out still referenced
 ## Data Age 仍然是机器人系统的核心指标
 
 如果 queue 深度很大，Subscriber 可以做到“一条不丢”，但一直处理旧样本。
+
 $$
-\\text{data age}
+\text{data age}
 =
-t_{\\text{consume}}
+t_{\text{consume}}
 -
-t_{\\text{sample}}
+t_{\text{sample}}
 $$
-]
 
 对于 perception→policy pipeline，很多时候 bounded latest data 比无限完整历史更重要。
 

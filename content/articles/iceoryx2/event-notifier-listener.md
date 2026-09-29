@@ -290,4 +290,4 @@ Event 更自然。
 Event 只负责唤醒
 ~~~
 
-这正是后面 GXF/Holoscan 一类 dataflow runtime 常见的基本思想。
+这种“共享状态与轻量通知分离”的结构，同样常见于 GXF/Holoscan 一类 dataflow runtime。

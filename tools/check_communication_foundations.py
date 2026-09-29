@@ -25,6 +25,13 @@ REQUIRED = {
     "atlas-mapping": ("iceoryx2", "Fast DDS", "Cyclone DDS", "UCX"),
 }
 FENCE = re.compile(r"^\s*~~~")
+PROCESS_LANGUAGE = re.compile(
+    r"下一步|接下来|本专题|这个专题|推荐阅读|"
+    r"后面(?:再|继续|研究|文章|专题)|未来(?:整套|将会|会逐渐)|"
+    r"值得[^。；]*?(?:学习|研究)|最适合作为[^。；]*?实例|"
+    r"更适合作为[^。；]*?研究对象|应该串起来读|对 Atlas 的意义"
+)
+MALFORMED_TEX_ESCAPE = re.compile(r"\\\\(?:times|text|approx)")
 
 
 def main() -> int:
@@ -55,6 +62,22 @@ def main() -> int:
             opened = lineno if opened is None else None
         if opened is not None:
             errors.append(f"{path.relative_to(ROOT)}:{opened}: unclosed code fence")
+
+        in_fence = False
+        for lineno, line in enumerate(source.splitlines(), 1):
+            if FENCE.match(line):
+                in_fence = not in_fence
+                continue
+            if not in_fence and PROCESS_LANGUAGE.search(line):
+                errors.append(
+                    f"{path.relative_to(ROOT)}:{lineno}: process/editorial narration: {line.strip()}"
+                )
+            if not in_fence and MALFORMED_TEX_ESCAPE.search(line):
+                errors.append(
+                    f"{path.relative_to(ROOT)}:{lineno}: doubled LaTeX command escape: {line.strip()}"
+                )
+            if not in_fence and line.strip() == "]":
+                errors.append(f"{path.relative_to(ROOT)}:{lineno}: stray closing bracket")
 
     index = folder / "index.rst"
     if not index.is_file():

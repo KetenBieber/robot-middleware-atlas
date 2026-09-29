@@ -197,4 +197,4 @@ copy to middleware
 copy to subscriber
 ~~~
 
-这才是 iceoryx2 值得研究的地方。
+这使 iceoryx2 的优化目标非常明确：让大 payload 从产生开始就位于最终共享存储，而不是在多个私有缓冲区之间搬运。

@@ -15,9 +15,9 @@ CPU-addressable bytes
 假设 1920×1080 RGB8：
 
 $$
-1920 \\times 1080 \\times 3
+1920 \times 1080 \times 3
 =
-6{,}220{,}800\\ \\text{bytes}
+6{,}220{,}800\ \text{bytes}
 $$
 
 约 6.2 MB。
@@ -25,9 +25,9 @@ $$
 30 FPS 原始吞吐约：
 
 $$
-6.2 \\times 30
-\\approx
-186\\ \\text{MB/s}
+6.2 \times 30
+\approx
+186\ \text{MB/s}
 $$
 
 如果 pipeline：
@@ -117,7 +117,7 @@ B 的 stream 何时可以开始？
 
 这和 CPU acquire/release 本质上回答同一个问题：
 
-> 我现在看到这块内存时，producer 的写是否已经完成？
+> Consumer 获得这块内存的访问权时，Producer 对它的写入是否已经完成？
 
 ## RDMA / GPUDirect 把边界继续推远
 
@@ -134,7 +134,7 @@ GPU
 
 RDMA / GPUDirect 目标是减少中间 staging，让 NIC 与注册内存甚至 GPU memory 更直接协同。
 
-这也是后续 UCX 专题值得研究的原因：
+UCX 的统一通信抽象正覆盖这类 memory-domain 与 transport 组合：
 
 ~~~text
 same-process
@@ -149,7 +149,7 @@ GPUDirect
 
 ## 对具身系统真正该画的图
 
-以后分析 VLA runtime，不只画 node/topic：
+分析 VLA runtime 时，仅画 node/topic 不足以解释数据搬运成本，还需要标注 memory domain：
 
 ~~~text
 Camera

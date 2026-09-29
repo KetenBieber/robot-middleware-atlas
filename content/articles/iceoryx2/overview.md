@@ -2,9 +2,9 @@
 
 固定源码版本：135d09dd8b29f321f1725920d434864c4e512378（v0.10.0）。
 
-iceoryx2 最适合作为 Communication Foundations 的第一个完整实例，因为它不是“先设计网络 pub/sub，再加 shared memory 优化”，而是从同机 zero-copy IPC 出发组织 Node、Service、Port、SharedMemory、ZeroCopyConnection 与 crash recovery。
+iceoryx2 的架构起点不是“先设计网络 pub/sub，再补 shared-memory fast path”，而是直接围绕同机 zero-copy IPC 组织 Node、Service、Port、SharedMemory、ZeroCopyConnection 与 crash recovery。
 
-## 先从一个 20 MB 点云开始
+## 以 20 MB 点云为例：Payload 为什么不应该跨进程搬运
 
 最朴素的跨进程方案：
 
@@ -44,7 +44,7 @@ Publisher reclaim
 
 ## 对象图
 
-应用最先看到：
+应用层首先接触到以下对象关系：
 
 ~~~text
 Node
@@ -147,7 +147,7 @@ network fallback
 shared-memory fast path
 ~~~
 
-iceoryx2 更适合作为“同机 IPC 第一性原理”的研究对象：
+从同机 IPC 的机制层看，iceoryx2 把关键问题集中在：
 
 ~~~text
 shared memory
@@ -160,9 +160,9 @@ backpressure
 crash recovery
 ~~~
 
-把这些打透以后，再回去看 DDS Data Sharing / PSMX 会更容易分辨哪些是基础 IPC 机制，哪些是 DDS 语义。
+与 DDS Data Sharing / PSMX 对照时，可以据此把基础 IPC 机制与 DDS 语义分开：前者处理共享内存、ownership 与回收，后者还叠加 History、QoS 与远端可靠性协议。
 
-## 本专题主线
+## 完整数据路径
 
 ~~~text
 Node / Service
@@ -190,4 +190,4 @@ backpressure / history
 dead process cleanup
 ~~~
 
-这条链会贯穿整个专题。
+这条链完整覆盖了 sample 从共享内存分配、跨进程交付到最终回收的生命周期。

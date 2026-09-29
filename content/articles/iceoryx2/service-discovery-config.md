@@ -85,21 +85,23 @@ shared system resources
 这让 filesystem/shared-memory 等底层资源不直接依赖任意长度的用户字符串。
 
 ## Open、Create 与 Open-or-Create 是不同语义
+## Open、Create 与 Open-or-Create 是不同语义
 
 Create：
 
 ~~~text
-我要求当前不存在
-并由我创建 contract
+要求 Service 当前不存在
+由调用方建立新的 contract
 ~~~
 
 Open：
 
 ~~~text
-我要求已经存在
-并且配置兼容
+要求 Service 已经存在
+并验证当前配置与既有 contract 兼容
 ~~~
 
+Open-or-create：
 Open-or-create：
 
 ~~~text

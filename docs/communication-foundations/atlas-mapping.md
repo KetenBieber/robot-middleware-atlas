@@ -57,32 +57,32 @@ serialize
 
 所以 API 表面的一致性不能替代数据路径分析。
 
-## 推荐阅读顺序
+## 从机制复杂度看各实现的层级关系
 
-如果目标是理解通信底层，而不是某个产品：
+按机制从简单到复杂，可以排列为：
 
 ~~~text
 Communication Foundations
 ↓
 LCM
-  学最小网络数据面
+  最小网络数据面
 ↓
 iceoryx2
-  学共享内存 ownership
+  共享内存 ownership
 ↓
 eCAL / DDS
-  学多传输与生产级控制面
+  多传输与生产级控制面
 ↓
 Zenoh
-  学分布式路由
+  分布式路由
 ↓
 UCX
-  学 CPU/GPU/RDMA unified transport
+  CPU/GPU/RDMA unified transport
 ~~~
 
 ## 对具身智能最重要的连接
 
-未来整套 Atlas 会逐渐形成：
+这些项目可以按具身运行时的数据路径关系组织为：
 
 ~~~text
 Communication Foundations

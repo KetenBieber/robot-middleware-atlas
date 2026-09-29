@@ -58,7 +58,7 @@ Publisher reclaim
 
 发生了大量 descriptor、ownership 与状态管理，只是没有重复搬大 payload。
 
-## 五个最值得复用的设计思想
+## 五个关键设计原则
 
 ### 1. Storage 与 Connection 分开
 
@@ -131,7 +131,7 @@ producer private buffer
 
 iceoryx2 解决的是其中“同机进程间 CPU/shared-memory”这一层。
 
-下一步 UCX / CUDA IPC / GXF 要继续解决：
+同一分析框架扩展到异构计算后，还需要处理：
 
 ~~~text
 CPU ↔ GPU
@@ -140,7 +140,7 @@ host ↔ host
 distributed accelerator
 ~~~
 
-## Atlas 的下一层已经自然出现
+## 从同机 IPC 延伸到异构数据平面
 
 ~~~text
 Communication Foundations

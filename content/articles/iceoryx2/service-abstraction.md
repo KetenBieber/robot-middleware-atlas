@@ -96,7 +96,7 @@ PointerOffset
   走 ZeroCopyConnection
 ~~~
 
-这是整个专题最应该记住的架构边界。
+这一边界把 payload storage 与 descriptor delivery 解耦，是 iceoryx2 数据面的核心架构约束。
 
 ## Event 与 Reactor 为什么不是 Connection
 

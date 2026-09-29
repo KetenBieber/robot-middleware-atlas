@@ -24,7 +24,7 @@
 6. 过载怎么办：block、drop-new、drop-old、overwrite、retry 还是 backpressure？
 7. 异常退出怎么办：谁知道对端已经死了，谁把借出去的资源收回来？
 
-后面所有中间件文章都可以映射回这七个问题。
+这七个问题构成后续所有通信实现的统一分析坐标。
 
 ## Level 0：同线程函数调用
 
@@ -85,7 +85,7 @@ Process B:
 
 因此共享内存 IPC 通常发送 offset、segment id、slot id 或 descriptor，而不是发送虚拟地址。
 
-这也是后面 iceoryx2 的核心：
+iceoryx2 正是这一地址模型的典型实现：
 
 ~~~text
 ShmPointer
@@ -168,4 +168,4 @@ serialization + network
 descriptor + device synchronization
 ~~~
 
-以后评价任何“高性能通信”时，先标出它位于哪一级，再讨论性能才有意义。
+评价“高性能通信”时，应先标出它跨越的地址空间与 memory domain，再讨论 copy、同步和排队成本。

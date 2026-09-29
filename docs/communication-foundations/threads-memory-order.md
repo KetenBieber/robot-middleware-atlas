@@ -26,7 +26,7 @@ if (ready) {
 
 编译器和 CPU 都允许在不破坏单线程语义的前提下重排内存操作；普通 bool 也会形成 data race。
 
-因此我们需要跨线程的 happens-before 关系。
+因此必须建立跨线程的 happens-before 关系。
 
 ## Mutex 同时解决互斥与可见性
 
@@ -199,7 +199,7 @@ Core 1 writes tail
 
 ## 对 Atlas 的映射
 
-以后看到 Cyber 的 Dispatcher/Notifier、LCM 接收 ring、Fast DDS FlowController、Cyclone DDS sendq 或 GXF operator queue，都先回到本章问：
+Cyber 的 Dispatcher/Notifier、LCM 接收 ring、Fast DDS FlowController、Cyclone DDS sendq 与 GXF operator queue 都可以用同一组并发问题分析：
 
 ~~~text
 谁生产？

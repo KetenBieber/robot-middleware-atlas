@@ -21,7 +21,7 @@ $$
 如果消息平均 1 MB：
 
 $$
-100\\ \\text{MB/s}
+100\ \text{MB/s}
 $$
 
 无界队列没有消除过载，只是把它转换成不断增长的 memory、latency 和 data age。
@@ -87,7 +87,7 @@ producer 主动反复尝试。
 如果感知 producer 30 Hz，允许 consumer 最多落后 100 ms：
 
 $$
-30 \\times 0.1 = 3
+30 \times 0.1 = 3
 $$
 
 那么容量 3～4 已经表达了业务时间预算。
@@ -99,11 +99,11 @@ $$
 定义：
 
 $$
-\\text{data age}
+\text{data age}
 =
-t_{\\text{consume}}
+t_{\text{consume}}
 -
-t_{\\text{sample}}
+t_{\text{sample}}
 $$
 
 一个 pipeline 即使吞吐稳定，只要队列太深，也可能产生“稳定但永远处理旧世界”的系统。

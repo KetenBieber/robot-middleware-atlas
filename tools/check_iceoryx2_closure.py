@@ -57,6 +57,13 @@ GUIDE_REQUIRED = {
     ),
 }
 FENCE = re.compile(r"^\s*~~~")
+PROCESS_LANGUAGE = re.compile(
+    r"下一步|接下来|本专题|这个专题|推荐阅读|专题源码阅读路径|"
+    r"后面(?:再|继续|研究|文章|专题)|未来(?:整套|将会|会逐渐)|"
+    r"值得[^。；]*?(?:学习|研究)|最适合作为[^。；]*?实例|"
+    r"更适合作为[^。；]*?研究对象|应该串起来读|对 Atlas 的意义"
+)
+MALFORMED_TEX_ESCAPE = re.compile(r"\\\\(?:times|text|approx)")
 
 
 def literal_assignment(name: str):
@@ -82,6 +89,24 @@ def check_fences(path: Path, source: str, errors: list[str]) -> None:
         errors.append(f"{path.relative_to(ROOT)}:{opened}: unclosed code fence")
 
 
+def check_public_prose(path: Path, source: str, errors: list[str]) -> None:
+    in_fence = False
+    for lineno, line in enumerate(source.splitlines(), 1):
+        if FENCE.match(line):
+            in_fence = not in_fence
+            continue
+        if not in_fence and PROCESS_LANGUAGE.search(line):
+            errors.append(
+                f"{path.relative_to(ROOT)}:{lineno}: process/editorial narration: {line.strip()}"
+            )
+        if not in_fence and MALFORMED_TEX_ESCAPE.search(line):
+            errors.append(
+                f"{path.relative_to(ROOT)}:{lineno}: doubled LaTeX command escape: {line.strip()}"
+            )
+        if not in_fence and line.strip() == "]":
+            errors.append(f"{path.relative_to(ROOT)}:{lineno}: stray closing bracket")
+
+
 def main() -> int:
     errors: list[str] = []
     article_count = 0
@@ -103,6 +128,7 @@ def main() -> int:
             if term not in source:
                 errors.append(f"{path.relative_to(ROOT)}: required mechanism absent: {term}")
         check_fences(path, source, errors)
+        check_public_prose(path, source, errors)
 
     guide_folder = ROOT / "content" / "guides" / "iceoryx2"
     for slug in GUIDE_NAMES:
@@ -118,6 +144,7 @@ def main() -> int:
             if term not in source:
                 errors.append(f"{path.relative_to(ROOT)}: required lab concept absent: {term}")
         check_fences(path, source, errors)
+        check_public_prose(path, source, errors)
 
     try:
         order = tuple(literal_assignment("ARTICLE_ORDER")["iceoryx2"])
