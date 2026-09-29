@@ -5,6 +5,7 @@ release = "2026.09"
 extensions = [
     'sphinxcontrib.mermaid',
     "myst_parser",
+    "sphinx.ext.mathjax",
     "sphinx_copybutton",
     "sphinx_rtd_theme",
 ]
@@ -46,6 +47,7 @@ html_css_files = ["custom.css"]
 myst_enable_extensions = [
     "colon_fence",
     "deflist",
+    "dollarmath",
     "fieldlist",
     "tasklist",
 ]

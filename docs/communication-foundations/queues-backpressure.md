@@ -1,170 +1,474 @@
-# 队列与背压：吞吐不足时，系统必须明确选择“旧数据、阻塞还是丢失”
+# 队列与背压：吞吐不足时，系统必须明确选择“等待、丢失还是变旧”
 
-通信系统的稳定态通常不难。真正决定架构质量的是：
+:::{contents} 本页目录
+:depth: 3
+:local:
+:::
 
-> Consumer 比 Producer 慢时怎么办？
+通信系统在负载很低时通常都显得很优秀。真正能区分设计质量的时刻，是：
 
-## 无界队列只是把故障推迟
+> Producer 持续比 Consumer 快时，系统到底怎么办？
 
-假设：
+这不是一个“性能优化细节”，而是通信语义本身。
 
-~~~text
-Producer = 1000 msg/s
-Consumer = 900 msg/s
-~~~
+如果这个问题没有明确答案，队列就会替系统积累债务，最终以延迟、内存、丢包或控制失效的形式爆出来。
 
-每秒积压：
+## 先用最简单的速率模型看清“积压”
+
+设 Producer 到达速率为：
+
 $$
-1000 - 900 = 100
+\lambda = 1000\ \text{msg/s}
 $$
 
-如果消息平均 1 MB：
+Consumer 服务速率为：
+
+$$
+\mu = 900\ \text{msg/s}
+$$
+
+只要长期满足：
+
+$$
+\lambda > \mu
+$$
+
+积压就会持续增长。
+
+每秒增长：
+
+$$
+\lambda - \mu = 100\ \text{msg/s}
+$$
+
+如果每条消息 1 MB，相当于：
 
 $$
 100\ \text{MB/s}
 $$
 
-无界队列没有消除过载，只是把它转换成不断增长的 memory、latency 和 data age。
+的内存债务。
 
-## 有界队列强迫系统做选择
+所以“无界队列不丢消息”并不是免费可靠性，而是：
 
-队列满以后只能有少数几种策略。
+> 把过载从数据丢失转换成无限增长的 memory 与 latency。
 
-### Block
+## Queue depth 其实就是“允许系统落后多久”
+
+假设相机 30 Hz，业务允许感知最多落后 100 ms：
+
+$$
+30 \times 0.1 = 3
+$$
+
+那么 queue depth 约 3～4 条就已经表达了这个时间预算。
+
+反过来，如果随手配置：
+
+~~~text
+depth = 1000
+~~~
+
+理论上系统可能在负载异常时堆积几十秒旧帧。
+
+这就是为什么实时机器人系统里，**queue depth 不应该只按“越大越安全”来配**。
+
+## Data Age：控制系统通常比吞吐更在乎这个量
+
+定义一条样本从采样到真正被消费的年龄：
+
+$$
+\text{data age}
+=
+t_{consume}
+-
+t_{sample}
+$$
+
+一个 pipeline 完全可能满足：
+
+~~~text
+没有丢帧
+吞吐稳定
+CPU 也没爆
+~~~
+
+但控制器一直在处理 500 ms 以前的世界。
+
+这叫：
+
+> 稳定地处理旧数据。
+
+因此对 perception/control，除了 throughput，还应持续观测：
+
+- queue depth；
+- oldest sample age；
+- end-to-end data age；
+- drop count；
+- p95/p99 latency。
+
+## 队列满以后，系统事实上只有几种选择
+
+### Block：把压力向上游传播
 
 ~~~text
 Producer
   ↓
 queue full
   ↓
-wait until consumer pops
+wait
+  ↓
+Consumer pops
+  ↓
+Producer continues
 ~~~
 
-优点是不丢。代价是上游线程被 backpressure 传播。
+优点：
 
-如果 producer 就是控制线程，阻塞时间必须进入 WCET。
+- 不主动丢数据；
+- 生产速率最终会被消费速率约束。
 
-### Drop New
+代价：
+
+- Producer 线程被阻塞；
+- backpressure 可能一路传播到采集/控制线程；
+- 阻塞时间必须进入 WCET。
+
+如果 Publisher 正处在 1 kHz 控制循环里，这个策略就要非常谨慎。
+
+### Drop New：保留历史，拒绝新数据
 
 ~~~text
-queue full
-new message arrives
-→ discard new
+queue = [100, 101, 102]
+new = 103
+↓
+drop 103
 ~~~
 
-保留历史，但新状态无法及时进入系统。
+它适合“旧任务必须完成”的 work queue，但对于状态流可能很糟糕：系统会继续处理旧世界，却把最新状态扔掉。
 
-适合某些必须完整处理旧任务的工作队列，不适合 latest-state 控制。
-
-### Drop Old / Overwrite
+### Drop Old：牺牲历史，保留新鲜度
 
 ~~~text
-queue full
-discard oldest
-insert newest
+queue = [100, 101, 102]
+new = 103
+↓
+drop 100
+queue = [101, 102, 103]
 ~~~
 
-牺牲完整历史，控制 data age。
-
-感知与状态估计经常更关注最新状态。
-
-### Retry
-
-producer 主动反复尝试。
-
-这不是免费方案：retry 会消耗 CPU，并可能形成 priority inversion 或 busy spin。
-
-## Safe Overflow 与普通覆盖的区别
-
-一个 shared-memory queue 若要覆盖旧 slot，必须保证旧 slot 没有仍被 consumer 借用。
-
-因此“覆盖最旧数据”在 zero-copy 系统里往往需要更多 ownership tracking。
-
-不能把 ring overwrite 直接等价成 zero-copy safe overflow。
-
-## Queue Capacity 应该从时间预算推导
-
-如果感知 producer 30 Hz，允许 consumer 最多落后 100 ms：
-
-$$
-30 \times 0.1 = 3
-$$
-
-那么容量 3～4 已经表达了业务时间预算。
-
-如果随手配 depth = 1000，反而可能允许系统积累几十秒的旧数据。
-
-## Data Age 比 Throughput 更重要
-
-定义：
-
-$$
-\text{data age}
-=
-t_{\text{consume}}
--
-t_{\text{sample}}
-$$
-
-一个 pipeline 即使吞吐稳定，只要队列太深，也可能产生“稳定但永远处理旧世界”的系统。
-
-## 多级队列会叠加
-
-典型链：
+这更符合很多感知流：
 
 ~~~text
-application queue
-→ middleware history
-→ async send queue
-→ socket buffer
-→ NIC TX ring
-→ network
-→ NIC RX ring
-→ receive queue
-→ executor queue
+旧图像错过就错过
+最新图像更有价值
 ~~~
 
-每一层单独看只有几毫秒，叠加后可能形成很大的尾延迟。
+### Overwrite / Latest-only：队列退化成 mailbox
 
-所以分析一个 middleware 的 latency 时，要先画出所有排队点。
+控制状态常常更极端：
 
-## Backpressure 传播方向
+~~~text
+100
+101
+102
+103
+~~~
 
-真正的 backpressure 是：
+Consumer 醒来只需要 **103**。
+
+这时最自然的数据结构不是深 FIFO，而是：
+
+~~~text
+single latest slot
+double buffer
+versioned mailbox
+~~~
+
+### Retry：没有阻塞，但会消耗 CPU
+
+~~~text
+try enqueue
+failed
+try again
+failed
+...
+~~~
+
+如果 retry 是 busy spin，它会把“队列满”转换成 CPU 占用和 cache contention。
+
+因此 retry policy 必须和退避策略一起看。
+
+## Backpressure 的定义不是“队列满了”
+
+真正的 Backpressure 是压力沿调用链传播：
+
+~~~text
+Consumer slow
+↓
+receive queue full
+↓
+middleware cannot accept more
+↓
+publisher send/commit slows
+↓
+upstream producer slows
+~~~
+
+如果中间某层选择 drop：
 
 ~~~text
 Consumer slow
 ↓
 queue full
 ↓
-Publisher cannot commit/send
+drop-old
 ↓
-upstream caller slows
+Publisher continues normally
 ~~~
 
-如果中间层选择 drop，backpressure 就在该层被“截断”，代价转化成数据丢失。
+backpressure 就在这一层被截断，代价转化成数据丢失。
 
-没有绝对最好策略，只有业务语义不同。
+因此 **drop** 和 **backpressure** 是两种不同的过载语义。
 
-## 控制、感知、日志通常不该共用同一种策略
+## 多级队列为什么会制造尾延迟
 
-控制命令：
+一条真实通信链往往不止一个 queue：
 
 ~~~text
-latest-only / bounded / fail-safe
+application queue
+→ middleware history
+→ async send queue
+→ kernel socket buffer
+→ NIC TX ring
+→ network
+→ NIC RX ring
+→ kernel receive buffer
+→ middleware receive queue
+→ executor queue
 ~~~
 
-感知帧：
+假设每层只允许排队 5 ms，十层叠加就可能出现 50 ms。
+
+更糟的是，很多层的排队并不是固定 5 ms，而是随着 burst 和调度抖动变化。
+
+所以排查延迟不能只在 API 两端打 timestamp；必须把中间所有 queue point 画出来。
+
+## Little's Law 为什么值得记住
+
+稳定系统里，一个非常实用的关系是：
+
+$$
+L = \lambda W
+$$
+
+其中：
+
+- **L**：系统中平均存在的任务数；
+- **lambda**：平均到达速率；
+- **W**：平均停留时间。
+
+它给一个很直观的工程关系：
+
+> 队列里平均堆得越多，平均等待时间就越长。
+
+所以看到“queue depth 经常保持在 20”时，不要只把它当一个容量数字，它已经在暗示时延。
+
+## Zero-copy 系统里的 Drop Old 更难
+
+普通 copied queue 想丢最旧数据很简单：
 
 ~~~text
-drop-old often acceptable
+pop oldest
+destroy
 ~~~
 
-日志：
+但 shared-memory loan 里，“最旧 descriptor”对应的 payload 可能仍被 Consumer 借用。
 
 ~~~text
-prefer complete history
-can buffer or write asynchronously
+queue says oldest = Chunk X
+Consumer still reading Chunk X
 ~~~
 
-把三种流量全部塞进同一种 FIFO，是很多机器人运行时尾延迟问题的根源。
+这时直接覆盖 X 会破坏内存安全。
+
+因此 production zero-copy 的 **safe overflow** 必须把 queue policy 与 ownership tracking 结合起来。
+
+这也是为什么共享内存系统里“overwrite”不是一个简单 ring index 操作。
+
+## DDS 的 History / ResourceLimits 本质上就在表达容量语义
+
+DDS 看起来有很多 QoS 名词，但放进队列视角会直观很多。
+
+例如：
+
+~~~text
+KEEP_LAST(depth=N)
+~~~
+
+本质上是在说：
+
+> 每个 instance/history 最多保留有限数量样本。
+
+而：
+
+~~~text
+KEEP_ALL
+~~~
+
+并不意味着真正无限；仍然要受 ResourceLimits 和实现资源约束。
+
+再叠加 Reliability、FlowController、WriterHistory、ReaderHistory，就会形成：
+
+~~~text
+应用写入
+↓
+Writer history
+↓
+可靠性保留 / 重传
+↓
+发送调度
+↓
+Reader history
+↓
+应用 take/read
+~~~
+
+因此 DDS 性能问题经常不是“UDP 慢”，而是 history 与可靠性状态让数据在多个层级被保留。
+
+可以继续看 Fast DDS 的 [WriterHistory reliability](../generated/fastdds/writerhistory-reliability.md) 与 [FlowController](../generated/fastdds/flowcontroller-async.md)。
+
+## Credit-based Flow Control：背压也可以显式表达“你还能发多少”
+
+除了“队列满了再阻塞”，还可以让 Consumer 或下游明确告诉上游可用额度：
+
+~~~text
+Consumer grants 8 credits
+↓
+Producer may send 8 items
+↓
+credits consumed
+↓
+Consumer releases capacity
+↓
+new credits returned
+~~~
+
+这种机制的好处是，容量限制在发送之前就可见，不必等到某一层 buffer 已经塞满。
+
+网络 transport、RDMA、流式 runtime 中经常能看到类似思想。
+
+## 控制、感知、规划、日志不应该共用一种 Queue Policy
+
+### 控制状态
+
+目标是低 data age：
+
+~~~text
+latest-only
+bounded
+drop-old
+fail-safe
+~~~
+
+### 感知帧
+
+通常允许丢部分帧，但不希望延迟不断堆积：
+
+~~~text
+small bounded queue
+drop-old
+monitor age
+~~~
+
+### 规划任务
+
+可能更像 work queue：
+
+~~~text
+有限任务
+明确 cancel
+可能需要每个请求都有结果
+~~~
+
+### 日志
+
+更关注完整性：
+
+~~~text
+larger buffer
+asynchronous disk writer
+batching
+backpressure or loss accounting
+~~~
+
+把这些流量都塞进一个“默认 FIFO depth=1000”，几乎一定会掩盖业务语义。
+
+## Queue Capacity 应该从 deadline 反推，而不是拍脑袋
+
+一个实用设计过程：
+
+假设：
+
+~~~text
+sensor rate = 50 Hz
+max acceptable age = 80 ms
+consumer worst temporary stall = 40 ms
+~~~
+
+80 ms 里最多产生：
+
+$$
+50 \times 0.08 = 4
+$$
+
+条样本。
+
+于是初始容量可以围绕 4～5 设计，再结合 burst、调度抖动和测量调整。
+
+这比“内存很多，先给 1024”更接近实时系统逻辑。
+
+## 真正应该监控哪些指标
+
+如果一个中间件只告诉你“发送成功多少条”，信息远远不够。
+
+通信队列至少应该能观察：
+
+~~~text
+current depth
+high-water mark
+enqueue failures
+drops by reason
+oldest sample age
+time spent blocked
+retry count
+consumer lag
+pool free chunks
+p50/p95/p99 latency
+~~~
+
+这些指标能把“偶尔卡一下”拆成具体机制：
+
+~~~text
+是 queue 深？
+是 Consumer 慢？
+是 scheduler 抖？
+是 pool 耗尽？
+是可靠性重传？
+~~~
+
+## 一句话把队列问题串起来
+
+队列不是“装消息的容器”，而是一份延迟和过载契约。
+
+真正需要确定的是：
+
+~~~text
+哪些消息必须完整保留？
+哪些消息过期后就没价值？
+系统允许落后多久？
+队列满时谁承担代价？
+压力要不要传播给上游？
+~~~
+
+回答完这些问题以后，才轮到 **std::deque、ring buffer、lock-free queue、DDS History、shared-memory descriptor queue** 这些具体实现。

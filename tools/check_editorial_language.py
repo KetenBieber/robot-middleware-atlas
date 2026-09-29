@@ -8,8 +8,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SEARCH_ROOTS = [ROOT / "content", ROOT / "docs"]
 
-# These expressions represent internal production/review language.  Natural
-# technical uses such as "用户回调" are intentionally not banned.
+# Only internal production/review language is forbidden. Natural tutorial
+# transitions are legitimate blog prose and must not be confused with
+# agent work logs or review-state narration.
 FORBIDDEN = {
     "legacy provenance plaques": re.compile(
         r"^\s*\*\*(?:代码身份|图示身份|教学代码|固定提交源码摘录|固定源码摘录|源码摘录)"
@@ -34,11 +35,6 @@ FORBIDDEN = {
     "personal request/process": re.compile(
         r"用户提出|用户要求|你的要求|符合.*要求|本轮任务|本次任务|任务进度|当前进度|工作轮次"
     ),
-    "authorial process narration": re.compile(
-        r"下一篇|下一节|下面我们|接下来(?:会|将|要|继续|进入)|"
-        r"后面(?:会|将|继续)|后续各(?:机制|章节|文章)|"
-        r"本专题(?:将|会)|本文(?:将|会)"
-    ),
 }
 
 
@@ -47,7 +43,6 @@ def source_files():
         if root.is_dir():
             for pattern in ("*.md", "*.rst"):
                 for path in root.rglob(pattern):
-                    # Generated pages duplicate the source articles.
                     if root == ROOT / "docs" and (ROOT / "docs" / "generated") in path.parents:
                         continue
                     yield path
@@ -61,9 +56,14 @@ def main() -> int:
         in_fence = False
         fence_token: str | None = None
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            fence_match = re.match(r"^\s*(```|~~~)", line)
-            if fence_match:
-                token = fence_match.group(1)
+            stripped = line.lstrip()
+            if stripped.startswith("~~~"):
+                token = "~~~"
+            elif stripped.startswith(chr(96) * 3):
+                token = chr(96) * 3
+            else:
+                token = None
+            if token is not None:
                 if not in_fence:
                     in_fence = True
                     fence_token = token
@@ -72,7 +72,6 @@ def main() -> int:
                     fence_token = None
                 continue
             if in_fence:
-                # Editorial rules target prose, not literals inside code blocks.
                 continue
             for category, pattern in FORBIDDEN.items():
                 if pattern.search(line):

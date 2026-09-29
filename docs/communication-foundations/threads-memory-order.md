@@ -1,12 +1,21 @@
 # 线程间通信：共享地址不等于共享时序
 
-两个线程共享地址空间，所以“把一个指针交给另一个线程”看起来最简单。
+:::{contents} 本页目录
+:depth: 3
+:local:
+:::
 
-真正困难的是：
+跨线程是最容易被低估的一层。两个线程共享同一个进程、同一个虚拟地址空间，甚至可以拿到同一根指针，于是它看起来不像“真正的通信”。
 
-> Consumer 怎么知道 Producer 已经把对象写完，而且自己看到的是写完后的内容？
+但只要 Producer 和 Consumer 不再处于同一条执行序列里，问题就从“地址能不能访问”变成：
 
-## 最朴素的错误实现
+> Consumer 凭什么知道 Producer 已经写完，而且自己读到的是那次写之后的内容？
+
+这就是线程通信的核心：**共享对象 + 跨线程时序证明**。
+
+## 第一层问题：C++ 源码顺序不等于另一个核心看到的顺序
+
+先看一个很自然但错误的版本：
 
 ~~~cpp
 Frame frame;
@@ -22,13 +31,30 @@ if (ready) {
 }
 ~~~
 
-问题不只是两个线程“可能同时执行”。
+人眼会按顺序理解成：
 
-编译器和 CPU 都允许在不破坏单线程语义的前提下重排内存操作；普通 bool 也会形成 data race。
+~~~text
+先写 frame
+再写 ready=true
+Consumer 看见 ready=true
+于是 frame 肯定写完
+~~~
 
-因此必须建立跨线程的 happens-before 关系。
+但 C++ 内存模型不允许你这样推理。
 
-## Mutex 同时解决互斥与可见性
+这里至少有三层可能改变观察结果：
+
+1. 编译器可以在不破坏单线程语义时重排普通内存访问；
+2. CPU core 之间通过 cache coherence 协调，但这并不等于所有普通 load/store 自动形成语言层面的同步；
+3. 对 **ready** 的并发普通读写本身就是 data race，程序行为已经失去合法定义。
+
+因此正确问题不是“CPU 会不会刷新缓存”，而是：
+
+> 哪一个同步操作建立了 happens-before？
+
+## Mutex 为什么同时解决互斥和可见性
+
+最直接的版本是 mutex：
 
 ~~~cpp
 std::mutex m;
@@ -36,22 +62,134 @@ Frame frame;
 bool ready = false;
 
 void publish(Frame f) {
-    std::lock_guard lock(m);
+    std::lock_guard<std::mutex> lock(m);
     frame = std::move(f);
     ready = true;
 }
+
+Frame consume() {
+    std::lock_guard<std::mutex> lock(m);
+    return frame;
+}
 ~~~
 
-如果 consumer 用同一把 mutex 读取，就得到两个性质：
+mutex 做了两件不同的事。
 
-1. 同一时刻只有一方进入临界区；
-2. unlock 到随后 lock 建立可见性顺序。
+### Mutual exclusion
 
-## Acquire / Release 为什么存在
+同一时间只有一个线程可以进入临界区。
 
-如果状态很小，可以用原子变量发布数据：
+### Synchronization
+
+Producer 的 unlock 与随后成功获得同一把 mutex 的 Consumer lock 之间形成同步关系。
+
+于是可以画成：
+
+~~~text
+Producer
+write frame
+write ready
+unlock(m)
+    │
+    │ synchronizes-with
+    ▼
+lock(m)
+read ready
+read frame
+Consumer
+~~~
+
+这条边存在以后，Consumer 才有语言层面依据认为自己看到的是 Producer 发布后的状态。
+
+## Condition Variable：通知只负责“唤醒候选者”
+
+Producer/Consumer 更常见的是：
 
 ~~~cpp
+std::mutex m;
+std::condition_variable cv;
+std::queue<Frame> q;
+
+void publish(Frame f) {
+    {
+        std::lock_guard<std::mutex> lock(m);
+        q.push(std::move(f));
+    }
+    cv.notify_one();
+}
+~~~
+
+Consumer：
+
+~~~cpp
+Frame take() {
+    std::unique_lock<std::mutex> lock(m);
+
+    cv.wait(lock, [&] {
+        return !q.empty();
+    });
+
+    Frame f = std::move(q.front());
+    q.pop();
+    return f;
+}
+~~~
+
+这里最重要的不是 **notify_one()** 这个 API，而是时间线：
+
+~~~text
+Producer
+push
+unlock
+notify
+  │
+  ▼
+Consumer 从 blocked 变成 runnable
+  │
+  ▼
+OS scheduler 决定它什么时候真正运行
+  │
+  ▼
+Consumer 重新竞争 mutex
+  │
+  ▼
+再次检查 predicate
+  │
+  ▼
+pop
+~~~
+
+因此：
+
+> notify 不等于立即执行 callback。
+
+如果系统有严格的 1 ms deadline，那么线程唤醒、run queue、优先级和 mutex 竞争都必须进入延迟预算。
+
+### 为什么 wait 必须带 predicate
+
+condition variable 允许 spurious wakeup，而且 notify 也可能发生在 Consumer 真正 wait 之前。
+
+所以逻辑不能写成：
+
+~~~cpp
+cv.wait(lock);
+return q.front();
+~~~
+
+而应该始终围绕共享状态：
+
+~~~text
+“只要 queue 非空，我就能继续。”
+~~~
+
+condition variable 是“减少无意义等待”的机制，**queue 是否为空才是事实来源**。
+
+## Acquire / Release：给普通数据建立发布边
+
+如果一个对象只由 Producer 写一次，Consumer 在发布后只读，可以用原子变量建立发布关系：
+
+~~~cpp
+Frame frame;
 std::atomic<bool> ready{false};
 
 // producer
@@ -64,148 +202,325 @@ if (ready.load(std::memory_order_acquire)) {
 }
 ~~~
 
-逻辑是：
+可以把它理解成一扇门：
 
 ~~~text
-Producer:
-写 frame
-   ↓
-release store ready=true
-
-        synchronizes-with
-
-Consumer:
-acquire load ready==true
-   ↓
-随后读取 frame
+Producer side
+----------------------
+write frame
+write metadata
+release-store ready=true
+            │
+            │ synchronizes-with
+            ▼
+acquire-load ready==true
+read metadata
+read frame
+----------------------
+Consumer side
 ~~~
 
-release 不允许关键的先前写被观察成出现在发布点之后；acquire 不允许关键的后续读被观察成出现在接收点之前。
+release 的含义不是“立刻把所有缓存刷到内存”，acquire 也不是“强制重新读 DRAM”。
 
-这不是简单的“强制刷新缓存”，而是在语言内存模型里建立可证明的跨线程顺序。
+更准确的理解是：
 
-## Condition Variable：notify 不等于立即执行
+> release/acquire 在 C++ 内存模型里给一组读写建立可证明的顺序边。
 
-典型 producer：
+当 Consumer 的 acquire 确实读到了 Producer release 写出的那个值时，发布点之前的写就 happens-before Consumer 在 acquire 之后的读。
+
+## 为什么 relaxed 不够做“发布数据”
+
+把上面的 ready 改成：
 
 ~~~cpp
-{
-    std::lock_guard lock(m);
-    queue.push(item);
-}
-cv.notify_one();
+ready.store(true, std::memory_order_relaxed);
 ~~~
 
-consumer：
+relaxed 仍能保证这个 atomic 自身的读改写原子性，但不负责把普通的 **frame** 写入与 ready 的发布绑定成跨线程顺序。
 
-~~~cpp
-std::unique_lock lock(m);
-cv.wait(lock, [&] { return !queue.empty(); });
-auto item = queue.front();
-queue.pop();
-~~~
+它适合计数器、统计量等只关心 atomic 自身值的场景，却不能单独承担“对象已经初始化完毕”的发布语义。
 
-真实时间线是：
+## Queue 其实是“数据结构语义 + 同步语义”
+
+谈线程通信时，很容易把讨论简化成：
 
 ~~~text
-Producer
-push
-unlock
-notify
-   │
-   ▼
-Consumer 由 blocked 变成 runnable
-   │
-   ▼
-OS scheduler 决定什么时候获得 CPU
-   │
-   ▼
-重新拿 mutex
-   │
-   ▼
-消费数据
+vector 还是 deque？
+mutex 还是 lock-free？
 ~~~
 
-因此 notify_one 只改变等待条件，不承诺 callback 立刻执行。
+但队列首先要回答业务语义。
 
-## Ring Buffer 为什么常见
+### FIFO：每条都要保留
 
-如果 producer/consumer 模式固定，通用容器常常不是最合适的。
+~~~text
+100 → 101 → 102 → 103
+              ↑
+         Consumer 逐个处理
+~~~
 
-SPSC ring：
+适合命令任务、日志、事务型工作。
+
+### Latest-value：旧数据一旦过期就没有价值
+
+控制器读状态时，Consumer 如果落后：
+
+~~~text
+pose 100
+pose 101
+pose 102
+~~~
+
+它可能真正想要的是：
+
+~~~text
+直接读 pose 102
+~~~
+
+这时一个深 FIFO 反而制造 data age。
+
+### Bounded work queue：保留有限历史
+
+感知 pipeline 可能允许最多缓存 2～3 帧，超过以后 drop-old。
+
+这种语义必须先定，再决定容器。
+
+## SPSC Ring：为什么单生产者单消费者可以做得很轻
+
+Single Producer Single Consumer ring 的关键结构非常简单：
 
 ~~~text
 slots[0 ... N-1]
 
-producer owns head
-consumer owns tail
+Producer owns head
+Consumer owns tail
 ~~~
 
-在合理设计下，两边可以避免争抢同一个容器元数据。
+Producer：
 
-但仍然要处理 head/tail 原子顺序、cache line false sharing、容量满、wrap around 与 shutdown。
+~~~cpp
+auto next = (head + 1) % N;
+if (next == tail.load(std::memory_order_acquire)) {
+    // full
+}
 
-## Latest-value Slot 与 FIFO 是两种语义
+slots[head] = item;
+head.store(next, std::memory_order_release);
+~~~
 
-控制系统经常只想要最新状态：
+Consumer：
+
+~~~cpp
+if (tail == head.load(std::memory_order_acquire)) {
+    // empty
+}
+
+auto item = slots[tail];
+tail.store((tail + 1) % N, std::memory_order_release);
+~~~
+
+这里设计成立的原因是：
+
+- 只有 Producer 修改 head；
+- 只有 Consumer 修改 tail；
+- 双方读取对方索引来判断 full/empty；
+- payload 写入和 head 发布之间需要正确的 release/acquire。
+
+所谓“lock-free ring”并不是把同步消失了，而是把：
 
 ~~~text
-frame 100
-frame 101
-frame 102
+一个共享 mutex
 ~~~
 
-如果 consumer 落后，FIFO 会让它继续处理 100、101，再看到 102。
-
-但控制系统可能真正想要：
+拆成了：
 
 ~~~text
-直接覆盖成 102
+两个单写者索引 + 有方向的内存顺序
 ~~~
 
-于是需要 latest-value mailbox / double buffer，而不是 queue。
+## MPSC / MPMC 为什么复杂度突然上升
 
-先问：
+一旦多个 Producer 同时抢同一个 enqueue 位置：
 
 ~~~text
-业务需要每一条历史？
-还是只需要最新状态？
+Producer A ─┐
+Producer B ─┼→ next slot?
+Producer C ─┘
 ~~~
 
-这比“vector 还是 deque”更早。
+就需要对“谁获得哪个 slot”做竞争仲裁。
 
-## Lock-free 不等于 Wait-free
+常见机制包括：
 
-blocking、lock-free 和 wait-free 描述的是不同进展保证。
+- CAS；
+- ticket/sequence number；
+- per-slot state；
+- linked nodes；
+- sharded queues；
+- central lock。
 
-lock-free queue 仍可能让某一个线程反复 CAS 失败。
+所以看到一个 MPMC queue 时，不要只看“没有 mutex”，还要看它是否在高冲突下反复 CAS，以及 memory reclamation 怎么做。
 
-所以：
+## Lock-free 不等于 Wait-free，更不等于固定 WCET
 
-> 没有 mutex 不等于有确定 WCET。
+几个概念必须分开：
 
-## False Sharing
+- **blocking**：线程可能因为锁、条件变量、系统调用睡眠；
+- **lock-free**：系统整体保证持续前进，但某一个线程可能一直失败；
+- **wait-free**：每个操作都能在有界步骤内完成。
 
-两个独立 atomic 如果落在同一 cache line：
+一个 lock-free CAS loop：
+
+~~~cpp
+while (!state.compare_exchange_weak(old, desired)) {
+    // retry
+}
+~~~
+
+没有 mutex，但某个线程仍可能反复失败。
+
+因此：
+
+> “没有锁”不能直接推出“实时性更好”。
+
+实时系统更关心的是最坏执行路径、调度优先级、缓存行为和 contention 上界。
+
+## False Sharing：逻辑上互不相关，物理 cache line 却在打架
+
+假设 head 和 tail 恰好落在同一 cache line：
 
 ~~~text
-Core 0 writes head
-Core 1 writes tail
+cache line
++-------------------------------+
+| head | tail | other metadata  |
++-------------------------------+
+  ↑      ↑
+ Core0  Core1
+ write  write
 ~~~
 
-即使逻辑完全独立，cache coherence 仍可能让 cache line 在核心间来回迁移。
+Producer 频繁写 head，Consumer 频繁写 tail。
 
-高频 ring 常把 producer 与 consumer 的热点索引分开到不同 cache line。
+虽然它们从不写同一个变量，但 cache coherence 以 cache line 为粒度，line 可能在两个核心间反复迁移。
 
-## 对 Atlas 的映射
+因此高频 ring 常会把热点状态分开：
 
-Cyber 的 Dispatcher/Notifier、LCM 接收 ring、Fast DDS FlowController、Cyclone DDS sendq 与 GXF operator queue 都可以用同一组并发问题分析：
+~~~cpp
+struct alignas(64) ProducerState {
+    std::atomic<size_t> head;
+};
+
+struct alignas(64) ConsumerState {
+    std::atomic<size_t> tail;
+};
+~~~
+
+这就是为什么“数据结构布局”本身会影响通信性能。
+
+## 线程唤醒是一个完整调度链，不是一个函数调用
+
+哪怕 queue 和 memory order 都正确，Consumer 仍可能在睡眠。
+
+真实链路经常是：
+
+~~~text
+Producer commits data
+↓
+event / futex / condition variable
+↓
+kernel marks Consumer runnable
+↓
+scheduler chooses a core
+↓
+context switch
+↓
+Consumer resumes
+↓
+cache working set warms up
+↓
+callback runs
+~~~
+
+对于 10 Hz 的 UI，这些成本无所谓；对于 1 kHz 控制环，它们可能是主要抖动来源。
+
+因此需要区分：
+
+~~~text
+busy polling
+blocking wait
+hybrid spin-then-sleep
+event-driven callback
+fixed-rate polling
+~~~
+
+每一种都是延迟、CPU 占用、能耗和可预测性的交换。
+
+## Priority inversion：高优先级线程也可能被低优先级资源持有者拖住
+
+假设：
+
+~~~text
+Low priority thread
+holds mutex
+    ↓
+High priority control thread blocks on mutex
+    ↓
+Medium priority thread keeps running
+~~~
+
+高优先级线程最终会被一个低优先级锁持有者间接阻塞。
+
+因此实时系统会关心 priority inheritance、priority ceiling，或者通过单写者数据结构减少共享锁。
+
+这也是“线程通信机制”最终会和调度策略连起来的原因。
+
+## Intra-process zero-copy 的真正条件
+
+同进程最容易做 zero-copy，但也不是“传个 shared_ptr 就结束”。
+
+至少要回答：
+
+~~~text
+Producer 发布后还能不能修改？
+多个 Consumer 是只读还是可写？
+最后一个引用何时释放？
+allocator 是否产生抖动？
+callback 是否可能把对象长期持有？
+~~~
+
+一个合理模型往往是：
+
+~~~text
+mutable producer-owned object
+↓ publish
+immutable shared object
+↓ fan-out read
+last reader releases
+↓ recycle to pool
+~~~
+
+这已经和跨进程 shared-memory loan 的状态机非常接近。
+
+## 把 Atlas 中的线程机制放回这张图
+
+读具体中间件时，可以直接用这一页的框架：
+
+- Cyber：Dispatcher / Notifier / CRoutine Scheduler 的数据提交与唤醒；
+- LCM：receive queue、notify pipe、handle 线程；
+- Fast DDS：FlowController、receiver thread、WaitSet；
+- Cyclone DDS：receive/delivery thread、sendq、WaitSet；
+- iceoryx2：event/listener/reactor 与 zero-copy queue。
+
+具体实现名字不同，但都在回答同一组问题：
 
 ~~~text
 谁生产？
 谁消费？
-哪一个线程？
-容器是什么？
-谁唤醒谁？
-队列满怎么办？
+数据结构是什么？
+同步边在哪里？
+谁负责唤醒？
+回调运行在哪条执行流？
+队列满了怎么办？
 ~~~
+
+一旦这些问题能从源码里逐一指出来，线程间 communication 才算真正拆完。

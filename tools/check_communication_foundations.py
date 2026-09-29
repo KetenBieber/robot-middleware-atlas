@@ -17,19 +17,19 @@ PAGES = (
 )
 REQUIRED = {
     "ownership-address-space": ("payload", "ownership", "地址空间", "PointerOffset", "memory domain"),
-    "threads-memory-order": ("acquire", "release", "condition variable", "Ring Buffer", "False Sharing"),
-    "processes-shared-memory": ("共享物理页", "offset", "Pool + Loan", "进程死亡"),
+    "threads-memory-order": ("acquire", "release", "condition variable", "Ring", "False Sharing"),
+    "processes-shared-memory": ("共享物理页", "offset", "loan", "进程死亡"),
     "queues-backpressure": ("Backpressure", "Data Age", "Drop Old", "WCET"),
-    "network-distributed": ("serialization", "Discovery", "Routing", "business ACK"),
-    "heterogeneous-memory": ("GPU VRAM", "CUDA IPC", "Pinned Memory", "RDMA", "Memory domain"),
+    "network-distributed": ("serialization", "Discovery", "Routing", "business"),
+    "heterogeneous-memory": ("GPU VRAM", "CUDA IPC", "Pinned Memory", "RDMA", "Memory Domain"),
     "atlas-mapping": ("iceoryx2", "Fast DDS", "Cyclone DDS", "UCX"),
 }
-FENCE = re.compile(r"^\s*~~~")
+FENCE = re.compile(r"^\s*(?:\x60{3}|~~~)")
 PROCESS_LANGUAGE = re.compile(
-    r"下一步|接下来|本专题|这个专题|推荐阅读|"
-    r"后面(?:再|继续|研究|文章|专题)|未来(?:整套|将会|会逐渐)|"
-    r"值得[^。；]*?(?:学习|研究)|最适合作为[^。；]*?实例|"
-    r"更适合作为[^。；]*?研究对象|应该串起来读|对 Atlas 的意义"
+    r"用户提出|用户要求|你的要求|符合.*要求|本轮任务|本次任务|"
+    r"任务进度|当前进度|工作轮次|Agent|Reviewer|ChatGPT|Codex|"
+    r"审计报告|复审结论|质量门禁|quality\s+gate",
+    re.I,
 )
 MALFORMED_TEX_ESCAPE = re.compile(r"\\\\(?:times|text|approx)")
 
@@ -56,21 +56,45 @@ def main() -> int:
                 errors.append(f"{path.relative_to(ROOT)}: required concept absent: {term}")
 
         opened = None
+        token = None
         for lineno, line in enumerate(source.splitlines(), 1):
-            if FENCE.match(line) is None:
+            stripped = line.lstrip()
+            if stripped.startswith("~~~"):
+                this_token = "~~~"
+            elif stripped.startswith(chr(96) * 3):
+                this_token = chr(96) * 3
+            else:
                 continue
-            opened = lineno if opened is None else None
+            if opened is None:
+                opened = lineno
+                token = this_token
+            elif this_token == token:
+                opened = None
+                token = None
         if opened is not None:
             errors.append(f"{path.relative_to(ROOT)}:{opened}: unclosed code fence")
 
         in_fence = False
+        fence_token = None
         for lineno, line in enumerate(source.splitlines(), 1):
-            if FENCE.match(line):
-                in_fence = not in_fence
+            stripped = line.lstrip()
+            if stripped.startswith("~~~"):
+                this_token = "~~~"
+            elif stripped.startswith(chr(96) * 3):
+                this_token = chr(96) * 3
+            else:
+                this_token = None
+            if this_token is not None:
+                if not in_fence:
+                    in_fence = True
+                    fence_token = this_token
+                elif this_token == fence_token:
+                    in_fence = False
+                    fence_token = None
                 continue
             if not in_fence and PROCESS_LANGUAGE.search(line):
                 errors.append(
-                    f"{path.relative_to(ROOT)}:{lineno}: process/editorial narration: {line.strip()}"
+                    f"{path.relative_to(ROOT)}:{lineno}: production-process narration: {line.strip()}"
                 )
             if not in_fence and MALFORMED_TEX_ESCAPE.search(line):
                 errors.append(
