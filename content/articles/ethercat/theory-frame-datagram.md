@@ -299,4 +299,4 @@ T_software
 
 因此优化 frame packing 不只是“省带宽”，还会影响 frame 数、网卡提交次数、poll 后的解析工作和最终 jitter。
 
-下一篇会继续向上走：为什么逻辑 Datagram 能直接覆盖多从站 PDO，以及 FMMU、SyncManager、PDO 与 process image 到底是什么关系。
+逻辑 Datagram 能覆盖多个从站 PDO，依赖的正是更高一层的地址映射：FMMU 把逻辑地址映射到从站物理区域，SyncManager 约束交换窗口，PDO 定义过程数据布局，最终共同形成连续 process image。

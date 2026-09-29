@@ -131,7 +131,7 @@ RTPS message
 
 它省掉 kernel UDP/TCP path，但仍保留 RTPS message framing 与 transport 语义。
 
-这和 Data Sharing 完全不同，下一篇会直接对照。
+这和 Data Sharing 是两个不同层级：SHM Transport 仍搬运 RTPS message，而 Data Sharing 直接改变同机 endpoint 间 payload/history 的交付方式。
 
 ## SendBuffersManager 为什么在 Participant 级别
 

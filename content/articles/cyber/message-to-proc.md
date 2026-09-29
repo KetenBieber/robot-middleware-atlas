@@ -72,7 +72,7 @@ void RtpsDispatcher::OnMessage(uint64_t channel_id,
 
 Cyber RT 选择把链路拆成两部分：接收线程只完成解析、缓存和通知；长期存在的 Processor 线程从调度器选择已经就绪的协程，再运行 `Proc()`。这样慢业务不会直接占住 transport listener，但代价是多出排队、唤醒和调度延迟。后文看到的每个对象，都在完成这次拆分中的一个具体责任。
 
-后面会出现不少类名，可以先把它们压缩成三个角色。假设 `/camera/front` 刚收到第 42 帧图像：
+这些类名可以先压缩成三个职责角色。假设 `/camera/front` 刚收到第 42 帧图像：
 
 ```text
 放数据的人：Receiver -> DataDispatcher -> CacheBuffer
@@ -224,7 +224,7 @@ void StartSafe() {
 
 更容易被忽略的是第 ③ 到第 ⑤ 步。在 reality mode 下，组件创建 Reader 时没有把业务回调传进去，随后却另外创建了组件专用的 `DataVisitor` 和 task。Reader 并未因此变成空壳；它自己的 `Init()` 还会建立另一套 `DataVisitor + CRoutine`。
 
-`Reader<MessageT>::Init()` 把 Reader 的队列入口和 transport receiver 连接起来。代码中的 `Blocker` 是 Reader 供观察 API 使用的有界消息历史，不是组件执行队列；接下来会看到它是在 Reader 自己的 routine 取到消息后写入，而不是由 transport listener 直接执行算法。下列是**固定提交源码摘录**，行尾注释为本文添加：
+`Reader<MessageT>::Init()` 把 Reader 的队列入口和 transport receiver 连接起来。代码中的 `Blocker` 是 Reader 供观察 API 使用的有界消息历史，不是组件执行队列；它由 Reader 自己的 routine 在取到消息后写入，而不是由 transport listener 直接执行算法。下列是固定提交源码摘录，行尾注释为本文添加：
 
 ```cpp
 if (reader_func_ != nullptr) {

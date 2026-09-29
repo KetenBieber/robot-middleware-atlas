@@ -403,7 +403,7 @@ take QUEUED datagrams
   -> state=SENT
 ```
 
-具体字段下一篇单独拆。
+这些 EtherCAT header、datagram header、payload 与 WKC 字段共同构成 frame packing 与 receive parse 的协议基础。
 
 ## 一个周期的数据位置变化
 

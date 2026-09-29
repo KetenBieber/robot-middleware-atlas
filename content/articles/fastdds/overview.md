@@ -149,11 +149,11 @@ loan_sample
 
 SHM Transport 仍然是 Transport 层，把 RTPS message 通过共享内存传输；Data Sharing 则让 Writer/Reader 共享 history/payload pool，绕过常规 RTPS transport 数据路径；loan_sample 再进一步允许应用直接从 Writer 能管理的 pool 借出 sample memory。
 
-后面会单独拆每种机制真正省掉哪一次 copy，以及什么时候仍要 serialize。
+判断这些机制是否真正降低成本，必须分别检查它们省掉的是哪一次 copy，以及 payload 在哪些条件下仍然需要 serialization。
 
-## 固定阅读顺序
+## 一份消息的完整路径
 
-推荐沿一份消息前进：
+用一份消息贯穿对象关系：
 
 ~~~text
 Participant / Endpoint ownership

@@ -437,4 +437,4 @@ ordinary frame packing / Device transmit
 
 DC 没有另造一套网络发送系统，而是复用主站已有的数据面；这让时间同步也受到同一个 queue、带宽预算和发送时序约束。
 
-下一篇要继续追问：**周期线程、Operation kthread、FSM datagram 和普通 Domain datagram 同时存在时，谁能碰哪些数据结构，如何避免控制面把实时线程拖住？**
+真正的实时边界因此落在并发关系上：周期线程、Operation kthread、FSM datagram 和普通 Domain datagram 同时存在时，必须明确哪些数据结构由谁访问，以及控制面如何避免阻塞实时发送路径。

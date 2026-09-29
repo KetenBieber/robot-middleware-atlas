@@ -83,4 +83,4 @@ receive.c 顶部注释明确说明：dqueue enqueue 可能在持有 proxy-writer
 
 ## 从协议层到应用还差一个 RHC
 
-sample 完成 defrag/reorder 后，仍要转换为 Reader 可接受的 serdata/type，并进入每个匹配 Reader 的 RHC。下一篇会拆 Reader History 为什么比一个普通 ring buffer 复杂得多。
+sample 完成 defrag/reorder 后，仍要转换为 Reader 可接受的 serdata/type，并进入每个匹配 Reader 的 RHC。RHC 因此承担的不只是一个普通 ring buffer 的排队职责，还必须处理 DDS History/Instance 语义与应用层 read/take 生命周期。

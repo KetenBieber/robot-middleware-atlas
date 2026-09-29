@@ -162,4 +162,4 @@ StaticStorage / DynamicStorage /
 Monitoring / Event / Reactor
 ~~~
 
-后续各机制都可以定位到这张对象图中的具体边界：Service 负责契约，Port 负责端点，DataSegment 负责 payload，Connection 负责 descriptor 交付。
+这张对象图给出了各机制的边界：Service 负责契约，Port 负责端点，DataSegment 负责 payload，Connection 负责 descriptor 交付，Monitoring/Event/Reactor 则承担控制面与等待语义。

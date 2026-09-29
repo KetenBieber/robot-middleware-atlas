@@ -86,7 +86,7 @@ public:
 
 这里 `PortReader` 与 `PortWriter` 分别承诺解码和编码，`Portable` 把两者合在一个双向可传输对象里。`override = 0` 有两个作用：编译器检查它们确实覆盖了父类签名，同时让 Portable 自身保持抽象，强制具体业务类型给出字段实现。它不能自动证明 read 和 write 在所有错误路径上对称；需要消息开发者自己保证协议版本、字段顺序和边界校验一致。
 
-基于这个接口，我们可以写一个只保留类型关系的业务类。下面的声明用于教学，具体的 `read` 和 `write` 会在下一节逐字段实现：
+基于这个接口，可以构造一个只保留类型关系的业务类。下面的声明只用于说明继承与序列化接口之间的关系：
 
 ~~~cpp
 class State final : public yarp::os::Portable {
@@ -105,7 +105,7 @@ public:
 
 `template<class Writer> bool write(Writer&)` 也能消除一部分虚调用，但调用点需要同时知道消息类型和 Writer 类型。两者以模板实例编译组合，插件装载未知新 Carrier 时还要重新构造可见的模板实例与链接边界。`Portable` 使用非模板虚接口的代价是调用间接性，换取消息模块与具体 Carrier 的独立编译。
 
-还有一层比虚调用更容易成为实际瓶颈：固定源码中的 `ConnectionWriter::appendExternalBlock(const char*, size_t)` 明确让当前连接借用外部字节块，调用者必须保证传输完成前那段内存不消失。相比之下，`appendBlock` 承担复制语义。即便消息接口上的 `write` 只有一次虚调用，跨线程的 buffer 借用、序列化次数和 socket I/O 才决定能否安全地进行多连接扇出。下一节先解释为什么 `const` 仍不是“可以随便把栈对象交给异步 Worker”的许可证。
+还有一层比虚调用更容易成为实际瓶颈：固定源码中的 `ConnectionWriter::appendExternalBlock(const char*, size_t)` 明确让当前连接借用外部字节块，调用者必须保证传输完成前那段内存不消失。相比之下，`appendBlock` 承担复制语义。即便消息接口上的 `write` 只有一次虚调用，跨线程的 buffer 借用、序列化次数和 socket I/O 才决定能否安全地进行多连接扇出。`const` 只约束逻辑写入接口，并不是“可以随便把栈对象交给异步 Worker”的许可证。
 ## `const` 是可重复扇出的契约
 
 `write(...) const` 表示序列化不应修改逻辑消息。一个 PortWriter 可能被多个 OutputUnit 依次调用；若第一次 write 消耗内部 vector，第二条连接会收到空数据。

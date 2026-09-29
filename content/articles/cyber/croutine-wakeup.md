@@ -481,8 +481,8 @@ void ClassicContext::Shutdown() {
 
 `notify_one()` 也不是指定“必须唤醒执行这个 task 的某一线程”。Classic group 的多个 Processor 可以等待同一 context，醒来的 worker 再扫描全部 routine 状态。
 
-## 下一站：唤醒并不等于执行
+## 唤醒并不等于执行
 
 到这里，消息已落入缓存，通知线程已经要求 Scheduler 重新检查任务，ClassicContext 的组通知计数也让正在休眠的 Processor 有机会重新扫描。但 `notify_one()` 本身不运行 `Proc()`：Linux 先调度 OS worker，随后 `NextRoutine()` 才更新并选择一只可运行的 CRoutine。
 
-下一篇[Processor 与上下文切换](processor-context-switch.md)沿固定源码追踪优先级槽、`Processor::Run()`、`Resume/Yield`、协作式执行与关闭协议。本篇讨论的数据事件与任务状态，是下一篇全部执行动作的前提。
+完整执行链还需要经过 [Processor 与上下文切换](processor-context-switch.md) 中的优先级槽、`Processor::Run()`、`Resume/Yield` 与协作式上下文切换；这些机制决定“已被唤醒”的 CRoutine 何时真正占用 CPU。

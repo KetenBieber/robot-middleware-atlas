@@ -469,7 +469,7 @@ reliability
     }
 ```
 
-因此数据从 Session 对象转交到 Face 的 Primitives 后，`route_data` 同时能得到被共享保护的 Tables、来源 Face 状态、Push 可变借用、Reliability 参数和消费权限。`Face::send_push_consume` 只是普通同步调用，没有创建 task 或切换线程；`route_data` 在调用它的 OS 线程上继续执行，究竟是哪条线程由上游 transport/primitive 路径决定，这个函数没有设置线程 affinity。它还没有把 callback 交给业务 Executor；它接下来要解决的是来源表达式的含义与下一跳选择。
+因此数据从 Session 对象转交到 Face 的 Primitives 后，`route_data` 同时能得到被共享保护的 Tables、来源 Face 状态、Push 可变借用、Reliability 参数和消费权限。`Face::send_push_consume` 只是普通同步调用，没有创建 task 或切换线程；`route_data` 在调用它的 OS 线程上继续执行，究竟是哪条线程由上游 transport/primitive 路径决定，这个函数没有设置线程 affinity。它也没有把 callback 交给业务 Executor；当前职责仍是解释来源表达式并完成下一跳选择。
 
 ### Source Face 解释 WireExpr
 

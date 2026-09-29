@@ -186,7 +186,7 @@ bool CPublisher::Send(const std::string& payload_, long long time_)
 }
 ```
 
-这三层重载把“应用给出的字节借用”沿同步调用栈送到 Impl：`CBufferPayloadWriter` 保存地址与长度，`weak_ptr::lock()` 让本次调用取得临时强引用；零订阅时只刷新发送统计，不调用 writer。若有订阅者，函数计算或沿用时间戳，再把 payload writer 引用传给 `CPublisherImpl::Write()`。因此 `Send()` 返回之前 payload 必须保持有效；能否更早复制、在哪个 transport 复制，要继续看下一节的 `Write()`，这个门面本身没有异步队列，也没有延长原始 buffer 的所有权。源码范围固定为 `CPublisher::Send()`。
+这三层重载把“应用给出的字节借用”沿同步调用栈送到 Impl：`CBufferPayloadWriter` 保存地址与长度，`weak_ptr::lock()` 让本次调用取得临时强引用；零订阅时只刷新发送统计，不调用 writer。若有订阅者，函数计算或沿用时间戳，再把 payload writer 引用传给 `CPublisherImpl::Write()`。因此 `Send()` 返回之前 payload 必须保持有效；真正的复制位置由 `CPublisherImpl::Write()` 及其 transport 分支决定。这个门面本身没有异步队列，也没有延长原始 buffer 的所有权。源码范围固定为 `CPublisher::Send()`。
 
 这一优化避免无接收者时编码以后的传输成本，但也意味着 Publisher 不能被当作无条件日志 sink。调用者若要求始终保存数据，需要独立 recorder 或 file transport。
 

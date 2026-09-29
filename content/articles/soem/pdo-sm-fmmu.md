@@ -104,7 +104,7 @@ context->slavelist[slave].Obits = (uint16)Osize;
 context->slavelist[slave].Ibits = (uint16)Isize;
 ~~~
 
-这两个字段后面会决定：
+这两个字段直接参与决定：
 
 - IOmap 占多少 bit/byte；
 - 需要几个 FMMU；

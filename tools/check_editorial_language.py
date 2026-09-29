@@ -34,6 +34,11 @@ FORBIDDEN = {
     "personal request/process": re.compile(
         r"用户提出|用户要求|你的要求|符合.*要求|本轮任务|本次任务|任务进度|当前进度|工作轮次"
     ),
+    "authorial process narration": re.compile(
+        r"下一篇|下一节|下面我们|接下来(?:会|将|要|继续|进入)|"
+        r"后面(?:会|将|继续)|后续各(?:机制|章节|文章)|"
+        r"本专题(?:将|会)|本文(?:将|会)"
+    ),
 }
 
 

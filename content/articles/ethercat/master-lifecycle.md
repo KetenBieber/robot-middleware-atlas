@@ -279,7 +279,7 @@ RT application calls master_send
 
 sequence number 用来表达“FSM 侧产生了新工作，RT 侧还没消费”。
 
-源码后面会配合 acquire/release 内存序，这一点在 realtime-concurrency 专篇展开。
+这一 producer-consumer 交接通过 acquire/release 内存序建立可见性关系，避免 FSM 侧的新 datagram 状态被 RT 发送路径以错误顺序观察。
 
 ## active 与 config_changed 为什么分开
 
