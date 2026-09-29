@@ -10,6 +10,7 @@ Robot Middleware Source Tutorials
    :caption: 开始
 
    tutorials
+   communication-foundations/index
    choosing
    sources
 

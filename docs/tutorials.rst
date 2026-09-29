@@ -15,8 +15,8 @@ Tutorials
 
 第一次接触某个项目时，先读功能介绍与组件地图，知道它解决什么问题以及各模块为何存在；随后走完源码主链和语言机制，再用基础教程验证 API 现象，最后阅读真实项目案例。若本机环境暂时不可用，也可以先完成源码与最小复刻设计，不必把安装问题当成理解架构的前置条件。
 
-十类实现坐标
-------------
+十一类实现坐标
+----------------
 
 * Apollo Cyber RT：自动驾驶组件运行时、协程调度与有界数据缓存。
 * Orocos RTT：硬实时组件、Activity、ExecutionEngine 与 Port。
@@ -28,6 +28,7 @@ Tutorials
 * SOEM：轻量用户态 EtherCAT MainDevice Library，Context、固定 frame slot、IOmap、RAW Socket 与 OSAL/OSHW。
 * Eclipse Cyclone DDS：DDS/RTPS、自动发现、QoS、可靠性、History Cache、WaitSet 与 ROS 2 RMW。
 * eProsima Fast DDS：DDS/RTPS、CacheChange/History、Discovery Server、FlowController、Data Sharing/SHM 与 ROS 2 RMW。
+* Eclipse iceoryx2：Rust zero-copy IPC、SharedMemory、PointerOffset、loan/reclaim、backpressure 与 crash recovery。
 
 项目入口
 --------
@@ -70,6 +71,9 @@ Tutorials
    * - :doc:`eProsima Fast DDS <generated/fastdds/index>`
      - DDS Entity、QoS、Discovery Server、官方 delivery_mechanisms 与 ROS 2 rmw_fastrtps
      - CacheChange/History、StatefulWriter/Reader、FlowController、UDP/TCP/SHM、Data Sharing/loan
+   * - :doc:`Eclipse iceoryx2 <generated/iceoryx2/index>`
+     - Node/Service/Publisher/Subscriber、共享内存、loan 与 WaitSet
+     - PointerOffset、ZeroCopyConnection、fan-out/backpressure、borrow/reclaim 与 dead-node cleanup
 
 从最小单元到完整系统
 --------------------

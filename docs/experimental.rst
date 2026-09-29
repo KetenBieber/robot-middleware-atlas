@@ -6,3 +6,4 @@
 
    generated/zenoh/index
    generated/lcm/index
+   generated/iceoryx2/index
