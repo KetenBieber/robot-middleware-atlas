@@ -13,13 +13,17 @@ Communication Foundations：从线程到 GPU 的通信底层
 
 把这三条线画清楚，很多“zero-copy”“异步”“可靠”“实时”的宣传词才有可验证的含义。
 
-推荐按下面顺序阅读。前四篇建立 CPU 侧通信机制，第五篇扩展到分布式系统，第六篇进入 GPU/NPU/RDMA，最后一篇再把这些机制映射回 Atlas 中已经拆过的中间件。
+推荐按下面顺序阅读。前两篇先建立线程时序与内存模型，随后专门进入并发队列、进展保证与可运行实验；接着再扩展到进程间共享内存、背压、分布式网络和 GPU/NPU/RDMA，最后把这些机制映射回 Atlas 中已经拆过的中间件。
+
+这里有一个贯穿整章的目标：**不是只学“怎样造一个 middleware”，而是学会怎样组织程序中的数据流。** 同样的 SPSC ring、MPSC event queue、latest-value mailbox、reactor 和 bounded pool，可以出现在机器人中间件里，也可以直接出现在控制器、驱动、感知 pipeline、RTOS task 或 MCU 的 ISR → main-loop 数据通路里。
 
 .. toctree::
    :maxdepth: 2
 
    ownership-address-space
    threads-memory-order
+   concurrent-queues-progress
+   thread-dataflow-lab
    processes-shared-memory
    queues-backpressure
    network-distributed

@@ -9,6 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 PAGES = (
     "ownership-address-space",
     "threads-memory-order",
+    "concurrent-queues-progress",
+    "thread-dataflow-lab",
     "processes-shared-memory",
     "queues-backpressure",
     "network-distributed",
@@ -18,6 +20,8 @@ PAGES = (
 REQUIRED = {
     "ownership-address-space": ("payload", "ownership", "地址空间", "PointerOffset", "memory domain"),
     "threads-memory-order": ("acquire", "release", "condition variable", "Ring", "False Sharing"),
+    "concurrent-queues-progress": ("MPSC", "MPMC", "lock-free", "wait-free", "sequence", "ABA", "reclamation"),
+    "thread-dataflow-lab": ("Bounded", "SPSC", "MPSC", "eventfd", "Executor", "Robot"),
     "processes-shared-memory": ("共享物理页", "offset", "loan", "进程死亡"),
     "queues-backpressure": ("Backpressure", "Data Age", "Drop Old", "WCET"),
     "network-distributed": ("serialization", "Discovery", "Routing", "business"),

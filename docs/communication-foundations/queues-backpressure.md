@@ -109,6 +109,44 @@ CPU 也没爆
 
 ## 队列满以后，系统事实上只有几种选择
 
+在讨论 Block / Drop / Overwrite 之前，先把两个经常混在一起的维度分开：
+
+~~~text
+并发拓扑：
+SPSC / MPSC / SPMC / MPMC
+
+业务过载语义：
+block / drop-new / drop-old / latest-only / retry
+~~~
+
+它们是正交的。
+
+例如一个 MPSC queue 可以选择：
+
+~~~text
+多个 Producer
+↓
+有界容量
+↓
+满时立即失败
+~~~
+
+也可以选择：
+
+~~~text
+多个 Producer
+↓
+有界容量
+↓
+Producer 阻塞等待
+~~~
+
+所以“换成 lock-free MPSC”不会自动解决 backpressure；它只改变**竞争与同步实现**，不替你决定满载语义。
+
+这也是程序组织中一个非常重要的分层：
+
+> **Queue algorithm 解决“并发访问怎样正确”，Queue policy 解决“系统过载时应该牺牲什么”。**
+
 ### Block：把压力向上游传播
 
 ~~~text
@@ -296,6 +334,16 @@ Consumer still reading Chunk X
 
 这也是为什么共享内存系统里“overwrite”不是一个简单 ring index 操作。
 
+同样的困难在线程内 zero-copy 也存在。如果 queue 里保存的是对象指针、pool handle 或 DMA buffer descriptor，那么“丢掉 descriptor”之前必须确认：
+
+~~~text
+还有没有 Consumer 持有 payload？
+槽位是否已经归还 pool？
+是否存在异步 GPU/DMA 操作仍在使用它？
+~~~
+
+所以从普通 std::deque 迁移到 pool/ring 后，backpressure policy 会直接和 ownership state machine 耦合。
+
 ## DDS 的 History / ResourceLimits 本质上就在表达容量语义
 
 DDS 看起来有很多 QoS 名词，但放进队列视角会直观很多。
@@ -472,3 +520,16 @@ p50/p95/p99 latency
 ~~~
 
 回答完这些问题以后，才轮到 **std::deque、ring buffer、lock-free queue、DDS History、shared-memory descriptor queue** 这些具体实现。
+
+如果还需要继续回答：
+
+~~~text
+SPSC 为什么能只有单写 head/tail？
+MPSC 为什么需要 reservation 与 publication 分离？
+MPMC 的 per-slot sequence 在解决什么？
+lock-free 为什么仍可能 starvation？
+wait-free 为什么难？
+ABA 与 memory reclamation 为什么是无锁链表的核心？
+~~~
+
+继续读 [并发队列与进展保证](concurrent-queues-progress.md)；如果希望把这些机制真正写成程序，再进入 [Thread Communication Lab](thread-dataflow-lab.md)。

@@ -359,7 +359,54 @@ Producer C ─┘
 - sharded queues；
 - central lock。
 
-所以看到一个 MPMC queue 时，不要只看“没有 mutex”，还要看它是否在高冲突下反复 CAS，以及 memory reclamation 怎么做。
+但这里不能停在“列出这些名词”。真正的复杂度来自两个原本在 SPSC 中被单写者约束自动解决的问题：
+
+~~~text
+reservation:
+谁拿到逻辑位置 p？
+
+publication:
+拿到 p 的 Producer 是否已经真的把 payload 写完？
+~~~
+
+例如两个 Producer：
+
+~~~text
+P0 reserve slot 10
+P0 被抢占
+
+P1 reserve slot 11
+P1 写完
+~~~
+
+此时全局 enqueue position 即使已经走到 12，也不能推出 slot 10 已经可读。
+
+所以成熟 bounded MPSC/MPMC 结构经常给**每个物理 slot 再附一个 sequence/generation**：
+
+~~~text
+slot.sequence == p
+    → 这一轮可由 Producer 写
+
+Producer 写 payload
+    ↓
+release-store sequence = p + 1
+    → 正式发布
+
+Consumer acquire-load sequence == p + 1
+    → 才能读 payload
+
+Consumer 完成
+    ↓
+sequence = p + capacity
+    → 物理槽归还给下一轮
+~~~
+
+于是 queue 不再只是“数组 + 两个 index”，而变成：
+
+> **reservation state + per-slot ownership + publication protocol + reclaim protocol。**
+
+这一整套从 CAS、per-slot sequence、ABA 到 memory reclamation 的推导放在下一篇
+[并发队列与进展保证](concurrent-queues-progress.md) 中完整展开。
 
 ## Lock-free 不等于 Wait-free，更不等于固定 WCET
 
@@ -384,6 +431,157 @@ while (!state.compare_exchange_weak(old, desired)) {
 > “没有锁”不能直接推出“实时性更好”。
 
 实时系统更关心的是最坏执行路径、调度优先级、缓存行为和 contention 上界。
+
+还要再补一层：
+
+~~~text
+Safety:
+结构有没有被破坏？
+
+Progress:
+竞争发生时谁能完成？
+~~~
+
+lock-free 只保证“系统整体持续有人完成操作”，并不保证某一个线程有完成时间上界；wait-free 才试图给每个参与者提供有限步骤上界。
+
+因此一条控制线程真正需要问的是：
+
+~~~text
+CAS 最多失败多少次？
+是否会因为别的核心长期竞争而 starvation？
+满队列时 spin 还是返回？
+payload 析构会不会落在实时线程？
+atomic 在目标 MCU/SoC 上是否真的 lock-free？
+~~~
+
+这些问题比“库主页写着 lock-free”更接近实际实时性。
+
+## 先用拓扑减少共享，再谈无锁优化
+
+如果程序有：
+
+~~~text
+16 Producers
+    ↓
+one global MPMC queue
+~~~
+
+最自然的反应往往是继续优化 CAS。
+
+但程序组织层还有更重要的一步：
+
+~~~text
+Producer group A → queue A
+Producer group B → queue B
+Producer group C → queue C
+                 ↓
+              merge
+~~~
+
+也就是 sharding / per-worker queue。
+
+这体现一条非常通用的规律：
+
+> **最便宜的共享状态，是根本不共享。**
+
+中间件、线程池、控制程序、GPU pipeline 都能使用这个思路。先通过 ownership 和 topology 把共享范围缩小，再决定剩下的共享状态要不要做 lock-free。
+
+## “Queue 类型”与“业务语义”必须分开
+
+SPSC/MPSC/MPMC 只告诉你：
+
+~~~text
+有几个 Producer
+有几个 Consumer
+~~~
+
+它没有告诉你：
+
+~~~text
+FIFO 还是 latest-only？
+能不能丢？
+满了 block 还是 drop？
+每个 Consumer 都要看到同一条消息吗？
+需要 priority / deadline 吗？
+~~~
+
+例如：
+
+~~~text
+1 Producer
+4 Consumers
+~~~
+
+不代表应该使用 destructive SPMC queue。
+
+如果四个消费者都必须看见同一条状态，更合理的模型可能是：
+
+~~~text
+one payload history
+├── cursor A
+├── cursor B
+├── cursor C
+└── cursor D
+~~~
+
+或者像 Cyber 一样，给每个 DataVisitor 独立的 bounded ring。
+
+所以并发容器设计的顺序应该是：
+
+~~~text
+业务数据语义
+↓
+Producer/Consumer topology
+↓
+ownership
+↓
+capacity / overflow
+↓
+publication
+↓
+wakeup
+↓
+最后才是 mutex / CAS / atomic
+~~~
+
+## 线程通信能力怎样迁移到非 x86 平台
+
+真正可迁移的不是某一条 x86 指令，而是：
+
+~~~text
+single-writer ownership
+bounded storage
+sequence / generation
+publish-before-notify
+data path / control path separation
+explicit overflow policy
+lifetime state machine
+~~~
+
+在 Linux 上它们可能落成：
+
+~~~text
+std::atomic
+condition_variable
+eventfd
+epoll
+~~~
+
+在 RTOS / MCU 上可能变成：
+
+~~~text
+短临界区
+IRQ mask
+semaphore / event flag
+ISR → task ring
+static pool
+DMA completion
+~~~
+
+因此不要把“线程通信”理解成桌面 C++ 专属技巧。即使没有虚拟内存、没有 pthread、没有 x86 TSO，Producer/Consumer、slot ownership、发布时序、容量和回收状态机仍然存在。
+
+对应的可运行项目路线见
+[Thread Communication Lab](thread-dataflow-lab.md)。
 
 ## False Sharing：逻辑上互不相关，物理 cache line 却在打架
 

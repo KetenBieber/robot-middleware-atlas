@@ -27,6 +27,51 @@ export device-memory descriptor
 
 所以真正公平的比较单位不是“有没有 publish/subscribe”，而是**数据路径与所有权路径**。
 
+还可以再往前一步：Atlas 的价值不应该只停在“选一个中间件”。
+
+很多控制程序根本不需要完整 middleware：
+
+~~~text
+IMU thread
+↓
+SPSC ring
+↓
+Estimator
+↓
+latest-value mailbox
+↓
+Controller
+~~~
+
+或者：
+
+~~~text
+CAN RX
+Camera health callback
+Planner completion
+Watchdog
+   ↓
+MPSC event queue
+   ↓
+Supervisor
+~~~
+
+这些程序仍然在解决和中间件完全相同的问题：
+
+~~~text
+ownership
+queue semantics
+publication
+wakeup
+backpressure
+shutdown
+progress guarantee
+~~~
+
+因此每拆一个中间件，都应该问一句：
+
+> **如果我不用这个框架，只写自己的控制/感知 runtime，这个设计还能迁移出什么？**
+
 ## 先用六个维度看 Atlas
 
 | 项目 | 主要通信边界 | Payload 机制 | 排队/历史 | 通知/调度 | 异常/过载机制 |
@@ -209,6 +254,31 @@ callback/task executes
 
 这正好验证线程章节里“notify 不等于 callback 立即运行”的结论。
 
+如果目标是学习线程间程序组织，Cyber 目前是 Atlas 中最完整的一组源码案例，可以按：
+
+~~~text
+pending_queue_size / CacheBuffer
+↓
+DataDispatcher
+↓
+DataNotifier
+↓
+CRoutine wait/update
+↓
+ClassicContext condition variable
+↓
+Processor OS thread
+~~~
+
+连续阅读：
+
+- [有界消息缓存与 ring](../generated/cyber/pending-queue-ring.md)
+- [Dispatcher / Notifier](../generated/cyber/dispatcher-notifier.md)
+- [CRoutine wakeup](../generated/cyber/croutine-wakeup.md)
+- [Processor 与上下文切换](../generated/cyber/processor-context-switch.md)
+
+这套链路很适合和 [Thread Communication Lab](thread-dataflow-lab.md) 对照着自己重写一遍。
+
 ## Zenoh：通信开始进入分布式路由
 
 Zenoh 不是简单把 DDS transport 换掉。
@@ -334,6 +404,35 @@ device-aware transport
 ~~~
 
 同一个中间件在四个场景里的价值可能完全不同。
+
+### 场景 E：根本不使用 Middleware 的本地控制程序
+
+假设是一块 ARM SoC 上的：
+
+~~~text
+device thread / ISR
+↓
+Estimator
+↓
+Controller
+↓
+Actuator
+~~~
+
+这时应该优先问：
+
+~~~text
+SPSC 还是 MPSC？
+需要历史还是 latest-only？
+固定容量多大？
+Producer/Consumer 谁拥有 buffer？
+数据提交后靠 polling、event 还是 fixed-rate loop 消费？
+shutdown / fault 时谁唤醒谁？
+目标架构上的 atomic 是否 lock-free？
+DMA 与 CPU cache 的 ownership 怎样交接？
+~~~
+
+这说明 Communication Foundations 的终点不是 API，而是**跨平台的数据流设计能力**。
 
 ## 一个统一的源码阅读模板
 
