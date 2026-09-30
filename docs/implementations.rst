@@ -15,11 +15,12 @@ Cyber 适合研究消息驱动任务、CRoutine、Scheduler、Processor 和有�
 
 :doc:`libuv <generated/libuv/index>`、:doc:`Asio <generated/asio/index>`、:doc:`Meta Folly <generated/folly/index>`、:doc:`Seastar <generated/seastar/index>` 与 :doc:`nginx <generated/nginx/index>` 关注的是另一类更基础的问题：大量 socket、Timer、blocking work 与连接状态怎样在 OS 执行上下文上组织成事件驱动 Runtime。
 
-libuv 适合研究可嵌入 event loop：Handle/Request 生命周期、fd→watcher registry、最小堆 Timer、eventfd 跨线程唤醒、全局 worker pool、write queue/backpressure 和 deferred close。Asio 进一步把 operation、executor、completion 与 strand 变成独立抽象。Folly 则把镜头继续下压到数据结构层：SPSC cache-line ownership、MPMC ticket/turn/futex、AtomicNotificationQueue、IOBuf、timing wheel 与 Executor queue/wakeup policy。Seastar 再把问题推进到架构层：shard-per-core、cooperative Reactor、scheduling group、点对点 SPSC 跨核队列、sharded ownership 和 owner-side memory reclaim，用 shared-nothing 直接减少跨核共享。nginx 则提供完整 server runtime 对照：master/worker、Timer rbtree、posted event、connection free/reusable queue、arena/slab 与 graceful shutdown。
-
 消息总线、发现与分布式数据空间
 --------------------------------
 
+:doc:`YARP <generated/yarp/index>`、:doc:`eCAL <generated/ecal/index>`、:doc:`LCM <generated/lcm/index>`、:doc:`ZeroMQ / libzmq <generated/libzmq/index>`、:doc:`Cyclone DDS <generated/cyclonedds/index>`、:doc:`Fast DDS <generated/fastdds/index>` 与 :doc:`Zenoh <generated/zenoh/index>` 都在解决“数据怎样从一个软件实体到另一个实体”，但承担的语义不同。
+
+LCM 适合观察极简多播消息数据面；libzmq 适合观察 socket pattern 背后的消息 Runtime——mailbox/command、SPSC ypipe、HWM/LWM、owner I/O thread、session 与 transport engine 怎样把跨线程消息和网络事件组织成一体；eCAL/YARP 更强调运行时发现、连接与多 transport；DDS 把 discovery、QoS、History 和可靠性纳入标准模型；Zenoh 进一步把 pub/sub、query、storage 和跨网路由放在统一 key space 中。
 :doc:`YARP <generated/yarp/index>`、:doc:`eCAL <generated/ecal/index>`、:doc:`LCM <generated/lcm/index>`、:doc:`Cyclone DDS <generated/cyclonedds/index>`、:doc:`Fast DDS <generated/fastdds/index>` 与 :doc:`Zenoh <generated/zenoh/index>` 都在解决“数据怎样从一个软件实体到另一个实体”，但承担的语义不同。
 
 LCM 适合观察最小网络数据面；eCAL/YARP 更强调运行时发现、连接与多 transport；DDS 把 discovery、QoS、History 和可靠性纳入标准模型；Zenoh 进一步把 pub/sub、query、storage 和跨网路由放在统一 key space 中。
@@ -72,6 +73,7 @@ Holoscan 再把 queue capacity、GPU allocator、CUDA stream/event 和 UCX trans
    generated/asio/index
    generated/folly/index
    generated/seastar/index
+   generated/libzmq/index
    generated/nginx/index
    generated/orocos/index
    generated/yarp/index
