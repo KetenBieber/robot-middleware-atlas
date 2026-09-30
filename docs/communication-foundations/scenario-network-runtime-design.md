@@ -309,7 +309,26 @@ CPU-heavy / blocking work
 
 ## 7. Executor：为什么“线程池”还不够
 
-最朴素线程池：
+这里先明确一件事：下面的 `m / cv / q` 仍然不是三个“各线程自己的局部变量”。真实线程池通常会把它们作为**同一个 ThreadPool 对象的成员**，所有 worker 线程都通过 `this` 访问同一份 queue、同一把 mutex 和同一个 condition variable。
+
+如果对 `std::mutex / std::lock_guard / std::unique_lock / std::condition_variable / wait / notify_one` 的对象关系还不熟，先完整阅读 [线程间通信：共享地址不等于共享时序](threads-memory-order.md)。那里用两个真正的 `std::thread`、完整 `main()` 和逐步时序解释了它们为什么必须这样组合。
+
+把这里的简化模型写成对象关系：
+
+~~~text
+                  ThreadPool pool
+             /          |          \
+            v           v           v
+        pool.m       pool.cv      pool.q
+           ^            ^           ^
+           |            |           |
+        worker 0     worker 1    producer/post()
+            \          /
+             \        /
+             same shared objects
+~~~
+
+因此下面代码表达的是“多个线程共享同一个线程池内部状态”：
 
 ~~~cpp
 std::mutex m;
@@ -319,25 +338,31 @@ std::queue<Task> q;
 void worker() {
     while (true) {
         Task t;
+
         {
+            // unique_lock 在这里不是为了比 lock_guard 更高级，
+            // 而是因为 cv.wait() 必须能够暂时 unlock(m)，
+            // 睡眠，然后在返回前重新 lock(m)。
             std::unique_lock lock(m);
-            cv.wait(lock, [&]{ return !q.empty(); });
+
+            cv.wait(lock, [&] {
+                return !q.empty();
+            });
+
             t = std::move(q.front());
             q.pop();
-        }
+        } // 离开作用域，worker 释放 m
+
+        // 用户任务故意在 mutex 外执行。
+        // 否则一个长任务会让其他 worker 连 q 都不能访问。
         t();
     }
 }
 ~~~
 
-这能工作，但 Runtime 还要回答：
+这里 `cv.wait(...)` 的含义不是“注册一个 callback”。它表示：**当前 worker 在线程层面阻塞，条件可能变化后被唤醒，再重新竞争 mutex，并重新检查 queue。**
 
-- Queue 是 FIFO 还是 priority？
-- bounded 还是 unbounded？
-- worker 数量多少？
-- 空闲线程如何 wakeup？
-- shutdown 时 drain 还是 cancel？
-- 是否允许 task inline execute？
+这能工作，但 Runtime 还要回答：
 - task completion 回到哪里？
 
 Folly 的价值就在于：把这些策略拆开。
