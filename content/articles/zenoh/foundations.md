@@ -4,7 +4,7 @@
 
 这些功能却在描述同一件事：机器人有哪些数据，这些数据叫什么。Zenoh 最值得先理解的地方，是让发布订阅和查询回复围绕同一套层级名字工作，再由运行时决定数据应留在本机，还是穿过一个或多个网络连接。保存历史值还需要应用或存储插件实际接收并写入数据；仅仅打开 Session 不会自动把 Sample 变成持久记录。
 
-本文固定阅读 Zenoh 提交 [`9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5`](https://github.com/eclipse-zenoh/zenoh/tree/9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5)。这一章只建立第一张可运行的心智模型：Zenoh 解决什么问题、Key Expression 表达什么、四种常用动作怎样区分，以及第一段 Rust API 应该怎样读。路由表、Face、WireExpr、`Arc` 和异步任务会在后续源码链中就地展开。
+源码基线固定为 Zenoh 提交 [`9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5`](https://github.com/eclipse-zenoh/zenoh/tree/9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5)。Zenoh 的基本模型由 Key Expression、publish/subscribe、query/reply 与 Session 组成；路由表、Face、WireExpr、`Arc` 和异步任务则负责把这些上层动作落实为具体运行时状态。
 
 ## 机器人数据首先需要一套稳定的名字
 

@@ -446,3 +446,20 @@ payload 是先写本地再 copy，还是直接 loan shared chunk？
 Fast DDS 的 Data Sharing、Cyclone DDS 的 PSMX、Cyber SHM、eCAL SHM、iceoryx2 都可以用这张表比较。
 
 这样“共享内存”才从一个功能名词，变成可以逐行看源码的通信协议。
+
+## 从“同机不同地址空间”继续扩大到“连物理内存都不共享”
+
+共享内存解决的是：
+
+~~~text
+不同 virtual address space
+但仍可映射同一批 physical pages
+~~~
+
+跨主机以后，这个最后的共同基础也消失。
+
+此时 payload 必须变成 wire representation，系统还要额外面对 fragmentation、reliability、discovery、routing、remote failure 与 clock boundary。
+
+因此下一篇把同样的数据生命周期继续扩展到网络：
+
+→ [Network & Distributed Communication](network-distributed.md)

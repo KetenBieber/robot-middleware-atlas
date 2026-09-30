@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+import html
 import re
 import sys
 from pathlib import Path
@@ -8,9 +10,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SEARCH_ROOTS = [ROOT / "content", ROOT / "docs"]
 
-# Only internal production/review language is forbidden. Natural tutorial
-# transitions are legitimate blog prose and must not be confused with
-# agent work logs or review-state narration.
+# Public technical prose should explain the system itself. Internal production
+# state, review labels, and documentation-edit history are forbidden. Natural
+# technical transitions remain valid when they explain a mechanism or causal
+# dependency rather than how the site/article was rewritten.
 FORBIDDEN = {
     "legacy provenance plaques": re.compile(
         r"^\s*\*\*(?:代码身份|图示身份|教学代码|固定提交源码摘录|固定源码摘录|源码摘录)"
@@ -35,6 +38,22 @@ FORBIDDEN = {
     "personal request/process": re.compile(
         r"用户提出|用户要求|你的要求|符合.*要求|本轮任务|本次任务|任务进度|当前进度|工作轮次"
     ),
+    "documentation edit history": re.compile(
+        r"旧版(?:导航|目录|文章|章节|页面|分类|结构|站点)|"
+        r"新版(?:导航|目录|文章|章节|页面|分类|结构|站点)|"
+        r"(?:原先|原来|此前)(?:的)?(?:导航|目录|文章|章节|页面|分类|结构)|"
+        r"(?:这里|此处|现在)(?:重新)?(?:改为|调整为|重写为|组织为)|"
+        r"(?:为了|方便).{0,12}(?:阅读|读者|导航)|"
+        r"(?:选择|安排).{0,8}阅读顺序|"
+        r"(?:推荐|建议).{0,10}(?:先读|阅读顺序|从.{0,12}开始)|"
+        r"(?:本文|本章|本节|这一章|这一节).{0,24}"
+        r"(?:作为.{0,8}入口|阅读|前面的专题|重新组织|重构|改为|不再把|"
+        r"接下来进入|最后进入|自然的下一站)|"
+        r"下面的隐藏目录|每个专题首页|"
+        r"这是一条.{0,12}阅读路径|与场景页相反|"
+        r"(?:这次|本次|这一轮|本轮)(?:文档|文章|章节|页面|改版|重构)"
+        r".{0,16}(?:改写|改为|重构|调整|补充|新增)"
+    ),
 }
 
 
@@ -48,7 +67,43 @@ def source_files():
                     yield path
 
 
+def rendered_site_violations() -> list[str]:
+    site = ROOT / "site"
+    if not site.is_dir():
+        return ["site: rendered output missing"]
+
+    violations: list[str] = []
+    for stale in ("industrial.html", "experimental.html"):
+        if (site / stale).exists():
+            violations.append(f"site/{stale}: stale legacy navigation page still exists")
+
+    patterns = {
+        "documentation edit history": FORBIDDEN["documentation edit history"],
+        "agent/reviewer identity": FORBIDDEN["agent/reviewer identity"],
+        "personal request/process": FORBIDDEN["personal request/process"],
+        "audit/report framing": FORBIDDEN["audit/report framing"],
+    }
+    tag = re.compile(r"<[^>]+>")
+    for path in site.rglob("*.html"):
+        for number, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
+            visible = html.unescape(tag.sub(" ", line))
+            for category, pattern in patterns.items():
+                if pattern.search(visible):
+                    violations.append(
+                        f"{path.relative_to(ROOT)}:{number}: rendered {category}: {visible.strip()}"
+                    )
+    return violations
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--site",
+        action="store_true",
+        help="also validate final rendered HTML and reject stale legacy output",
+    )
+    args = parser.parse_args()
+
     violations: list[str] = []
     checked = 0
     for path in sorted(set(source_files())):
@@ -78,7 +133,11 @@ def main() -> int:
                     violations.append(
                         f"{path.relative_to(ROOT)}:{number}: {category}: {line.strip()}"
                     )
+    if args.site:
+        violations.extend(rendered_site_violations())
+
     print(f"EDITORIAL_FILES={checked}")
+    print(f"EDITORIAL_SITE_CHECK={int(args.site)}")
     print(f"EDITORIAL_VIOLATIONS={len(violations)}")
     for violation in violations:
         print(violation)

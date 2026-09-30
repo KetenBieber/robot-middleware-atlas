@@ -6,11 +6,11 @@
 
 这样安排有一个明确原因。后面读到 `DataDispatcher::Dispatch()`、`DataVisitor::TryFetch()` 和 scheduler wakeup 时，所有逻辑都建立在“数据已经怎样存进缓存”之上。如果连 `pending_queue_size` 的准确语义都不知道，就无法判断慢消费者会积压、阻塞、丢旧还是丢新，也无法评估控制器拿到的数据有多老。
 
-为方便从本篇独立阅读：`shared_ptr<T>` 是共享拥有消息对象的 C++ 句柄，复制句柄不会深复制消息；callback（回调）是消息到来后由框架调用的函数；CacheBuffer 是固定槽位的循环缓存，DataVisitor 是消费者私有的读取视图，CRoutine 是可被 Scheduler 暂停/恢复的任务。稍后说“环形缓冲”时，指写入位置绕回复用固定数组，而不是一个会自行增长的 `std::queue`。
+`shared_ptr<T>` 是共享拥有消息对象的 C++ 句柄，复制句柄不会深复制消息；callback（回调）是消息到来后由框架调用的函数；CacheBuffer 是固定槽位的循环缓存，DataVisitor 是消费者私有的读取视图，CRoutine 是可被 Scheduler 暂停/恢复的任务。这里的“环形缓冲”指写入位置绕回复用固定数组，而不是一个会自行增长的 `std::queue`。
 
-本文继续固定 Apollo 提交 `d53aa3da47a06a08e6d0cd175d5623a34fa0d6aa`，只阅读三个最小单元：`CacheBuffer`、`ChannelBuffer::Fetch()` 和 `DataVisitor::TryFetch()`。
+源码基线固定为 Apollo 提交 `d53aa3da47a06a08e6d0cd175d5623a34fa0d6aa`。核心实现单元是 `CacheBuffer`、`ChannelBuffer::Fetch()` 和 `DataVisitor::TryFetch()`。
 
-本篇的 `text` 块是作者手算的状态表或时序示意，不是源码；C++ 块会明确标为固定提交摘录或教学实现。DAG 是有向无环图，这里指 Apollo 用来描述模块/组件及其依赖的配置图。
+`text` 块用于状态表或时序示意；C++ 块对应固定提交源码或用于解释机制的最小实现。DAG 是有向无环图，这里指 Apollo 用来描述模块/组件及其依赖的配置图。
 
 ## 先确定数据契约：状态流要新鲜，事件流要完整
 

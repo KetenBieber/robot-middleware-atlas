@@ -722,3 +722,28 @@ last reader releases
 ~~~
 
 一旦这些问题能从源码里逐一指出来，线程间 communication 才算真正拆完。
+
+## 从“同步正确”走向“队列到底承诺什么”
+
+到这里，我们已经可以证明：
+
+~~~text
+publish happens-before consume
+~~~
+
+但这只解决**并发正确性**，没有决定系统语义。
+
+如果 Producer 比 Consumer 快，接下来必须先回答：
+
+~~~text
+必须保存所有历史吗？
+只保留最新值可以吗？
+满了以后 block、drop-old、drop-new 还是 fault？
+允许积压多久？
+~~~
+
+这些问题应该先于“到底用 SPSC ring 还是 MPMC queue”。
+
+所以接下来先定义队列与过载契约：
+
+→ [Queues & Backpressure](queues-backpressure.md)

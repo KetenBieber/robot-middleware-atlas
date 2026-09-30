@@ -944,3 +944,27 @@ progress guarantee
 ~~~
 
 这时学到的已经不再是“通信中间件知识”，而是**如何组织并发程序的数据流**。
+
+## 从“容器算法”走向“一个真实 Runtime 怎样把它们拼起来”
+
+单独理解 ring、CAS、sequence、lock-free 还不够。
+
+真实程序还需要把：
+
+~~~text
+queue
++
+notification
++
+worker/executor
++
+shutdown state
++
+backpressure
+~~~
+
+组合起来，并确认 publication-before-notify、lost wakeup、shutdown drain 等跨模块不变量。
+
+下一篇用一个小型机器人数据流把这些机制真正拼成运行时：
+
+→ [Thread Communication Lab](thread-dataflow-lab.md)

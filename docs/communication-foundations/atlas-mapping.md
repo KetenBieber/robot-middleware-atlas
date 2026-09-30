@@ -473,3 +473,13 @@ DMA 与 CPU cache 的 ownership 怎样交接？
 这十步不是“检查清单式写文档”，而是一条真实的数据生命周期。
 
 当每一步都能在源码里找到对应对象、数据结构和状态转移时，中间件的 communication mechanism 才真正闭环。
+
+## 从机制映射进入真正的工程源码
+
+Atlas Mapping 解决的是“同一个机制在不同系统里叫什么”。
+
+最后还差一步：看真实工程为什么在具体约束下选择这些机制，以及一个错误选择会怎样传导成 latency、stale data、锁竞争或 buffer exhaustion。
+
+这些机制可以直接在跨项目工程案例中对照：
+
+→ [Industry Runtime Cases](industry-runtime-cases.md)

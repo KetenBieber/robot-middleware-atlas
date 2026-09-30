@@ -523,3 +523,21 @@ typed object / view
 ~~~
 
 一旦这些问题清楚，所谓“DDS 很重”“UDP 很快”“Zenoh 是路由中间件”才会从印象变成可验证的工程事实。
+
+## 网络还不是最后一层：现代 AI Pipeline 连“CPU 可直接访问”都不能默认
+
+跨主机之后，我们已经失去了共享地址和共享物理页。
+
+但传统网络中仍常默认 payload 最终落在 CPU-addressable buffer。
+
+GPU/NPU、Camera DMA、RDMA registration 出现以后，这个假设也会失效：
+
+~~~text
+bytes 到了本机
+≠
+目标计算单元可以零成本访问它
+~~~
+
+所以下一篇继续把 memory domain 纳入通信契约：
+
+→ [Heterogeneous Memory](heterogeneous-memory.md)

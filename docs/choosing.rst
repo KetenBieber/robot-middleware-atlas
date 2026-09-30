@@ -264,5 +264,3 @@ EtherCAT Master 应放在另一条更靠近设备的数据路径上：控制线�
 * 学习另一套 ROS 2 DDS/RTPS 实现：阅读 :doc:`Fast DDS <generated/fastdds/index>`，重点对照 CacheChange/History、StatefulWriter/Reader、Discovery Server、FlowController、Data Sharing/SHM/loan 与 rmw_fastrtps。
 * 学习工业实时主站：从 :doc:`IgH EtherCAT Master <generated/ethercat/index>` 的周期数据路径开始，随后进入 Domain/process image、datagram/FSM、device/NIC 与 DC。
 * 学习轻量用户态 EtherCAT 主站：继续读 :doc:`SOEM <generated/soem/index>`，重点比较 Context/固定数组、RAW Socket、IOmap 与 frame-index 数据面如何替代 IgH 的内核对象图。
-
-每个专题首页都按“功能需求 → 组件地图 → 源码主链 → 语言机制 → 设计取舍与性能 → 最小复刻 → 实际案例”给出入口。选择项目之后不必再从文件名猜阅读顺序。

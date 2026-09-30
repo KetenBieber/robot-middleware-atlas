@@ -527,3 +527,20 @@ GXF/Holoscan、UCX、CUDA IPC、DLPack 风格 tensor handle 等技术的共同�
 > 一块高带宽数据现在属于哪个 memory domain，哪个执行单元拥有它，怎样在不做无意义 staging 的前提下，把访问权和完成事件交给下一阶段？
 
 当问题改成这样以后，zero-copy、shared memory、CUDA IPC、RDMA、UCX、GPU-aware runtime 才真正连成一条技术主线。
+
+## 到这里，机制已经齐了：下一步把它们重新投影到真实系统
+
+现在 Communication Foundations 已经沿边界走完：
+
+~~~text
+same-thread object
+→ cross-thread synchronization
+→ bounded concurrent queue
+→ cross-process shared memory
+→ cross-host protocol
+→ CPU/GPU/NPU/RDMA memory domain
+~~~
+
+接下来不再引入新的“基础名词”，而是回到 Atlas 中的 LCM、DDS、Cyber、iceoryx2、UCX、EtherCAT、Holoscan，检查每个真实系统究竟把这些机制放在哪里：
+
+→ [Atlas Mapping](atlas-mapping.md)

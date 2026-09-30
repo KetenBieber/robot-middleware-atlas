@@ -19,6 +19,8 @@ RETIRED_RECAPS = (
 )
 
 PROJECTS = (
+    "libuv",
+    "nginx",
     "cyber",
     "orocos",
     "yarp",
@@ -29,6 +31,8 @@ PROJECTS = (
     "zenoh",
     "iceoryx2",
     "ucx",
+    "rosidlbuffer",
+    "holoscan",
     "ethercat",
     "soem",
 )

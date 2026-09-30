@@ -533,3 +533,30 @@ ABA 与 memory reclamation 为什么是无锁链表的核心？
 ~~~
 
 继续读 [并发队列与进展保证](concurrent-queues-progress.md)；如果希望把这些机制真正写成程序，再进入 [Thread Communication Lab](thread-dataflow-lab.md)。
+
+## 从“队列契约”走向“怎样把契约做成并发数据结构”
+
+这一篇先决定了语义：
+
+~~~text
+FIFO / latest
+bounded / unbounded
+block / drop / overwrite / fault
+~~~
+
+下一步才轮到实现问题。
+
+一旦 Producer/Consumer 数量从 SPSC 变成 MPSC/MPMC，就必须进一步处理：
+
+~~~text
+reservation 与 publication 为什么分开？
+head/tail 谁能写？
+per-slot sequence 在防什么？
+CAS 失败意味着什么？
+lock-free 与 wait-free 到底保证谁能前进？
+ABA 和 reclamation 为什么会出现？
+~~~
+
+这些问题进入下一篇：
+
+→ [Concurrent Queues & Progress Guarantees](concurrent-queues-progress.md)

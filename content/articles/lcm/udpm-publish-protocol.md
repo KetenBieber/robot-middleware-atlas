@@ -525,7 +525,7 @@ LCM UDPM 的发送侧以很少的机制换取明确性能：短消息用一次 s
 
 ## 附录：固定版本 `lcm_udpm_publish()` 的完整控制流
 
-下面保留本章前面逐步拆过的原始函数，方便读者从 `channel_size` 一路走到最后的 `return`。它来自本文固定版本的 UDPM 实现，并非教学复刻。请特别留意 LC02 与 LC03 在错误返回上的差异，以及 `transmit_lock` 的加锁范围。
+以下是固定版本 `lcm_udpm_publish()` 的完整控制流。从 `channel_size` 到最终 `return` 可以直接看到 LC02 与 LC03 在错误返回上的差异，以及 `transmit_lock` 的实际加锁范围。
 
 ```c
 static int lcm_udpm_publish(lcm_udpm_t *lcm, const char *channel, const void *data,

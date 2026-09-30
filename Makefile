@@ -3,11 +3,16 @@ SPHINXBUILD ?= $(PYTHON) -m sphinx
 SOURCEDIR = docs
 BUILDDIR = site
 
-.PHONY: html html-full package-site check-editorial check-baselines check-examples check-lcm check-cyber check-ecal check-ethercat check-soem check-cyclonedds check-fastdds check-iceoryx2 check-ucx check-communication-foundations check-document-hygiene check-links clean
+.PHONY: html html-full package-site check-editorial check-baselines check-examples check-libuv check-asio check-folly check-seastar check-nginx check-lcm check-cyber check-ecal check-ethercat check-soem check-cyclonedds check-fastdds check-iceoryx2 check-ucx check-rosidlbuffer check-holoscan check-communication-foundations check-document-hygiene check-links clean
 
 html:
 	$(PYTHON) tools/build_sphinx_sources.py
 	$(PYTHON) tools/check_document_hygiene.py
+	$(PYTHON) tools/check_libuv_closure.py
+	$(PYTHON) tools/check_asio_closure.py
+	$(PYTHON) tools/check_folly_closure.py
+	$(PYTHON) tools/check_seastar_closure.py
+	$(PYTHON) tools/check_nginx_closure.py
 	$(PYTHON) tools/check_lcm_closure.py
 	$(PYTHON) tools/check_cyber_closure.py
 	$(PYTHON) tools/check_ecal_closure.py
@@ -16,15 +21,24 @@ html:
 	$(PYTHON) tools/check_fastdds_closure.py
 	$(PYTHON) tools/check_iceoryx2_closure.py
 	$(PYTHON) tools/check_ucx_closure.py
+	$(PYTHON) tools/check_rosidlbuffer_closure.py
+	$(PYTHON) tools/check_holoscan_closure.py
 	$(PYTHON) tools/check_communication_foundations.py
 	$(PYTHON) tools/check_ethercat_closure.py
 	$(PYTHON) tools/check_source_baselines.py
 	$(PYTHON) tools/check_editorial_language.py
+	$(PYTHON) -c "import shutil; shutil.rmtree(r'$(BUILDDIR)', ignore_errors=True)"
 	$(SPHINXBUILD) -b html -W --keep-going $(SOURCEDIR) $(BUILDDIR)
+	$(PYTHON) tools/check_editorial_language.py --site
 
 html-full:
 	$(PYTHON) tools/build_sphinx_sources.py
 	$(PYTHON) tools/check_document_hygiene.py
+	$(PYTHON) tools/check_libuv_closure.py
+	$(PYTHON) tools/check_asio_closure.py
+	$(PYTHON) tools/check_folly_closure.py
+	$(PYTHON) tools/check_seastar_closure.py
+	$(PYTHON) tools/check_nginx_closure.py
 	$(PYTHON) tools/check_lcm_closure.py
 	$(PYTHON) tools/check_cyber_closure.py
 	$(PYTHON) tools/check_ecal_closure.py
@@ -33,12 +47,16 @@ html-full:
 	$(PYTHON) tools/check_fastdds_closure.py
 	$(PYTHON) tools/check_iceoryx2_closure.py
 	$(PYTHON) tools/check_ucx_closure.py
+	$(PYTHON) tools/check_rosidlbuffer_closure.py
+	$(PYTHON) tools/check_holoscan_closure.py
 	$(PYTHON) tools/check_communication_foundations.py
 	$(PYTHON) tools/check_ethercat_closure.py
 	$(PYTHON) tools/check_source_baselines.py
 	$(PYTHON) tools/check_editorial_language.py
 	$(PYTHON) tools/check_cpp_examples.py
+	$(PYTHON) -c "import shutil; shutil.rmtree(r'$(BUILDDIR)', ignore_errors=True)"
 	$(SPHINXBUILD) -E -a -b html -W --keep-going $(SOURCEDIR) $(BUILDDIR)
+	$(PYTHON) tools/check_editorial_language.py --site
 	$(PYTHON) tools/check_static_links.py $(BUILDDIR)
 
 check-links:
@@ -55,6 +73,22 @@ check-baselines:
 
 check-examples:
 	$(PYTHON) tools/check_cpp_examples.py
+
+check-libuv:
+	$(PYTHON) tools/build_sphinx_sources.py
+	$(PYTHON) tools/check_libuv_closure.py
+
+check-asio:
+	$(PYTHON) tools/build_sphinx_sources.py
+	$(PYTHON) tools/check_asio_closure.py
+
+check-folly:
+	$(PYTHON) tools/build_sphinx_sources.py
+	$(PYTHON) tools/check_folly_closure.py
+
+check-nginx:
+	$(PYTHON) tools/build_sphinx_sources.py
+	$(PYTHON) tools/check_nginx_closure.py
 
 check-lcm:
 	$(PYTHON) tools/check_lcm_closure.py
@@ -74,6 +108,14 @@ check-iceoryx2:
 
 check-ucx:
 	$(PYTHON) tools/check_ucx_closure.py
+
+check-rosidlbuffer:
+	$(PYTHON) tools/build_sphinx_sources.py
+	$(PYTHON) tools/check_rosidlbuffer_closure.py
+
+check-holoscan:
+	$(PYTHON) tools/build_sphinx_sources.py
+	$(PYTHON) tools/check_holoscan_closure.py
 
 check-communication-foundations:
 	$(PYTHON) tools/check_communication_foundations.py

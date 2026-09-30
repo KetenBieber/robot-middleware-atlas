@@ -458,3 +458,19 @@ failure boundary
 ~~~
 
 做到这一步，LCM 的 UDP、DDS 的 History、iceoryx2 的 loan、Cyber 的 Dispatcher、UCX 的 transport selection 才会落在同一张机制地图上，而不是一堆互不相关的名词。
+
+## 从“谁拥有数据”走向“另一个线程什么时候真的看见它”
+
+这一篇先建立了最底层的三个问题：地址空间、memory domain、ownership。
+
+但只要 Producer 和 Consumer 落到不同线程，即使它们仍然共享同一虚拟地址，新的问题立刻出现：
+
+~~~text
+Producer 已经写了
+≠
+Consumer 此刻一定能按正确顺序观察到这些写入
+~~~
+
+因此下一篇不再讨论“指针指向哪里”，而要进入 C++ memory model、happens-before、mutex、condition variable、release/acquire 与 wake-up：
+
+→ [Threads & Memory Order](threads-memory-order.md)

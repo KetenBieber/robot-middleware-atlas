@@ -821,3 +821,28 @@ heap payload
 真正跨平台的不是 API，而是：
 
 > **状态机、所有权、容量和时序。**
+
+## 地址空间一分开，刚刚成立的假设会再次失效
+
+到这里，同一进程内的线程通信已经基本闭环：
+
+~~~text
+ownership
+→ memory ordering
+→ queue semantics
+→ concurrent container
+→ wakeup/executor
+~~~
+
+但一旦把 Estimator 与 Controller 拆成两个进程，最关键的假设消失了：
+
+~~~text
+同一个指针值
+不再天然指向同一个对象
+~~~
+
+allocator、裸指针、对象构造、崩溃回收都要重新设计。
+
+所以下一层边界进入：
+
+→ [Processes & Shared Memory](processes-shared-memory.md)

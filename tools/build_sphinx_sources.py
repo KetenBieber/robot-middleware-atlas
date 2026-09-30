@@ -20,6 +20,11 @@ def write_if_changed(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 PROJECTS = {
+    "libuv": ("libuv", "2b4b918d3381100854250c89d5159d4206daafb7"),
+    "asio": ("Asio", "8806a6803cde7054c3049d3666d3ec36786568c5"),
+    "folly": ("Meta Folly", "c8ad483c91ef9cfc4cd1e41bb6bc5f575bf935c8"),
+    "seastar": ("Seastar", "8df8212e53577e1d8477a5c901457cd61d88afc7"),
+    "nginx": ("nginx", "b74b5c961e687c76489482b44cedff63acd18c84"),
     "cyber": ("Apollo Cyber RT", "d53aa3da47a06a08e6d0cd175d5623a34fa0d6aa"),
     "orocos": ("Orocos RTT", "600102e8be9c81905b20930e32d43b28244ab173"),
     "yarp": ("YARP", "91710eb45baf5d9cb62dd5a0cb3c3a00f42481b9"),
@@ -32,9 +37,16 @@ PROJECTS = {
     "fastdds": ("eProsima Fast DDS", "39303846fb8534ef69fa65f9fa4bcc9e6a7c995a"),
     "iceoryx2": ("Eclipse iceoryx2", "135d09dd8b29f321f1725920d434864c4e512378"),
     "ucx": ("OpenUCX", "8a6b06fb880accbb933a79cda893883872c68d9d"),
+    "rosidlbuffer": ("ROS 2 rosidl::Buffer / CUDA Buffer Backend", "d7cd9642d77a1d64fd85f25ba0bf96e108401900"),
+    "holoscan": ("NVIDIA Holoscan SDK", "66a9609ac37515405561b9b8dbdee8e57f41ab11"),
 }
 
 PROJECT_OVERVIEWS = {
+    "libuv": """libuv 是跨平台异步 I/O Runtime。它用 uv_loop_t 统一驱动 socket readiness、Timer、signal、async wakeup 与关闭回调；Handle 表示长期资源，Request 表示一次异步操作；无法自然映射为非阻塞 readiness 的文件 I/O、DNS 与用户 blocking work 则进入全局 worker thread pool。\n\n固定版本 2b4b918d。核心问题不是 API，而是 event loop phase、fd watcher registry、timer heap、atomic+eventfd 跨线程唤醒、worker completion、stream write backpressure 与 deferred close 怎样组合成一套可迁移的程序 Runtime。""",
+    "asio": """Asio 把异步程序拆成 operation、execution context/executor 与 completion handler 三层。Linux 下 epoll_reactor 管 fd readiness 和 per-descriptor operation queue，scheduler 负责 ready completion 与 run() worker，strand 再在 executor 层提供逻辑串行化。\n\n固定版本 Asio 1.38.2（8806a680）。核心问题不是 async_read API，而是 scheduler_operation 的 intrusive/type-erased 设计、descriptor_state 的局部队列与锁、strand 的双队列 ownership、outstanding-work liveness 以及 close/cancel/reclaim 如何共同组成可推理的 C++ async runtime。""",
+    "folly": """Folly 提供的是一组工业 C++ Runtime 基础设施：SPSC/MPMC queue、AtomicNotificationQueue、IOBuf、HHWheelTimer、EventBase 与 Executor。它最值得研究的是数据结构和 OS 原语怎样围绕 cache locality、ownership、wakeup、blocking、batch 与 lifetime 组合，而不是单个 API。\n\n固定版本 v2026.09.28.00（c8ad483c）。阅读重点是 producer/consumer cache-line ownership、ticket + per-slot turn、futex 自适应等待、armed notification、IOBuf chain/shared storage、hierarchical timer wheel，以及 queue policy 与 worker lifecycle 的分离。""",
+    "seastar": """Seastar 把多核 Runtime 组织成 shard-per-core：每个 shard 拥有自己的 Reactor、task queues、Timer、I/O 与 allocator，跨 shard 协作通过显式 SMP message passing 完成，而不是让所有线程直接共享 mutable state。\n\n本专题固定到 Seastar 25.05.0（8df8212e）。重点是 cooperative reactor、scheduling-group shares/vruntime、SPSC 跨核 request/completion queue、future continuation task、sharded/foreign_ptr execution ownership，以及 per-shard allocator 的 cross-CPU deferred free。""",
+    "nginx": """nginx 把高并发网络服务组织成 master/worker process 模型：每个 worker 以单线程 event loop 拥有自己的 connection/event state，epoll/kqueue 负责 readiness，rbtree 管理 Timer，posted queue 延迟执行事件，预分配 connection slot 与 request pool 控制分配成本，共享内存对象再由 slab allocator 管理。\n\n固定版本 b74b5c9。核心问题是 worker ownership、Timer rbtree、posted event、connection free/reusable queue、pointer generation tag、arena/slab 与 graceful shutdown 怎样共同构成一个有界、低共享的服务器 Runtime。""",
     "cyber": """Cyber RT 是 Apollo 面向车载计算图的运行时：DAG 装载组件，Node 创建 Reader/Writer，Transport 接入进程内、共享内存与 RTPS 通道，DataVisitor 把消息缓存转换为可调度事件，CRoutine 与 Scheduler 再决定业务代码何时获得 CPU。
 
 理解它不能停在“有 Component 和协程”这一层。真正的主线是一条消息怎样跨过 transport callback、Dispatcher、有限缓存、Notifier 和 Processor，最后进入 ``Component::Proc()``；每一次复制、锁竞争和非抢占执行都会落到感知—规划—控制链路的延迟预算里。""",
@@ -59,11 +71,59 @@ PROJECT_OVERVIEWS = {
     "fastdds": """Fast DDS 是 eProsima 的 DDS/RTPS 实现，也是 ROS 2 常用 RMW 后端之一。它以显式 C++ 对象图把 DDS façade、DataWriterImpl/DataReaderImpl、CacheChange、History、StatefulWriter/Reader、Proxy、FlowController 与 UDP/TCP/SHM Transport 串成运行时。\n\n本专题固定到 v3.6.2（39303846）。重点不是重讲一遍 DDS 术语，而是和 Cyclone DDS 做实现层对照：DataWriter::write 怎样在一次调用里完成锁、loan、序列化、CacheChange 与 History；Reliable 怎样落到 ReaderProxy/WriterProxy 与 TimedEvent；异步发送怎样由 FlowController 调度；SHM Transport、Data Sharing 与 loan_sample 为什么是三层不同优化。最后用官方 delivery_mechanisms 与 ROS 2 rmw_fastrtps 固定案例闭环。""",
     "iceoryx2": """iceoryx2 是以 Rust core 实现的 zero-copy IPC runtime。它把大 payload 放进共享内存 DataSegment，通过 PointerOffset 和 ZeroCopyConnection 传递跨进程稳定的 descriptor，再用 borrow/release/reclaim 闭环 sample 生命周期。\n\n本专题固定到 v0.10.0（135d09dd）。阅读重点不是 API，而是共享页、虚拟地址、offset pointer、pool allocator、fan-out ownership、backpressure、WaitSet/Reactor 与 dead-node cleanup 怎样共同组成一套生产级同机 IPC。""",
     "ucx": """OpenUCX 是面向高性能异构数据面的通信框架。UCP 把 endpoint、request、tag/RMA/AM 与协议选择组织成高层语义，UCT 再把这些动作映射到 shared-memory、TCP、InfiniBand/RDMA、CUDA、ROCm、Level Zero 等 transport；UCS 提供数据结构与系统设施，UCM 负责内存事件相关机制。\n\n这一组文章固定到 UCX v1.22.0（8a6b06fb）。核心问题是同一个发送调用怎样依据 endpoint lane、消息尺寸、memory type、system device 与 transport capability 选择实际数据路径，以及 request、progress、registration、rendezvous 和 backpressure 怎样共同决定延迟与数据年龄。""",
+    "rosidlbuffer": """rosidl::Buffer / CUDA Buffer Backend 把“消息是什么”和“payload 存在哪里”拆成两层：ROS 消息继续表达 schema 与通信语义，Buffer backend 决定同一 payload 使用 CPU vector、CUDA VMM、平台专用 accelerator memory 还是其他 storage。CUDA backend 进一步把同机 GPU buffer 共享落实到 CUDA VMM、POSIX FD、Unix-domain socket、SCM_RIGHTS、/dev/shm registry、CUDA event 与 atomic IPC refcount。\n\n本专题固定到 ros2/rosidl_buffer_backends 的 d7cd9642。重点不是学习 ROS 2 API，而是研究一条 accelerator-native message path 怎样用 size-class free list、VMM block identity、endpoint locality cache、epoll/eventfd dispatcher、RAII Read/Write Handle 与异步 recycler 同时解决分配、跨进程映射、生命周期、fallback 和 stale-handle 防护。""",
+    "holoscan": """NVIDIA Holoscan SDK 是面向实时传感器、视频与 GPU AI pipeline 的图运行时。Application/Fragment/Operator 描述业务图，FlowGraph 保存拓扑，Condition 把“什么时候可执行”显式化，Scheduler/ThreadPool 决定哪个 CPU 执行流获得工作，Allocator/CUDA Stream 管理异构内存，而跨 Fragment 连接再落到 UCX 数据面。\n\n本专题固定到 Holoscan SDK v4.6.0（66a9609a）。重点不是学习 Operator API，而是追踪一个 ready event 怎样进入 EventBasedScheduler、一帧 Tensor 怎样穿过 bounded connector 与 GPU allocator、分布式 Fragment 怎样建立 UCX connection，以及这些机制怎样最终落到 Linux thread priority、CPU affinity、CUDA stream/event 与有限 Buffer Pool。""",
 }
 
 PROJECT_EXTRAS: dict[str, list[str]] = {}
 
 ARTICLE_ORDER = {
+    "libuv": [
+        "overview",
+        "event-loop-phases",
+        "handle-request-lifetime",
+        "timer-heap",
+        "async-cross-thread-wakeup",
+        "threadpool-workqueue",
+        "epoll-watcher-registry",
+        "stream-write-backpressure",
+    ],
+    "asio": [
+        "overview",
+        "scheduler-operation-queue",
+        "epoll-reactor-descriptor-state",
+        "strand-serialization",
+        "work-lifetime-cancellation",
+    ],
+    "folly": [
+        "overview",
+        "spsc-cacheline-cursor",
+        "mpmc-ticket-turnsequencer",
+        "eventbase-atomic-notification",
+        "iobuf-chain-ownership",
+        "f14-cache-friendly-hash",
+        "concurrent-hashmap-shards-hazptr",
+        "rcu-grace-period-reclamation",
+        "hhwheel-timer",
+        "cpu-thread-pool",
+    ],
+    "seastar": [
+        "overview",
+        "reactor-shard-per-core",
+        "scheduling-groups-vruntime",
+        "smp-message-queue",
+        "future-continuation-task",
+        "sharded-foreign-ptr",
+        "cross-shard-memory-reclaim",
+    ],
+    "nginx": [
+        "overview",
+        "worker-epoll-accept",
+        "timer-rbtree",
+        "posted-event-queue",
+        "connection-pool-lifecycle",
+        "memory-pool-slab",
+    ],
     "cyber": [
         "overview",
         "architecture-map",
@@ -241,6 +301,26 @@ ARTICLE_ORDER = {
         "backpressure-thread-safety",
         "ucx-vs-message-middleware",
     ],
+    "rosidlbuffer": [
+        "overview",
+        "buffer-backend-contract",
+        "cuda-vmm-pool",
+        "ipc-fd-shm-registry",
+        "stream-handles-lifetime",
+        "accelerator-ipc-protocols",
+        "endpoint-locality-fallback",
+    ],
+    "holoscan": [
+        "overview",
+        "architecture-map",
+        "flowgraph-containers",
+        "event-based-scheduler",
+        "gxf-event-runtime-internals",
+        "gxf-entity-executor-router",
+        "conditions-connectors-backpressure",
+        "allocator-cuda-memory",
+        "distributed-ucx-runtime",
+    ],
 
 }
 CYBER_ARTICLE_SECTIONS = [
@@ -309,6 +389,11 @@ SOEM_ARTICLE_SECTIONS = [
 ]
 
 GUIDE_ORDER: dict[str, list[str]] = {
+    "libuv": [],
+    "asio": [],
+    "folly": [],
+    "seastar": [],
+    "nginx": [],
     "cyber": ["use-environment", "use-pubsub", "closed-loop-project", "use-component-operations", "case-study-apollo-planning"],
     "ecal": ["use-environment", "use-pubsub", "closed-loop-project", "use-operations", "case-study-mqtt-bridge"],
     "zenoh": ["use-environment", "use-pubsub-query", "use-operations", "case-study-rmw-zenoh"],
@@ -321,9 +406,19 @@ GUIDE_ORDER: dict[str, list[str]] = {
     "fastdds": ["case-study-delivery-mechanisms", "case-study-rmw-fastrtps"],
     "iceoryx2": ["official-examples-lab"],
     "ucx": ["official-hello-world-lab"],
+    "rosidlbuffer": ["case-study-isaac-ros-5-migration"],
+    "holoscan": [
+        "case-study-endoscopy-tool-tracking",
+        "case-study-ultrasound-segmentation",
+    ],
 }
 
 PROJECT_STORIES = {
+    "libuv": """大量 socket、timer、blocking work 和跨线程 completion 同时存在时，关键不是增加更多线程，而是先划分 execution ownership。socket readiness 与 Timer 由 loop thread 驱动，阻塞工作由 worker pool 执行，completion 再通过 loop-local queue 与 async wakeup 回到 owner thread；fd watcher、timer heap、write queue 和 closing list 分别承担 identity、deadline、backpressure 与 deferred reclamation。""",
+    "asio": """异步 I/O 不只是在 epoll 上套一层 C++。Asio 把 readiness、operation、execution policy 与 completion lifetime 分成独立对象：descriptor_state 管每个 fd 的 pending operation，scheduler 负责 ready completion，strand 把同一业务对象的 handler 串行化，outstanding work 决定 run loop 何时真正结束。""",
+    "folly": """当程序从“一个队列、一个线程池”成长到高并发 Runtime 后，真正需要设计的是 topology、cache-line ownership、等待策略、buffer lifetime、Timer workload 和 shutdown protocol。Folly 把这些问题压到一组可组合的数据结构中：SPSC 先利用单 producer/consumer 约束，MPMC 再用 ticket/turn 管 slot 复用，AtomicNotificationQueue 把 payload 与 wakeup handshake 分开，IOBuf 把 data view 与 storage ownership 分开，Timer/Executor 再分别承担时间与 CPU 调度。""",
+    "seastar": """如果 hot mutable state 可以按 Core 拆开，那么最有效的并发优化可能不是更复杂的锁，而是消除共享。Seastar 让每个 shard 独占 Reactor、任务队列、服务实例与 allocator，跨核用 SPSC request/completion queue 传递 work；future continuation 又直接成为 Reactor task，连跨核 free 也先回到 owner 的 freelist，再由 owner 批量回收。""",
+    "nginx": """大量连接并不要求大量线程。nginx 先把连接按 worker process 分片，再让每个 worker 的单线程 event loop 独占大部分 mutable connection state；连接对象来自固定 free list，空闲 keepalive 可进入 reusable queue，Timer 用 rbtree，ready event 可以先进入 posted queue，request-scoped 小对象则由 arena-style pool 整体回收。资源容量、事件执行顺序与 shutdown 因而都能在有限状态机中表达。""",
     "cyber": """从 :doc:`总览 <overview>` 中的一帧消息开始，先分清 Node、Reader/Writer、Component 和 Processor 分别属于通信、业务与执行哪一层。随后沿 :doc:`DAG 装配 <dag-to-component>`、:doc:`通信端点 <node-reader-writer>`、:doc:`数据分发 <dispatcher-notifier>` 和 :doc:`调度唤醒 <croutine-wakeup>` 追踪同一条消息如何从 transport 走到 Proc。
 
 读完基础 API 后进入 :doc:`端到端闭环工程 <closed-loop-project>`：把 Proto、Bazel、Publisher、DAG Component、输出 Writer 与严格 Observer 放在同一条链里，再回到 :doc:`最小 C++ Runtime <cpp-implementation-lab>` 亲自编译 Node/Reader/Writer 的缩小版。最后用 :doc:`Apollo Planning 案例 <case-study-apollo-planning>` 检查这些机制如何进入真实规划流水线。""",
@@ -348,6 +443,8 @@ PROJECT_STORIES = {
     "fastdds": """从 :doc:`总览 <overview>` 建立 DDS façade → Impl → RTPS Endpoint → History → Transport 的对象图，再沿 :doc:`Participant/Endpoint 生命周期 <participant-endpoint-lifecycle>`、:doc:`PDP/EDP <discovery-pdp-edp>`、:doc:`Discovery Server <discovery-server>` 和 :doc:`QoS <qos-matching>` 理清控制面。数据面从 :doc:`Writer/Reader 创建 <writer-reader-creation>` 进入 :doc:`DataWriter::write <write-cachechange>`、:doc:`WriterHistory/Reliability <writerhistory-reliability>`、:doc:`ReaderHistory/Fragments <readerhistory-fragments>` 与 :doc:`Transport <transport-network>`，再用 :doc:`FlowController <flowcontroller-async>`、:doc:`Data Sharing vs SHM <datasharing-vs-shm>`、:doc:`Loan <loan-zero-copy>`、:doc:`WaitSet <waitset-listener>` 和 :doc:`线程/关闭 <threads-events-close>` 收束运行时。\n\n本体之后直接进入真实工程：:doc:`官方 delivery_mechanisms <case-study-delivery-mechanisms>` 用同一业务代码切换 SHM Transport、Data Sharing 与 loan；:doc:`ROS 2 rmw_fastrtps <case-study-rmw-fastrtps>` 把 ROS Publisher、QoS 和 Executor wait 映射到底层 DataWriter 与 Fast DDS WaitSet。最后用 :doc:`Fast DDS vs Cyclone DDS <fastdds-vs-cyclonedds>` 分清 DDS/RTPS 必需机制与两套实现自己的数据结构。""",
     "iceoryx2": """先从总览和架构地图建立 Node、Service、Port、DataSegment 与 ZeroCopyConnection 的对象关系，再沿 SharedMemory/PointerOffset、PoolAllocator、Publisher loan、offset delivery、Subscriber receive/reclaim 走完一条 sample 的完整生命周期。随后进入 fan-out/backpressure/history 与 Event/WaitSet，再用 Request/Response 理解 ChannelId/RequestId/PendingResponse/ActiveRequest 的双向状态机，用 Blackboard 理解共享 latest-state 与 UnrestrictedAtomic；最后进入 dead-node cleanup 和与 eCAL/Fast DDS/Cyclone DDS 的共享内存对照。读完源码后直接跑 :doc:`官方示例实验 <official-examples-lab>`，把 pub/sub、event、event multiplexing、request-response 与 blackboard 映射回真实运行现象。整个专题统一锁定 v0.10.0 的 135d09dd8b29f321f1725920d434864c4e512378。""",
     "ucx": """从 :doc:`总览 <overview>` 与 :doc:`架构地图 <architecture-map>` 建立 UCP/UCS/UCT/UCM 的职责边界，再沿 :doc:`Context、Worker 与 Endpoint <context-worker-endpoint>` 和 :doc:`Lane 选择 <wireup-lane-selection>` 看一条 peer connection 如何由多个 transport lane 组成。数据面以 :doc:`Tag Send 与 Request <tag-send-request>` 为入口，进入 :doc:`协议选择 <protocol-selection>` 与 :doc:`Progress Engine <progress-engine>`；随后下沉到 :doc:`UCT Transport 模型 <uct-transport-model>`、:doc:`Memory Domain 与异构内存 <memory-domain-types>`，再用 :doc:`Rendezvous 与 GPU Pipeline <rendezvous-gpu-pipeline>` 理解大 tensor 如何绕开普通 eager copy。最后用 :doc:`背压与线程安全 <backpressure-thread-safety>` 和 :doc:`与消息中间件的边界 <ucx-vs-message-middleware>` 收束；:doc:`官方 Hello World 实验 <official-hello-world-lab>` 把 endpoint、request、progress 与 eventfd 对回可运行代码。源码真值统一锁定 UCX v1.22.0 的 8a6b06fb880accbb933a79cda893883872c68d9d。""",
+    "rosidlbuffer": """rosidl::Buffer 把 message schema 与 payload storage 分层：:doc:`Buffer Backend Contract <buffer-backend-contract>` 定义统一语义，:doc:`CUDA VMM Pool <cuda-vmm-pool>` 展开 std::map<size, vector<VmmBlock*>>、generation、grace 与 remote refcount，:doc:`FD/SHM Registry <ipc-fd-shm-registry>` 把 epoll、eventfd、SCM_RIGHTS、shm_open/mmap 连接到 Linux capability transfer，:doc:`Stream Handle 生命周期 <stream-handles-lifetime>` 再用 CUDA event 与 Recycler 处理异步 device lifetime。:doc:`Accelerator IPC 闭环 <accelerator-ipc-protocols>` 把 CUDA VMM 与 Qualcomm dma-buf 两条真实实现放在同一张 ownership/capability/generation 模型中比较；:doc:`Endpoint Locality 与 Fallback <endpoint-locality-fallback>` 负责 optimized path 的能力判定。:doc:`Isaac ROS 5 迁移案例 <case-study-isaac-ros-5-migration>` 展示这些机制怎样进入真实 GPU 机器人软件栈。""",
+    "holoscan": """从 :doc:`总览 <overview>` 先把 Holoscan 看成“图 + 调度 + 内存 + 连接器”的 streaming runtime，而不是一套 GPU API。随后用 :doc:`架构地图 <architecture-map>` 分清 Application、Fragment、Operator、Resource、Condition、Scheduler 和 Executor 的寿命边界，再进入 :doc:`FlowGraph 容器设计 <flowgraph-containers>`，直接观察 unordered_map、map、list、set 与 cycle cache 为什么同时存在。执行面先看 :doc:`Event-Based Scheduler <event-based-scheduler>` 的 v4.6 行为契约，再下沉到公开 GXF v3.2-1 的 :doc:`EBS 内部实现 <gxf-event-runtime-internals>`，把 TimedJobList、UniqueEventList、condition_variable、atomic ownership 和 worker/dispatcher 线程真正对应起来；随后用 :doc:`EntityExecutor 与 MessageRouter <gxf-entity-executor-router>` 解释一次 tick 前后的 inbox/outbox staging、SchedulingTerm AND 组合与 Entity execution_mutex。数据面继续读 :doc:`Condition、Connector 与背压 <conditions-connectors-backpressure>` 和 :doc:`Allocator/CUDA Memory <allocator-cuda-memory>`。最后用 :doc:`Distributed Fragment/UCX <distributed-ucx-runtime>` 把同进程图扩展到跨进程/跨主机，并用 :doc:`Endoscopy Tool Tracking <case-study-endoscopy-tool-tracking>` 与 :doc:`Ultrasound Segmentation <case-study-ultrasound-segmentation>` 两个 HoloHub 固定案例观察真实 GPU streaming pipeline 怎样配置 Pool、CUDA Stream、RDMA 与实时资源。""",
 }
 
 INTERNAL_ONLY_SLUGS = {"reconstruction"}
