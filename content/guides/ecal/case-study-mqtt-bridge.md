@@ -21,9 +21,9 @@ MQTT callback
 
 项目 README 明确给出三类需要桥接的消息：业务 payload、payload 的类型信息、descriptor string。这个细节揭示了桥接器的真实职责：它不只转发字节，还要让 MQTT 一侧有机会重建 eCAL 消息的类型语境。配置也允许用静态 eCAL type name 代替从 MQTT 侧接收类型名。
 
-## 从仓库入口建立阅读地图
+## 仓库入口与调用链
 
-仓库规模不大，阅读顺序可以保持线性：
+仓库的主调用链保持线性：
 
 ```text
 可执行入口

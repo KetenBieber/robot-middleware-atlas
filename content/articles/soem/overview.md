@@ -160,9 +160,9 @@ SOEM 专题把重点放在：
 
 因此每篇都会把 SOEM 与 IgH 的设计选择并排讨论，而不是重新背一遍 EtherCAT 名词。
 
-## 第一阶段阅读顺序
+## SOEM 主站运行时的六个核心问题
 
-先完成六个问题：
+这套主数据面可以归纳为六个问题：
 
 1. `ecx_contextt` 为什么可以成为整个 Master 的 root context？
 2. Linux 下 `ecx_setupnic()` 怎样拿到 raw Ethernet socket？
@@ -171,7 +171,7 @@ SOEM 专题把重点放在：
 5. `ecx_config_map_group()` 怎样把 PDO/FMMU 编译到应用 IOmap？
 6. `ecx_send_processdata_group()` 与 `ecx_receive_processdata_group()` 怎样完成一个周期？
 
-完成这六步以后，再进入 CoE、DC、冗余、OSAL/OSHW 和实时并发。
+这六个问题构成 SOEM 的主数据面；CoE、DC、冗余、OSAL/OSHW 和实时并发建立在这套主数据面之上。
 
 ## 一个控制工程上的提醒
 

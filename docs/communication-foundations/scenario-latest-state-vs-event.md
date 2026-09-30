@@ -1,7 +1,5 @@
 # 场景设计一：最新状态、事件流与历史——先别急着选 Queue
 
-> **首次阅读只抓三件事：** State / Event / History 的业务差别、`mutex + copy` 为什么已经是正确方案、为什么“线程安全”不等于“一致快照”。Double Buffer 和 Seqlock 放到第二遍再看。
-
 ## 场景
 
 机器人里最常见的数据流之一：
@@ -158,10 +156,8 @@ Controller 可能多次读到同一个 version，也可能直接从 version 1 �
 
 ---
 
-> **首次阅读完成点：** 到这里已经足够设计一个正确的 latest-state 通道。下面的 Double Buffer、Seqlock、RCU-style 都是“确认 mutex + copy 成为瓶颈以后”才需要研究的优化。
 
-
-## 从最小正确版继续往上推
+## 何时需要比 mutex + copy 更复杂的方案
 
 上面的 `LatestState` 已经把最基础的并发关系闭环了：一个对象、一把 mutex、一份 State，Writer 整体替换，Reader 整体复制。State 不大、频率和锁竞争可接受时，到这里完全可以停止，不要为了“高级”而主动换掉 mutex。
 

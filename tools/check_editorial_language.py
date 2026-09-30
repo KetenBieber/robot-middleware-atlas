@@ -38,6 +38,18 @@ FORBIDDEN = {
     "personal request/process": re.compile(
         r"用户提出|用户要求|你的要求|符合.*要求|本轮任务|本次任务|任务进度|当前进度|工作轮次"
     ),
+    "reader-process framing": re.compile(
+        r"首次(?:学习|阅读)|第一次阅读|"
+        r"(?:第一|第二|第三)遍(?:阅读|内容|：)|"
+        r"(?:源码|本专题|第一阶段)?阅读(?:路线|顺序|建议)|"
+        r"建议按.{0,30}阅读|"
+        r"本页代码约定|代码示例遵守|"
+        r"复习索引|先不要强记|"
+        r"(?:阅读|这一节|这一部分).{0,12}(?:可以|可)跳过|"
+        r"(?:可以|可)跳过.{0,12}(?:章节|一节|内容|实现细节)|"
+        r"不要试图一次.{0,12}背|"
+        r"读者不需要猜"
+    ),
     "documentation edit history": re.compile(
         r"旧版(?:导航|目录|文章|章节|页面|分类|结构|站点)|"
         r"新版(?:导航|目录|文章|章节|页面|分类|结构|站点)|"
@@ -82,6 +94,7 @@ def rendered_site_violations() -> list[str]:
         "agent/reviewer identity": FORBIDDEN["agent/reviewer identity"],
         "personal request/process": FORBIDDEN["personal request/process"],
         "audit/report framing": FORBIDDEN["audit/report framing"],
+        "reader-process framing": FORBIDDEN["reader-process framing"],
     }
     tag = re.compile(r"<[^>]+>")
     for path in site.rglob("*.html"):

@@ -652,9 +652,9 @@ LCM 自身没有复杂路由计算，最容易主导尾延迟的是：应用多�
 - regex 订阅和 channel cache 增加动态管理复杂度；
 - provider 语义不同，统一 API 不能保证统一阻塞行为。
 
-## 真正学完 LCM 的一条路线：每次使用都带出下一层问题
+## `JOINT_STATE` 如何把各层机制串起来
 
-读完总览以后，不要把所有源码文件同时打开。选自己的机器人里最普通的一条 `JOINT_STATE`，依次完成这些实验：
+以机器人里最普通的一条 `JOINT_STATE` 为例，provider、分片、缓冲、订阅、日志与仿真集成可以落到同一条运行时链：
 
 ~~~text
 同机：生成类型 publish / subscribe
@@ -681,11 +681,11 @@ LCM 自身没有复杂路由计算，最容易主导尾延迟的是：应用多�
 
 这些问题分别进入[类型编码与日志](types-and-eventlog.md)、[Provider](provider-vtable.md)、[UDPM 分片](udpm-publish-protocol.md)、[接收与缓冲](receive-reassembly.md)、[订阅与分发](subscription-dispatch.md)、[C ABI/C++ 对象设计](c-abi-cpp-design-lab.md)与[设计复盘](design-recap.md)。对应的实际操作则见[安装与网络](../../guides/lcm/use-environment.md)、[类型与收发](../../guides/lcm/use-pubsub-types.md)、[日志与故障演练](../../guides/lcm/use-operations.md)和[Drake 仿真](../../guides/lcm/case-study-drake.md)。
 
-每完成一环，都试着不用背类名回答四个问题：**字节现在在哪里、由谁拥有、下一次执行在哪条线程、发生丢弃或关闭后谁负责释放。** 这四个答案能把“会用 LCM”与“能从零设计同类运行时”真正连起来。
+这条链始终受四个问题约束：**字节现在在哪里、由谁拥有、下一次执行在哪条线程、发生丢弃或关闭后谁负责释放。**
 
-## 源码阅读路线
+## 消息生命周期与源码入口
 
-建议按一条消息的真实生命周期阅读以下固定版本符号：
+一条消息的真实生命周期依次经过以下固定版本符号：
 
 1. `lcm_create()`、`lcm_publish()`、`lcm_subscribe()`、`lcm_handle()`：URL 选择、句柄与公共 API；
 2. `_lcm_provider_vtable_t`：provider 操作契约；

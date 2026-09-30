@@ -45,7 +45,7 @@ PROJECTS = {
 PROJECT_OVERVIEWS = {
     "libuv": """libuv 是跨平台异步 I/O Runtime。它用 uv_loop_t 统一驱动 socket readiness、Timer、signal、async wakeup 与关闭回调；Handle 表示长期资源，Request 表示一次异步操作；无法自然映射为非阻塞 readiness 的文件 I/O、DNS 与用户 blocking work 则进入全局 worker thread pool。\n\n固定版本 2b4b918d。核心问题不是 API，而是 event loop phase、fd watcher registry、timer heap、atomic+eventfd 跨线程唤醒、worker completion、stream write backpressure 与 deferred close 怎样组合成一套可迁移的程序 Runtime。""",
     "asio": """Asio 把异步程序拆成 operation、execution context/executor 与 completion handler 三层。Linux 下 epoll_reactor 管 fd readiness 和 per-descriptor operation queue，scheduler 负责 ready completion 与 run() worker，strand 再在 executor 层提供逻辑串行化。\n\n固定版本 Asio 1.38.2（8806a680）。核心问题不是 async_read API，而是 scheduler_operation 的 intrusive/type-erased 设计、descriptor_state 的局部队列与锁、strand 的双队列 ownership、outstanding-work liveness 以及 close/cancel/reclaim 如何共同组成可推理的 C++ async runtime。""",
-    "folly": """Folly 提供的是一组工业 C++ Runtime 基础设施：SPSC/MPMC queue、AtomicNotificationQueue、IOBuf、HHWheelTimer、EventBase 与 Executor。它最值得研究的是数据结构和 OS 原语怎样围绕 cache locality、ownership、wakeup、blocking、batch 与 lifetime 组合，而不是单个 API。\n\n固定版本 v2026.09.28.00（c8ad483c）。阅读重点是 producer/consumer cache-line ownership、ticket + per-slot turn、futex 自适应等待、armed notification、IOBuf chain/shared storage、hierarchical timer wheel，以及 queue policy 与 worker lifecycle 的分离。""",
+    "folly": """Folly 提供的是一组工业 C++ Runtime 基础设施：SPSC/MPMC queue、AtomicNotificationQueue、IOBuf、HHWheelTimer、EventBase 与 Executor。它最值得研究的是数据结构和 OS 原语怎样围绕 cache locality、ownership、wakeup、blocking、batch 与 lifetime 组合，而不是单个 API。\n\n固定版本 v2026.09.28.00（c8ad483c）。核心机制包括 producer/consumer cache-line ownership、ticket + per-slot turn、futex 自适应等待、armed notification、IOBuf chain/shared storage、hierarchical timer wheel，以及 queue policy 与 worker lifecycle 的分离。""",
     "seastar": """Seastar 把多核 Runtime 组织成 shard-per-core：每个 shard 拥有自己的 Reactor、task queues、Timer、I/O 与 allocator，跨 shard 协作通过显式 SMP message passing 完成，而不是让所有线程直接共享 mutable state。\n\n本专题固定到 Seastar 25.05.0（8df8212e）。重点是 cooperative reactor、scheduling-group shares/vruntime、SPSC 跨核 request/completion queue、future continuation task、sharded/foreign_ptr execution ownership，以及 per-shard allocator 的 cross-CPU deferred free。""",
     "nginx": """nginx 把高并发网络服务组织成 master/worker process 模型：每个 worker 以单线程 event loop 拥有自己的 connection/event state，epoll/kqueue 负责 readiness，rbtree 管理 Timer，posted queue 延迟执行事件，预分配 connection slot 与 request pool 控制分配成本，共享内存对象再由 slab allocator 管理。\n\n固定版本 b74b5c9。核心问题是 worker ownership、Timer rbtree、posted event、connection free/reusable queue、pointer generation tag、arena/slab 与 graceful shutdown 怎样共同构成一个有界、低共享的服务器 Runtime。""",
     "cyber": """Cyber RT 是 Apollo 面向车载计算图的运行时：DAG 装载组件，Node 创建 Reader/Writer，Transport 接入进程内、共享内存与 RTPS 通道，DataVisitor 把消息缓存转换为可调度事件，CRoutine 与 Scheduler 再决定业务代码何时获得 CPU。
@@ -60,18 +60,18 @@ PROJECT_OVERVIEWS = {
     "lcm": """LCM 用很小的 C 运行时完成低延迟消息分发。顶层 ``lcm_t`` 保存 provider vtable、订阅关系和 handle 状态；UDPM provider 用 LC02/LC03 报文、多播 socket、接收线程、重组表、有限 ring 与通知 pipe，把网络接收和用户 callback 分到两个执行上下文。
 
 它的价值在于机制少而边界清楚：publish 可以一直追到 ``sendmsg/iovec``，receive 可以一直追到 fragment reassembly 与锁外 callback。相应代价也直接可见——多播没有端到端可靠性，分片放大丢包概率，队列容量和主线程调用 ``handle`` 的节奏决定数据是否及时。""",
-    "libzmq": """libzmq 把 socket pattern 建立在一套显式消息 Runtime 之上：socket_base_t 面向应用线程，pipe_t/ypipe_t 负责线程间消息通道与 HWM，mailbox_t + signaler 负责跨线程 command/wakeup，io_thread_t/poller 驱动网络与控制事件，session_base_t 和 stream/ZMTP engine 再把内部消息映射到真实 transport。\n\n本专题固定到 46493370。阅读重点不是 API，而是 MPSC mailbox 怎样通过发送侧 mutex 降维到 SPSC ypipe、yqueue/ypipe 怎样编码 reader/writer ownership、HWM/LWM 怎样形成 backpressure 状态机，以及 owner-thread + command passing 怎样减少跨线程共享 mutable state。""",
+    "libzmq": """libzmq 把 socket pattern 建立在一套显式消息 Runtime 之上：socket_base_t 面向应用线程，pipe_t/ypipe_t 负责线程间消息通道与 HWM，mailbox_t + signaler 负责跨线程 command/wakeup，io_thread_t/poller 驱动网络与控制事件，session_base_t 和 stream/ZMTP engine 再把内部消息映射到真实 transport。\n\n本专题固定到 46493370。核心不在 API，而在 MPSC mailbox 怎样通过发送侧 mutex 降维到 SPSC ypipe、yqueue/ypipe 怎样编码 reader/writer ownership、HWM/LWM 怎样形成 backpressure 状态机，以及 owner-thread + command passing 怎样减少跨线程共享 mutable state。""",
     "orocos": """Orocos RTT 围绕实时组件建立明确的执行边界。TaskContext 暴露生命周期 hooks、Operation 和 Port；Activity 提供线程与周期，ExecutionEngine 统一处理消息、端口事件和组件更新；ConnPolicy 决定数据连接使用最新值还是有界缓冲，以及采用何种同步策略。
 
 它最值得追踪的问题是“谁的线程执行这段代码”。ClientThread 与 OwnThread operation、周期与事件驱动 Activity、DATA 与 BUFFER policy 会给出完全不同的阻塞和数据年龄语义。所谓实时性最终取决于容器进度保证、hook 的最坏执行时间、OS priority/affinity 与关闭顺序能否形成闭环。""",
     "yarp": """YARP 把机器人网络抽象成 Port。PortCore 管理输入输出连接和生命周期，OutputUnit/InputUnit 把每条连接的执行状态隔离开，Protocol 与 Carrier 则把握手、framing、确认和具体传输协议从端口 API 中剥离。Name Server 把逻辑名字解析成可连接的 Contact。
 
-阅读 YARP 的主线是一次 ``Port::write`` 如何序列化并扇出到多条连接，以及对端怎样经 InputUnit 进入 PortReader。同步写、后台写、不同 Carrier、慢连接与断开竞态会改变 buffer 所有权和调用者阻塞时间，也决定它更适合可靠数据流还是只关心最新状态的控制链路。""",
+YARP 的主数据路径是一轮 ``Port::write`` 序列化并扇出到多条连接，对端再经 InputUnit 进入 PortReader。同步写、后台写、不同 Carrier、慢连接与断开竞态会改变 buffer 所有权和调用者阻塞时间，也决定它更适合可靠数据流还是只关心最新状态的控制链路。""",
     "ethercat": """IgH EtherCAT Master 把 Linux 主机、网卡、EtherCAT 帧、从站状态机和周期过程数据组织成一条面向工业控制的实时通信链。应用层看到 Master、Domain、PDO 与周期收发 API；源码层真正决定抖动、数据年龄和故障恢复的，是 FMMU/process image、datagram queue、非阻塞 FSM、Device/NIC 与 Distributed Clocks 怎样协同。\n\n本专题固定到 stable-1.6 / 1.6.13（61cc654f）。课程明确分成两部分：前半先从协议与控制系统第一性原理建立 EtherCAT 软件栈理论，后半再沿 ``ecrt_*`` public API 进入 Master/Domain、Datagram、FSM、Device/NIC 和 DC 的真实源码实现。""",
-    "soem": """SOEM 是轻量的用户态 EtherCAT MainDevice C Library。它不建立独立内核 Master，而是把 ``ecx_contextt``、固定容量 slave/group/frame 数组、IOmap、raw socket OSHW 与 OSAL 组合成可直接嵌入控制应用的协议运行时。\n\n本专题固定到 v2.0.0（304d1c05）。阅读重点不是重复 EtherCAT 协议名词，而是把同一套 PDO/FMMU/WKC/DC 语义和 IgH 做架构对照：Context 与对象图、固定 frame slot 与 Datagram queue、application IOmap 与 Domain、raw socket 与 net_device，以及应用自己承担的实时线程和恢复策略。""",
-    "cyclonedds": """Cyclone DDS 是 ROS 2 常用的 DDS/RTPS 实现之一。应用层看到 Participant、Writer、Reader、QoS 与 WaitSet；源码层真正决定数据年龄、可靠性、内存与调度边界的，是 DDSc Entity/RHC、DDSI discovery/WHC/RTPS、DDSRT socket/thread 以及 PSMX/loan 怎样协同。\n\n本专题固定到 Cyclone DDS 11.0.1（e54e991f）。阅读顺序沿一份样本真实前进：Entity 生命周期 → SPDP/SEDP → QoS matching → Writer/Reader 创建 → dds_write → WHC/Reliability → RTPS/UDP → receive/defrag/reorder → RHC → WaitSet/Listener → async/关闭 → PSMX/loan；最后用官方 ddsperf 与 ROS 2 rmw_cyclonedds 4.2.1 固定案例把机制重新落回工程。""",
+    "soem": """SOEM 是轻量的用户态 EtherCAT MainDevice C Library。它不建立独立内核 Master，而是把 ``ecx_contextt``、固定容量 slave/group/frame 数组、IOmap、raw socket OSHW 与 OSAL 组合成可直接嵌入控制应用的协议运行时。\n\n本专题固定到 v2.0.0（304d1c05）。核心在于把同一套 PDO/FMMU/WKC/DC 语义和 IgH 做架构对照：Context 与对象图、固定 frame slot 与 Datagram queue、application IOmap 与 Domain、raw socket 与 net_device，以及应用自己承担的实时线程和恢复策略。""",
+    "cyclonedds": """Cyclone DDS 是 ROS 2 常用的 DDS/RTPS 实现之一。应用层看到 Participant、Writer、Reader、QoS 与 WaitSet；源码层真正决定数据年龄、可靠性、内存与调度边界的，是 DDSc Entity/RHC、DDSI discovery/WHC/RTPS、DDSRT socket/thread 以及 PSMX/loan 怎样协同。\n\n本专题固定到 Cyclone DDS 11.0.1（e54e991f）。一份样本的运行时路径依次经过 Entity 生命周期 → SPDP/SEDP → QoS matching → Writer/Reader 创建 → dds_write → WHC/Reliability → RTPS/UDP → receive/defrag/reorder → RHC → WaitSet/Listener → async/关闭 → PSMX/loan；官方 ddsperf 与 ROS 2 rmw_cyclonedds 4.2.1 案例用于验证这些机制在工程中的组合方式。""",
     "fastdds": """Fast DDS 是 eProsima 的 DDS/RTPS 实现，也是 ROS 2 常用 RMW 后端之一。它以显式 C++ 对象图把 DDS façade、DataWriterImpl/DataReaderImpl、CacheChange、History、StatefulWriter/Reader、Proxy、FlowController 与 UDP/TCP/SHM Transport 串成运行时。\n\n本专题固定到 v3.6.2（39303846）。重点不是重讲一遍 DDS 术语，而是和 Cyclone DDS 做实现层对照：DataWriter::write 怎样在一次调用里完成锁、loan、序列化、CacheChange 与 History；Reliable 怎样落到 ReaderProxy/WriterProxy 与 TimedEvent；异步发送怎样由 FlowController 调度；SHM Transport、Data Sharing 与 loan_sample 为什么是三层不同优化。最后用官方 delivery_mechanisms 与 ROS 2 rmw_fastrtps 固定案例闭环。""",
-    "iceoryx2": """iceoryx2 是以 Rust core 实现的 zero-copy IPC runtime。它把大 payload 放进共享内存 DataSegment，通过 PointerOffset 和 ZeroCopyConnection 传递跨进程稳定的 descriptor，再用 borrow/release/reclaim 闭环 sample 生命周期。\n\n本专题固定到 v0.10.0（135d09dd）。阅读重点不是 API，而是共享页、虚拟地址、offset pointer、pool allocator、fan-out ownership、backpressure、WaitSet/Reactor 与 dead-node cleanup 怎样共同组成一套生产级同机 IPC。""",
+    "iceoryx2": """iceoryx2 是以 Rust core 实现的 zero-copy IPC runtime。它把大 payload 放进共享内存 DataSegment，通过 PointerOffset 和 ZeroCopyConnection 传递跨进程稳定的 descriptor，再用 borrow/release/reclaim 闭环 sample 生命周期。\n\n本专题固定到 v0.10.0（135d09dd）。核心不在 API，而在共享页、虚拟地址、offset pointer、pool allocator、fan-out ownership、backpressure、WaitSet/Reactor 与 dead-node cleanup 怎样共同组成一套生产级同机 IPC。""",
     "ucx": """OpenUCX 是面向高性能异构数据面的通信框架。UCP 把 endpoint、request、tag/RMA/AM 与协议选择组织成高层语义，UCT 再把这些动作映射到 shared-memory、TCP、InfiniBand/RDMA、CUDA、ROCm、Level Zero 等 transport；UCS 提供数据结构与系统设施，UCM 负责内存事件相关机制。\n\n这一组文章固定到 UCX v1.22.0（8a6b06fb）。核心问题是同一个发送调用怎样依据 endpoint lane、消息尺寸、memory type、system device 与 transport capability 选择实际数据路径，以及 request、progress、registration、rendezvous 和 backpressure 怎样共同决定延迟与数据年龄。""",
     "rosidlbuffer": """rosidl::Buffer / CUDA Buffer Backend 把“消息是什么”和“payload 存在哪里”拆成两层：ROS 消息继续表达 schema 与通信语义，Buffer backend 决定同一 payload 使用 CPU vector、CUDA VMM、平台专用 accelerator memory 还是其他 storage。CUDA backend 进一步把同机 GPU buffer 共享落实到 CUDA VMM、POSIX FD、Unix-domain socket、SCM_RIGHTS、/dev/shm registry、CUDA event 与 atomic IPC refcount。\n\n本专题固定到 ros2/rosidl_buffer_backends 的 d7cd9642。重点不是学习 ROS 2 API，而是研究一条 accelerator-native message path 怎样用 size-class free list、VMM block identity、endpoint locality cache、epoll/eventfd dispatcher、RAII Read/Write Handle 与异步 recycler 同时解决分配、跨进程映射、生命周期、fallback 和 stale-handle 防护。""",
     "holoscan": """NVIDIA Holoscan SDK 是面向实时传感器、视频与 GPU AI pipeline 的图运行时。Application/Fragment/Operator 描述业务图，FlowGraph 保存拓扑，Condition 把“什么时候可执行”显式化，Scheduler/ThreadPool 决定哪个 CPU 执行流获得工作，Allocator/CUDA Stream 管理异构内存，而跨 Fragment 连接再落到 UCX 数据面。\n\n本专题固定到 Holoscan SDK v4.6.0（66a9609a）。重点不是学习 Operator API，而是追踪一个 ready event 怎样进入 EventBasedScheduler、一帧 Tensor 怎样穿过 bounded connector 与 GPU allocator、分布式 Fragment 怎样建立 UCX connection，以及这些机制怎样最终落到 Linux thread priority、CPU affinity、CUDA stream/event 与有限 Buffer Pool。""",
@@ -537,7 +537,7 @@ def rewrite_generated_project_links(page: str, project: str) -> str:
 
 
 def cyber_course_navigation() -> str:
-    blocks = ["""先认识组件：消息触发与周期触发
+    blocks = ["""组件触发模型：消息触发与周期触发
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. toctree::
@@ -561,19 +561,8 @@ def cyber_course_navigation() -> str:
     return '\n'.join(blocks)
 
 
-def cyber_learning_path() -> str:
-    return '''
-怎样使用这套课程
-----------------
-
-第一次阅读，可以先用短篇组件入门区分消息触发与周期触发，再进入架构骨架画出对象、线程、缓存和依赖关系，之后沿“装配与端点 → 有界缓存 → 数据分发 → 多输入融合 → 任务唤醒 → Processor 执行 → 完整消息链回放”连续前进。带源码深读时，每到一个对象都记录 owner、所在执行上下文、锁域、消息复制和关闭动作。动手复刻时，则先实现有界 ring 与单 worker，再逐步加入类型擦除、事件闩锁、协程和配置装配；不要从完整框架接口倒推一个不可运行的玩具。
-
-源码章节分别深入端点创建、消息主链、数据面、任务状态和 Processor 执行，语言设计与最小复刻放在最后。简明入口与源码长文各自回答不同问题，不需要在多篇文章中反复重讲同一组基础术语。
-'''
-
-
 def ethercat_course_navigation() -> str:
-    blocks = ['''先看总路线：为什么实时控制需要主站软件栈
+    blocks = ['''主站软件栈总图
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. toctree::
@@ -597,19 +586,8 @@ def ethercat_course_navigation() -> str:
     return '\n'.join(blocks)
 
 
-def ethercat_learning_path() -> str:
-    return '''
-怎样读这个主站专题
-------------------
-
-前半部分先把 EtherCAT 本身讲清楚：Ethernet frame 为什么还能容纳多个 EtherCAT datagram，PDO/FMMU/process image 怎样把设备寄存器变成连续控制内存，AL 状态与 mailbox 为什么必须和周期过程数据分层，Distributed Clocks 怎样处理采样与执行相位，以及 Linux 实时性真正受哪些调度边界限制。
-
-后半部分固定在 IgH EtherCAT Master 1.6.13 的 61cc654f 提交上。阅读顺序不是目录顺序，而是沿一个控制周期和一次配置生命周期前进：request/activate → PDO 注册与 Domain 完成 → receive/process → queue/send → frame packing → slave FSM/mailbox → Device/NIC → DC → 并发与关闭。每个核心对象都回答 owner、内存布局、执行上下文、锁、复制、失败路径与控制系统后果。
-'''
-
-
 def soem_course_navigation() -> str:
-    blocks = ['''先看总路线：同样是 EtherCAT，SOEM 为什么是另一种主站架构
+    blocks = ['''SOEM 主站架构总图
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. toctree::
@@ -631,17 +609,6 @@ def soem_course_navigation() -> str:
 '''
         )
     return '\n'.join(blocks)
-
-
-def soem_learning_path() -> str:
-    return """
-怎样读这个主站专题
-------------------
-
-SOEM 专题不重复一遍 EtherCAT 协议词典，而是固定到 v2.0.0 / 304d1c05，从“用户态 Library 如何独立完成一个 Master”出发。先沿 Context、RAW Socket、固定 frame slot 与 Datagram primitive 建立运行时骨架，再进入 Slave Discovery、PDO/SM/FMMU 和 IOmap 的配置编译链；随后补齐 CoE/SDO、Distributed Clocks、双网口冗余、OSAL 实时边界和故障恢复。
-
-本体之后进入真实代码，而不是自制 Demo。官方 ec_sample 给出原生 SOEM 调用的基准线；ETH RSL soem_interface 展示 Bus/Slave/Manager、typed PDO staging 与 WKC 门控；Elfin ROS2 展示应用自管 1 ms 周期线程、直接 IOmap 与 reconfig/recover；IPE ros2_control 案例继续展示 CiA-402、DC、PDO health 与 ROS 2 HardwareInterface 的责任分层。外部项目可能携带较老 SOEM API，因此用于审查工程设计，不替代 v2.0.0 本体源码真值。
-"""
 
 
 def write_project_index(
@@ -677,12 +644,8 @@ def write_project_index(
 
 {PROJECT_OVERVIEWS[project]}
 
-本专题从机器人部署里的实际延迟和丢帧问题开始，再沿缓存、通知、调度和对象寿命逐步深入。没有明确称为固定源码的短代码是帮助推导的教学示例；文字图只是为讨论运行时关系服务。
-
-{cyber_learning_path()}
-
-源码工程课程
-------------
+源码机制
+--------
 
 {cyber_course_navigation()}
 
@@ -721,20 +684,10 @@ def write_project_index(
 """
     if project == 'cyber':
         source_navigation = cyber_course_navigation()
-    learning_path = f"""
-从一个具体故障开始
-------------------
-
-{PROJECT_STORIES[project]}
-
-这些文章中的短代码用于一步步推导机制；只有上下文明确说明取自固定上游版本时，才是项目原始源码。文字图呈现概念或运行时关系，而不是从源码自动生成的类图。
-"""
     if project == 'ethercat':
         source_navigation = ethercat_course_navigation()
-        learning_path = ethercat_learning_path()
     if project == 'soem':
         source_navigation = soem_course_navigation()
-        learning_path = soem_learning_path()
         if guide_entries:
             guide_navigation = f'''
 真实工程案例
@@ -752,8 +705,6 @@ def write_project_index(
 
 {PROJECT_OVERVIEWS[project]}
 
-阅读源码时从 public entry 出发，沿真实调用链标出对象所有权、线程切换、队列、锁和数据复制，再回到关闭路径检查在途工作如何收束。
-{learning_path}
 {source_navigation}
 {guide_navigation}
 """

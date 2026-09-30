@@ -1,6 +1,6 @@
 # 场景设计六：VLM/VLA 的 GPU Tensor 怎样跨模块、跨进程甚至跨主机
 
-> **知识依赖：** 本场景建立在大对象 IPC 的 Payload / Descriptor / Notification、Offset 和 Loan 之上。进入 GPU/NPU memory domain 后，最重要的两个问题仍然是“数据位于哪类内存”和“哪个完成信号证明 Buffer 已经可以进入下一生命周期阶段”。
+GPU/NPU 数据面仍遵循 Payload / Descriptor / Notification、Memory Domain、Ownership 与 Completion 这些基本约束；区别在于 payload 可能位于设备内存，完成条件也可能由 CUDA event、fence 或 RDMA completion 表达。
 
 ## 场景
 
@@ -219,8 +219,6 @@ message size
 registration
 protocol selection
 ~~~
-
-> **第三遍/专题阅读内容：** Rendezvous、registration、GPUDirect/RDMA 属于高速异构传输机制。只想先建立具身 Runtime 基础时，可以在这里停下；前面“Memory Domain + Handle + Completion”的模型已经足够。
 
 
 纳入同一个 data-plane planner。

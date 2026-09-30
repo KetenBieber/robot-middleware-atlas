@@ -10,9 +10,9 @@
 
 RMW 层必须同时实现：ROS graph discovery、topic 数据、QoS、服务请求响应、wait set、序列化消息、GID 与时间戳。Zenoh 原生抽象并不与 DDS/ROS 一一同名，因此核心工作是语义映射，而不是包装函数。
 
-## 从仓库结构建立阅读顺序
+## 仓库结构与实体生命周期
 
-官方仓库将实现放在 `rmw_zenoh_cpp`，Zenoh 依赖由 `zenoh_cpp_vendor` 管理，系统级行为测试位于 `test_rmw_zenoh_cpp`。阅读时不要从巨大的 RMW 导出函数列表逐个跳转，而应沿实体生命周期推进：
+官方仓库将实现放在 `rmw_zenoh_cpp`，Zenoh 依赖由 `zenoh_cpp_vendor` 管理，系统级行为测试位于 `test_rmw_zenoh_cpp`。核心实体生命周期如下：
 
 ```text
 rmw_init / context Data

@@ -188,7 +188,7 @@ for (auto& component : module_config.components()) {
 
 ## `Initialize()` 与业务 `Init()` 不是同一个函数
 
-这是第一次阅读 Cyber Component 时最容易混淆的命名。
+Cyber Component 中最容易混淆的是 `Initialize()` 与业务 `Init()` 的职责边界。
 
 业务类覆盖的是无参 `Init()`，用来读取自身配置、创建 writer 或初始化算法状态。框架调用的是带 `ComponentConfig` 的 `Initialize()`，它负责搭建通用运行时骨架，并在中间调用用户的 `Init()`。
 

@@ -18,7 +18,7 @@ Zenoh 核心使用 Rust，而许多机器人应用通过 C 或 C++ API 接入。
 3. 已经提交给异步任务的 `frame` 是否仍然有效；
 4. 声明或撤销失败时，C ABI 怎样报告错误而不让 Rust panic 穿过语言边界。
 
-本章后面的 `Arc`、`Weak`、Builder、RAII 和 FFI 都是在回答这四个问题。第一次阅读时，可以先把对象分成四层，不必立刻记住所有 Rust 类型：
+`Arc`、`Weak`、Builder、RAII 和 FFI 都围绕这四个问题展开，对象关系可以压缩成四层：
 
 ```text
 C++ RAII handle       负责“这个应用实体何时结束”

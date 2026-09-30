@@ -63,9 +63,8 @@ eCAL 适合主机内或受控局域网中的高带宽机器人数据流，例如
 
 ## 固定版本中的调用主线
 
-本系列固定 eCAL 源码为 commit `1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`。阅读顺序不按源码文件排序，而按机器人数据实际经过的对象排列：先看 `CGlobals::Initialize/Finalize` 如何建立与关闭进程运行时；再从 `CPublisher::Send` 进入 `CPublisherImpl::Write`，沿选中的 SHM、UDP 或 TCP writer 前进；随后从 Registration 的发布样本追到 `CPublisherImpl::ApplySubscriberRegistration`，看连接状态如何建立；最后从各 reader 回到 `CSubGate::ApplySample` 和 `CSubscriberImpl::ApplySample`，还原去重与业务交付。
+本系列固定 eCAL 源码为 commit `1ec0ea2fe5e5e61e3e492be6128c27cc6026d717`。一条样本的对象链依次经过 `CGlobals::Initialize/Finalize`、`CPublisher::Send`、`CPublisherImpl::Write`、具体 SHM/UDP/TCP writer、Registration 匹配，再由 reader 回到 `CSubGate::ApplySample` 和 `CSubscriberImpl::ApplySample`。这条链同时暴露对象创建者、所有权、线程边界和业务交付点。
 
-这条顺序让读者始终沿着“谁建立对象、谁持有对象、样本现在在哪里、下一跳由哪个线程执行”前进。下文各篇会直接展示这些符号的连续源码摘录；提交固定后，代码片段本身就是核对依据。
 
 ## 自顶向下数据链
 

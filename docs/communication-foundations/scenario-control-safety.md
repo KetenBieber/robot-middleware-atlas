@@ -1,7 +1,5 @@
 # 场景设计三：控制命令、模式切换与 Emergency Stop，为什么不能和普通消息混成一条 Queue
 
-> **首次阅读先抓四个概念：** Deadline、Priority、Preemption、Dedicated Safety Path。WCET、Priority Inheritance / Ceiling 属于第二遍实时调度细节。
-
 ## 场景
 
 机器人控制程序同时收到：
@@ -69,8 +67,6 @@ shared locks
 `WCET` 是 Worst-Case Execution Time，即一段代码在最坏情况下可能执行多久。实时设计关心的通常不是平均 1 ms，而是“最坏会不会偶尔跑到 30 ms”。
 
 ---
-
-> **第二遍内容：** Priority Inversion / Inheritance / Ceiling 是实时调度细节。第一次阅读可以先跳过这一节，继续看后面的 Dedicated Safety Path、ESTOP 持久状态和 Deadline。
 
 
 ## Priority Inversion 是怎样一步步发生的

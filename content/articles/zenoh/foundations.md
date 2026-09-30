@@ -25,7 +25,7 @@ robot/17/diagnostics/motor
 
 ## Key Expression 既能指向一个 key，也能描述一组 key
 
-Zenoh 把这套名字称为 key；能够包含通配规则的表达式叫作 **Key Expression**。第一次阅读时，可以把它翻译成“能够描述一组数据地址的表达式”。在这个固定提交中，表达式必须是规范形式的 UTF-8、按 `/` 分段、不能有空段、不能以 `/` 开始或结束，也不能包含 `//` 或 `# $ ?`；构造器 `keyexpr::new` 拒绝非规范输入，`autocanonize` 会先原地规范化再验证。约束来自 [`keyexpr` 定义和构造器](https://github.com/eclipse-zenoh/zenoh/blob/9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5/commons/zenoh-keyexpr/src/key_expr/borrowed.rs#L32-L90)。因此，来自配置文件或机器人 ID 的字符串不能只靠“看起来像路径”就直接拼接进 key。
+Zenoh 把这套名字称为 key；能够包含通配规则的表达式叫作 **Key Expression**，本质上是“能够描述一组数据地址的表达式”。在这个固定提交中，表达式必须是规范形式的 UTF-8、按 `/` 分段、不能有空段、不能以 `/` 开始或结束，也不能包含 `//` 或 `# $ ?`；构造器 `keyexpr::new` 拒绝非规范输入，`autocanonize` 会先原地规范化再验证。约束来自 [`keyexpr` 定义和构造器](https://github.com/eclipse-zenoh/zenoh/blob/9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5/commons/zenoh-keyexpr/src/key_expr/borrowed.rs#L32-L90)。因此，来自配置文件或机器人 ID 的字符串不能只靠“看起来像路径”就直接拼接进 key。
 
 先看一个具体 key：
 

@@ -1,7 +1,5 @@
 # 场景设计二：高频 Sensor → 慢速 Perception，怎样避免“系统还在跑但看到过去”
 
-> **首次阅读只抓四个词：** Producer Rate、Queueing Delay、Data Age、Backpressure。Little's Law、GPU in-flight 与工业案例都可以第二遍再看。
-
 ## 场景
 
 ~~~text
@@ -295,8 +293,6 @@ capture buffering
 > **容量是时延预算的结果，不是拍脑袋的常量。**
 
 ---
-
-> **首次阅读完成点：** 到这里已经能完成最重要的容量设计：知道 Producer/Consumer 速率、限制 Queue、选择 drop/block policy，并从 Data Age 反推容量。下面的 Buffer Pool、GPU/NIC in-flight 和工业案例属于第二遍系统级资源分析。
 
 
 ## Pool Size 又是另一套容量

@@ -379,7 +379,7 @@ transmit_on_cuda: true
 
 这正是研究 Tensor 长时间驻留 GPU 时，Buffer Pool 与 CUDA Stream 如何取代传统 CPU message copy 的好案例。
 
-## 本专题阅读顺序
+## Holoscan 运行时主链
 
 ~~~text
 overview

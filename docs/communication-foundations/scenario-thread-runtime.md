@@ -1,7 +1,5 @@
 # 场景设计四：从“一组件一线程”到真正的多线程 Runtime
 
-> **首次阅读先抓主线：** Component 不等于 Thread；Task 由 Worker 执行；多个 Worker 可以共享一个 global queue。MPMC、cache-line bouncing、work stealing 都是这条主线上的后续优化，不必第一遍全部记住。
-
 ## 场景
 
 机器人程序逐渐长成：
@@ -332,8 +330,6 @@ Per-worker queue / shard-per-core 的价值之一，就是减少共享写热点�
 
 ---
 
-
-> **首次阅读完成点：** 到这里已经可以自己写出一个对象关系清楚、能正常停止的基础 Worker Pool。下面的 cache-line、per-worker queue、work stealing、Coroutine、NUMA 都是在“基础池已经正确”之后才讨论的扩展。
 
 
 ## Global Queue 什么时候变成热点

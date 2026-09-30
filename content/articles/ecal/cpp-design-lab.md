@@ -96,7 +96,7 @@ Facade 面向业务代码，Gate 是按 topic 查找实体的注册表，Impl �
 | 进程内索引 | `CPubGate` 注册与 `ApplySubscriberRegistration` | 谁持有实现对象，订阅状态怎样到达发布者 |
 | 全局编排 | `CGlobals::Initialize`、`Finalize` | Gate、registration、transport 的启动和关闭顺序 |
 
-一次发送的固定源码阅读顺序应保持连续：
+一次发送的固定源码调用链如下：
 
 ```text
 CPublisher::Send

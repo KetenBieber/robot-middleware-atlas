@@ -1,7 +1,5 @@
 # 场景设计五：大图像/点云跨进程，怎样从 Copy IPC 走到 Shared-Memory Data Plane
 
-> **首次阅读先抓三层：** Payload 放大数据、Descriptor 描述数据、Notification 只负责唤醒。Offset、Loan、Generation 都是围绕这三层解决跨进程地址和生命周期问题。
-
 ## 场景
 
 ~~~text
@@ -300,8 +298,6 @@ int main() {
 Child 并没有接收 Parent 的裸指针；它只接收 offset，然后基于自己的 `child_base` 重新计算本地地址。这就是后面 iceoryx2 PointerOffset、共享内存 slot/descriptor 机制的最小原型。
 
 ---
-
-> **首次阅读完成点：** 到这里已经把“跨进程不能传裸指针、Payload 与 Descriptor 分离、Offset 如何定位共享数据”跑通了。下面的 Pool、Loan、Refcount、Generation 是为了把这个最小原型变成长期运行的 Runtime。
 
 
 ## 为什么固定 Pool 比“每帧 mmap 一次”更自然

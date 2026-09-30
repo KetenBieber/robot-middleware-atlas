@@ -1,19 +1,17 @@
 # Scenario：怎样从零设计一套机器人网络 Runtime
 
-> **知识依赖：** 多线程 Runtime 与流式 Backpressure 提供本页所需的 Queue、Worker、Data Age 和容量控制基础。核心骨架只有 Event Loop、Owner Thread、Worker Executor、Queue + Wakeup、Backpressure 五个结构；Asio Operation、Strand、Seastar shard-per-core 是在这套骨架上的进一步实现。
+网络 Runtime 建立在 Queue、Worker、Data Age 和容量控制之上，并进一步加入 Event Loop、Owner Thread、Executor、跨线程 Wakeup、Backpressure 与 Shutdown。Asio Operation、Strand、Seastar shard-per-core 和 nginx 资源池分别对应对象化操作、串行化执行、多核分片和资源复用等更具体的工程实现。
 
-## 分层理解这套 Runtime
+## Runtime 的三个设计层级
 
-| 阅读层级 | 先看什么 | 暂时可以跳过什么 | 读完应回答的问题 |
-| --- | --- | --- | --- |
-| 第一遍：建立骨架 | 一连接一线程、Reactor/Event Loop、Timer、Owner Thread、Executor、Queue + Wakeup、Backpressure、Shutdown | Asio Operation、Strand、Seastar、nginx 资源池细节 | 为什么一个网络 Runtime 需要“等待、执行、跨线程唤醒、容量控制”四条线？ |
-| 第二遍：理解对象设计 | Operation、Strand、资源池、active/passive queue state | 多核 sharding 的工程细节 | 为什么不能把所有 callback、锁和生命周期都塞进一个 EventLoop 类？ |
-| 第三遍：理解多核扩展 | MPMC 热点、shard-per-core、shared-nothing、cooperative scheduling | 无 | 什么时候优化共享 Queue，什么时候直接减少共享？ |
-
-如果第一遍读到 Asio/Seastar 的名词开始吃力，直接跳到“Backpressure”“Shutdown”和“最小架构”继续主线即可；这些高级实现不会改变前面已经建立的基本模型。
+| 设计层级 | 核心机制 | 解决的问题 |
+| --- | --- | --- |
+| 事件驱动骨架 | Reactor/Event Loop、Timer、Owner Thread、Executor、Queue + Wakeup | 谁等待事件、谁执行业务、跨线程任务怎样进入 owner thread |
+| 对象与生命周期 | Operation、Strand、active/passive queue state、资源池、Shutdown | 异步状态放在哪里、回调如何串行、对象何时可以释放 |
+| 多核扩展 | MPMC 热点、shard-per-core、shared-nothing、cooperative scheduling | 共享队列何时成为瓶颈，以及何时应直接减少共享 |
 
 
-这篇文章讨论的不是“某个库怎么用”，而是一个更接近工程设计的问题：
+这里关注的是一套承载机器人遥测、命令、日志和网络连接的 Runtime，核心问题不是 socket API 本身，而是执行权、事件等待、跨线程投递和容量控制怎样组成一个闭环。
 
 > 如果你要自己设计一套承载机器人遥测、命令、日志和网络连接的 Runtime，应该怎样从需求一步步推导出 event loop、任务队列、跨线程唤醒、Timer、worker、backpressure 和多核拓扑？
 
@@ -534,7 +532,7 @@ drain queue
 
 ---
 
-> **第一遍可以在这里暂时跳过实现细节。** Reactor、Owner Thread、Executor、Queue + Wakeup 已经形成网络 Runtime 的基本骨架。Asio Operation、Strand、Seastar 和 nginx 是用真实工程验证这套骨架，不需要第一次阅读就掌握。
+Reactor、Owner Thread、Executor、Queue + Wakeup 构成网络 Runtime 的基本骨架；Asio Operation、Strand、Seastar 和 nginx 分别在对象生命周期、串行化、多核分片和资源管理上进一步细化这套骨架。
 
 
 ## 9. Asio 为什么要把 Operation 做成对象
@@ -562,7 +560,7 @@ post([&]{
 Asio 把异步动作表示成 operation object。
 
 
-这里 allocator 决定 operation 自身的内存从哪里来；executor 决定 completion 以后在哪个执行上下文继续；continuation 是“当前异步操作完成后紧接着要继续执行的下一段工作”。第一次阅读只要知道这些信息必须跟着 operation 生命周期走，不必先掌握 Asio 的模板实现。
+这里 allocator 决定 operation 自身的内存从哪里来；executor 决定 completion 以后在哪个执行上下文继续；continuation 表示当前异步操作完成后紧接着执行的下一段工作。这些信息都必须与 operation 的生命周期绑定。
 这让 scheduler 不必理解业务类型，只需要处理：
 
 ~~~text
