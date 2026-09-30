@@ -161,6 +161,9 @@ ARTICLE_ORDER = {
         "pipe-hwm-backpressure",
         "socket-command-owner",
         "session-stream-engine",
+        "fq-lb-dist-schedulers",
+        "dealer-router-routing",
+        "pubsub-trie-distributor",
     ],
     "ecal": [
         "foundations",
