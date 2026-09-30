@@ -86,6 +86,14 @@ snapshot correctness
 
 先不要上 seqlock、double buffer。最容易理解且正确的版本，就是“一把 mutex 保护整个 State，一次性 copy”。
 
+编译运行（Linux / macOS；Windows 使用支持标准线程库的 C++17 编译器即可）：
+
+~~~text
+g++ -std=c++17 -O2 -pthread latest_state_demo.cpp -o latest_state_demo
+./latest_state_demo
+~~~
+
+
 ~~~cpp
 #include <chrono>
 #include <iostream>
@@ -149,6 +157,9 @@ int main() {
 Controller 可能多次读到同一个 version，也可能直接从 version 1 读到 version 2；它**不要求每个 estimator update 都被恰好消费一次**。这就是 Latest State 与 FIFO Event Queue 最核心的区别。
 
 ---
+
+> **首次阅读完成点：** 到这里已经足够设计一个正确的 latest-state 通道。下面的 Double Buffer、Seqlock、RCU-style 都是“确认 mutex + copy 成为瓶颈以后”才需要研究的优化。
+
 
 ## 从最小正确版继续往上推
 

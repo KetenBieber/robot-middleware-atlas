@@ -101,6 +101,14 @@ Reactor 是一种事件驱动组织方式：一个或少量 owner thread 阻塞�
 
 先看一个**真正可运行的 Linux epoll 程序**。为了避免引入 TCP 协议细节，这里用 `eventfd` 充当一个可被 epoll 等待的 fd；换成 socket fd 后，Reactor 的等待模型不变。
 
+这个示例是 **Linux-only**，因为直接使用 `epoll` 和 `eventfd`：
+
+~~~text
+g++ -std=c++17 -O2 -pthread epoll_eventfd_demo.cpp -o epoll_eventfd_demo
+./epoll_eventfd_demo
+~~~
+
+
 ~~~cpp
 #include <chrono>
 #include <cstdint>
@@ -525,6 +533,9 @@ drain queue
 ~~~
 
 ---
+
+> **第一遍可以在这里暂时跳过实现细节。** Reactor、Owner Thread、Executor、Queue + Wakeup 已经形成网络 Runtime 的基本骨架。Asio Operation、Strand、Seastar 和 nginx 是用真实工程验证这套骨架，不需要第一次阅读就掌握。
+
 
 ## 9. Asio 为什么要把 Operation 做成对象
 

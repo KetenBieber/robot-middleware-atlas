@@ -204,6 +204,14 @@ thread 数固定
 
 下面不是工业 ThreadPool，而是把对象关系讲清楚的最小版本。
 
+编译运行：
+
+~~~text
+g++ -std=c++17 -O2 -pthread thread_pool_demo.cpp -o thread_pool_demo
+./thread_pool_demo
+~~~
+
+
 ~~~cpp
 #include <atomic>
 #include <condition_variable>
@@ -323,6 +331,9 @@ CAS 是 Compare-And-Swap / Compare-And-Exchange：只有当共享变量仍等于
 Per-worker queue / shard-per-core 的价值之一，就是减少共享写热点。
 
 ---
+
+
+> **首次阅读完成点：** 到这里已经可以自己写出一个对象关系清楚、能正常停止的基础 Worker Pool。下面的 cache-line、per-worker queue、work stealing、Coroutine、NUMA 都是在“基础池已经正确”之后才讨论的扩展。
 
 
 ## Global Queue 什么时候变成热点

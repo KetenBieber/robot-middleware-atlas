@@ -94,6 +94,14 @@ Bounded queue 则明确 `capacity=N`；达到 N 后必须决定 block、drop、o
 
 下面模拟 Producer 每 10 ms 一帧、Consumer 每 40 ms 一帧、Queue capacity=3。队列满时丢最旧帧。
 
+编译运行：
+
+~~~text
+g++ -std=c++17 -O2 -pthread drop_old_demo.cpp -o drop_old_demo
+./drop_old_demo
+~~~
+
+
 ~~~cpp
 #include <chrono>
 #include <condition_variable>
@@ -287,6 +295,9 @@ capture buffering
 > **容量是时延预算的结果，不是拍脑袋的常量。**
 
 ---
+
+> **首次阅读完成点：** 到这里已经能完成最重要的容量设计：知道 Producer/Consumer 速率、限制 Queue、选择 drop/block policy，并从 Data Age 反推容量。下面的 Buffer Pool、GPU/NIC in-flight 和工业案例属于第二遍系统级资源分析。
+
 
 ## Pool Size 又是另一套容量
 

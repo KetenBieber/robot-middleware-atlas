@@ -70,6 +70,14 @@ RDMA registered memory
 
 下面给一个可以独立编译的“元数据模型”。它不调用 CUDA，只把异构 Buffer 接口中必须显式携带的信息建模出来：
 
+这段程序**不依赖 CUDA**，只是先把 Handle 元数据建模清楚，因此任何 C++17 编译器都可以运行：
+
+~~~text
+g++ -std=c++17 -O2 tensor_handle_demo.cpp -o tensor_handle_demo
+./tensor_handle_demo
+~~~
+
+
 ~~~cpp
 #include <array>
 #include <cstddef>
@@ -211,6 +219,9 @@ message size
 registration
 protocol selection
 ~~~
+
+> **第三遍/专题阅读内容：** Rendezvous、registration、GPUDirect/RDMA 属于高速异构传输机制。只想先建立具身 Runtime 基础时，可以在这里停下；前面“Memory Domain + Handle + Completion”的模型已经足够。
+
 
 纳入同一个 data-plane planner。
 

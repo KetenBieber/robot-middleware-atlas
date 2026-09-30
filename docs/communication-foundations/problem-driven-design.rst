@@ -22,6 +22,8 @@
 
 首次阅读路线：
 
+每篇 Scenario 都应提供一个“首次阅读完成点”：读到那里，读者已经能用最简单正确方案解决当前问题；后面的 lock-free、seqlock、work stealing、RDMA、NUMA 等内容属于第二遍或第三遍优化。第一次阅读不要求一次掌握整页。
+
 .. code-block:: text
 
    latest state / event / history

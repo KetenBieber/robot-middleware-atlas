@@ -301,6 +301,9 @@ Child 并没有接收 Parent 的裸指针；它只接收 offset，然后基于�
 
 ---
 
+> **首次阅读完成点：** 到这里已经把“跨进程不能传裸指针、Payload 与 Descriptor 分离、Offset 如何定位共享数据”跑通了。下面的 Pool、Loan、Refcount、Generation 是为了把这个最小原型变成长期运行的 Runtime。
+
+
 ## 为什么固定 Pool 比“每帧 mmap 一次”更自然
 
 实时 data plane 希望把昂贵和不确定的资源操作尽量移出 hot path。

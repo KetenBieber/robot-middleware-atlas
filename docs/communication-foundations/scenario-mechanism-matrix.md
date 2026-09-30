@@ -2,14 +2,18 @@
 
 这页是 **Scenario 系列的复习索引，不是入门文章**。如果表格里的术语有一半以上陌生，先回前面的场景页，不要试图一次把整张表背下来。
 
-## 读矩阵前只需要知道六组词
+## 第一次看矩阵，只需要四组基础词
 
-- latest state / double buffer / seqlock：见 [最新状态、事件流与历史](scenario-latest-state-vs-event.md)；
-- SPSC / MPSC / MPMC / work stealing：见 [多线程 Runtime](scenario-thread-runtime.md)；
-- bounded queue / drop-old / backpressure / admission control：见 [高频 Sensor → 慢速 Perception](scenario-streaming-pipeline.md)；
-- eventfd / epoll / WaitSet / owner thread：见 [机器人网络 Runtime](scenario-network-runtime-design.md)；
-- SHM / descriptor / offset / loan / generation：见 [大对象跨进程 IPC](scenario-large-payload-ipc.md)；
-- tensor handle / fence / RDMA / registration：属于高级异构数据面，见 [GPU Tensor 跨模块与跨主机](scenario-distributed-gpu.md)。
+- latest state / snapshot：见 [最新状态、事件流与历史](scenario-latest-state-vs-event.md)；
+- SPSC / MPSC / MPMC：见 [多线程 Runtime](scenario-thread-runtime.md)；
+- bounded queue / drop-old / backpressure：见 [高频 Sensor → 慢速 Perception](scenario-streaming-pipeline.md)；
+- SHM / descriptor / offset / loan：见 [大对象跨进程 IPC](scenario-large-payload-ipc.md)。
+
+下面这些词先不要强记：
+
+- work stealing、eventfd / epoll / WaitSet、owner thread：第二遍读 [机器人网络 Runtime](scenario-network-runtime-design.md) 时再看；
+- seqlock、generation、fence、RDMA、registration：属于进阶实现细节，等基本对象关系和生命周期已经清楚再进入。
+
 
 矩阵的正确读法是从左向右：**先确认业务语义，再看候选机制**。不要反过来从“我想用 lock-free queue”开始找场景。
 

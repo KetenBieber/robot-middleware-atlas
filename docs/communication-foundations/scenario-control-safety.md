@@ -70,6 +70,9 @@ shared locks
 
 ---
 
+> **第二遍内容：** Priority Inversion / Inheritance / Ceiling 是实时调度细节。第一次阅读可以先跳过这一节，继续看后面的 Dedicated Safety Path、ESTOP 持久状态和 Deadline。
+
+
 ## Priority Inversion 是怎样一步步发生的
 
 设 Logger Thread priority=10，Safety Thread priority=90。
@@ -100,6 +103,14 @@ Medium prevents Low from running
 ## 一个最小“安全状态 + 普通事件”结构
 
 下面故意把 persistent safety state 与普通 event queue 分开。
+
+编译运行：
+
+~~~text
+g++ -std=c++17 -O2 -pthread safety_path_demo.cpp -o safety_path_demo
+./safety_path_demo
+~~~
+
 
 ~~~cpp
 #include <atomic>
@@ -328,6 +339,14 @@ instant velocity target
 ## Deadline 必须成为 Command 的一部分
 
 下面给一个可以直接运行的最小版本。它故意让命令在 10 ms 后过期，再在 15 ms 后检查：
+
+编译运行：
+
+~~~text
+g++ -std=c++17 -O2 -pthread deadline_demo.cpp -o deadline_demo
+./deadline_demo
+~~~
+
 
 ~~~cpp
 #include <chrono>
