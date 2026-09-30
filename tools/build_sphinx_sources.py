@@ -407,6 +407,7 @@ GUIDE_ORDER: dict[str, list[str]] = {
     "folly": [],
     "seastar": [],
     "nginx": [],
+    "libzmq": [],
     "cyber": ["use-environment", "use-pubsub", "closed-loop-project", "use-component-operations", "case-study-apollo-planning"],
     "ecal": ["use-environment", "use-pubsub", "closed-loop-project", "use-operations", "case-study-mqtt-bridge"],
     "zenoh": ["use-environment", "use-pubsub-query", "use-operations", "case-study-rmw-zenoh"],
