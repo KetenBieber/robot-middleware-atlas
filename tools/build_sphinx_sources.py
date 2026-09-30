@@ -60,7 +60,7 @@ PROJECT_OVERVIEWS = {
     "lcm": """LCM 用很小的 C 运行时完成低延迟消息分发。顶层 ``lcm_t`` 保存 provider vtable、订阅关系和 handle 状态；UDPM provider 用 LC02/LC03 报文、多播 socket、接收线程、重组表、有限 ring 与通知 pipe，把网络接收和用户 callback 分到两个执行上下文。
 
 它的价值在于机制少而边界清楚：publish 可以一直追到 ``sendmsg/iovec``，receive 可以一直追到 fragment reassembly 与锁外 callback。相应代价也直接可见——多播没有端到端可靠性，分片放大丢包概率，队列容量和主线程调用 ``handle`` 的节奏决定数据是否及时。""",
-    "libzmq": """libzmq 把 socket pattern 建立在一套显式消息 Runtime 之上：socket_base_t 面向应用线程，pipe_t/ypipe_t 负责线程间消息通道与 HWM，mailbox_t + signaler 负责跨线程 command/wakeup，io_thread_t/poller 驱动网络与控制事件，session_base_t 和 stream/ZMTP engine 再把内部消息映射到真实 transport。\n\n本专题固定到 46493370。核心不在 API，而在 MPSC mailbox 怎样通过发送侧 mutex 降维到 SPSC ypipe、yqueue/ypipe 怎样编码 reader/writer ownership、HWM/LWM 怎样形成 backpressure 状态机，以及 owner-thread + command passing 怎样减少跨线程共享 mutable state。""",
+    "libzmq": """libzmq 把 socket pattern 建立在一套显式消息 Runtime 之上：msg_t 管消息存储与共享引用，pipe/ypipe 与 mailbox/command 管线程间数据面和控制面，session/engine/ZMTP 管网络协议；Context 还维护 inproc endpoint registry、socket slot 与 Reaper，monitor 把运行时状态重新编码成消息流，proxy 则在普通 socket 之上继续传播 backpressure。\n\n本专题固定到 46493370。完整主线覆盖小消息内联与大消息 fan-out、SPSC queue、HWM、owner-thread command、协议握手与重连、inproc pending bind、monitor event schema、steerable proxy，以及 linger、TERM/TERM_ACK、seqnum、Reaper DONE 共同组成的多层 shutdown barrier。""",
     "orocos": """Orocos RTT 围绕实时组件建立明确的执行边界。TaskContext 暴露生命周期 hooks、Operation 和 Port；Activity 提供线程与周期，ExecutionEngine 统一处理消息、端口事件和组件更新；ConnPolicy 决定数据连接使用最新值还是有界缓冲，以及采用何种同步策略。
 
 它最值得追踪的问题是“谁的线程执行这段代码”。ClientThread 与 OwnThread operation、周期与事件驱动 Activity、DATA 与 BUFFER policy 会给出完全不同的阻塞和数据年龄语义。所谓实时性最终取决于容器进度保证、hook 的最坏执行时间、OS priority/affinity 与关闭顺序能否形成闭环。""",
@@ -156,15 +156,23 @@ ARTICLE_ORDER = {
     ],
     "libzmq": [
         "overview",
+        "msg-storage-refcount",
         "mailbox-command-wakeup",
         "ypipe-yqueue-spsc",
         "pipe-hwm-backpressure",
         "socket-command-owner",
+        "inproc-endpoint-registry",
         "io-thread-poller",
         "session-stream-engine",
+        "zmtp-handshake-mechanism",
+        "tcp-reconnect-state-machine",
+        "monitor-event-observability",
         "fq-lb-dist-schedulers",
         "dealer-router-routing",
         "pubsub-trie-distributor",
+        "proxy-device-runtime",
+        "linger-termination-protocol",
+        "context-reaper-lifecycle",
     ],
     "ecal": [
         "foundations",
@@ -443,7 +451,7 @@ PROJECT_STORIES = {
     "lcm": """从 :doc:`机械臂消息总线的最小问题 <overview>` 开始，只保留“给出 channel 和一串字节”的 API。随后进入 :doc:`Provider 设计 <provider-vtable>`：先亲手写一个会失控的 switch，再理解 C 函数指针如何隔离传输实现。
 
 再沿 :doc:`UDP 发送 <udpm-publish-protocol>`、:doc:`接收与分片重组 <receive-reassembly>` 和 :doc:`订阅分发 <subscription-dispatch>` 追踪同一条消息，找出谁在收包、谁在调用用户代码，以及取消订阅为何需要延迟回收。读完 typed pub/sub 后进入 :doc:`双进程闭环工程 <closed-loop-project>`，把 schema、CMake、sender、receiver 和退出验收逐文件连起来；最后用 :doc:`C ABI 与 C++ 实验 <c-abi-cpp-design-lab>` 将设计压缩到可写、可测试的最小系统，再看 :doc:`Drake 集成 <case-study-drake>`。""",
-    "libzmq": """先从 :doc:`总览 <overview>` 建立 socket_base_t → pipe_t → session_base_t → engine 的对象链，再进入 :doc:`Mailbox <mailbox-command-wakeup>`，把 std::condition_variable 的“Queue + Wakeup”模型推进到 signaler fd + poller。随后读 :doc:`yqueue/ypipe <ypipe-yqueue-spsc>`，理解单 Writer/单 Reader ownership、chunk allocation、flush boundary 与单一 atomic contention point；最后用 :doc:`Pipe/HWM <pipe-hwm-backpressure>` 看 backpressure 怎样通过 active/inactive 与 activate_read/activate_write command 进入运行时状态机。\n\n这组文章先解决线程间消息 Runtime 的核心问题，后续再沿 socket_base command processing、io_thread/poller、session/engine 与 ZMTP/socket pattern 继续向网络数据面推进。""",
+    "libzmq": """从 :doc:`总览 <overview>` 与 :doc:`msg_t 存储 <msg-storage-refcount>` 建立消息 envelope，再沿 :doc:`Mailbox <mailbox-command-wakeup>`、:doc:`yqueue/ypipe <ypipe-yqueue-spsc>`、:doc:`Pipe/HWM <pipe-hwm-backpressure>` 和 :doc:`Socket owner <socket-command-owner>` 看数据与 command 怎样跨线程；随后插入 :doc:`inproc Endpoint Registry <inproc-endpoint-registry>`，理解同一 Context 内不用网络 fd 也仍要处理 discovery、Pipe ownership、HWM 与 seqnum。\n\n网络侧从 :doc:`I/O thread/poller <io-thread-poller>`、:doc:`Session/Engine <session-stream-engine>` 进入 :doc:`ZMTP 握手 <zmtp-handshake-mechanism>` 与 :doc:`TCP 重连 <tcp-reconnect-state-machine>`；:doc:`Monitor Event <monitor-event-observability>` 把这些状态变成结构化观测消息。再用 :doc:`FQ/LB/Distributor <fq-lb-dist-schedulers>`、:doc:`DEALER/ROUTER <dealer-router-routing>`、:doc:`PUB/SUB <pubsub-trie-distributor>` 建立 socket pattern，最后进入 :doc:`Proxy/Device <proxy-device-runtime>` 看上层 forwarding 怎样传播 backpressure。关闭阶段先读 :doc:`Linger/终止协议 <linger-termination-protocol>`，再以 :doc:`Context/Reaper <context-reaper-lifecycle>` 收束 socket slot、poller detach、异步销毁与 Context DONE join。""",
     "orocos": """先从 :doc:`1 ms 控制循环的失败 <foundations>` 出发：把设备、命令与日志塞进同一个线程为什么不够；然后沿 :doc:`TaskContext 生命周期 <taskcontext-lifecycle>` 给配置、启动、异常和释放划边界。
 
 接着进入 :doc:`Activity 与 ExecutionEngine <activity-execution-engine>`，区分“任务可以运行”和“哪个 OS 线程真正执行”；再读 :doc:`Port 与 Channel <ports-channels>` 及 :doc:`Operation 线程模型 <operation-threading>`，理解样本与控制命令的不同时间语义。最后通过 :doc:`C++ 实验 <cpp-design-lab>` 验证对象寿命、虚接口和并发关闭，再对照 :doc:`RTT/ROS 集成 <case-study-rtt-ros>`。""",

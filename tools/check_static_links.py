@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import posixpath
+import re
 import sys
-from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -20,31 +21,35 @@ FORBIDDEN_ARTIFACT_PARTS = {
 }
 
 
-class LinkParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__()
-        self.targets: list[tuple[str, str]] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        attribute = "href" if tag in {"a", "link"} else "src" if tag in {"img", "script"} else None
-        if attribute is None:
-            return
-        value = dict(attrs).get(attribute)
-        if value:
-            self.targets.append((tag, value))
+TARGET_ATTRIBUTE = re.compile(
+    r"""<(?:a|link|img|script)\b[^>]*?\b(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)')""",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
-def iter_html(root: Path):
-    yield from sorted(path for path in root.rglob("*.html") if path.is_file())
+def iter_targets(source_text: str):
+    for match in TARGET_ATTRIBUTE.finditer(source_text):
+        raw = match.group(1) if match.group(1) is not None else match.group(2)
+        if raw:
+            yield raw
 
 
-def local_target(source: Path, raw: str) -> Path | None:
+def local_target(source_relative: str, raw: str) -> str | None:
     parsed = urlsplit(raw)
     if parsed.scheme or parsed.netloc or not parsed.path:
         return None
-    target = (source.parent / unquote(parsed.path)).resolve()
+
+    decoded = unquote(parsed.path).replace("\\", "/")
+    if decoded.startswith("/"):
+        # Preserve the old checker's behavior for root-absolute links: they
+        # point outside the generated site tree and therefore cannot match a
+        # site-local path.
+        return f"__outside_site__{decoded}"
+
+    source_parent = posixpath.dirname(source_relative)
+    target = posixpath.normpath(posixpath.join(source_parent, decoded))
     if raw.endswith("/"):
-        target /= "index.html"
+        target = posixpath.join(target, "index.html")
     return target
 
 
@@ -54,24 +59,35 @@ def main() -> int:
         print(f"site directory does not exist: {root}", file=sys.stderr)
         return 2
 
-    html_files = list(iter_html(root))
-    missing: list[tuple[Path, str, Path]] = []
+    # Scan the tree once.  The old implementation called resolve()+exists()
+    # for every local href/src; Sphinx pages repeat navigation links heavily,
+    # causing hundreds of thousands of filesystem lookups on Windows.
+    entries = sorted(root.rglob("*"))
+    files = [path for path in entries if path.is_file()]
+    html_files = [path for path in files if path.suffix.lower() == ".html"]
+    existing = {
+        path.relative_to(root).as_posix()
+        for path in entries
+    }
+
+    missing: list[tuple[Path, str, str]] = []
     forbidden: list[Path] = []
-    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+    for path in files:
         relative = path.relative_to(root)
         normalized = relative.as_posix().lower()
         if any(part in normalized for part in FORBIDDEN_ARTIFACT_PARTS):
             forbidden.append(relative)
+
     checked = 0
     for source in html_files:
-        parser = LinkParser()
-        parser.feed(source.read_text(encoding="utf-8"))
-        for _tag, raw in parser.targets:
-            target = local_target(source, raw)
+        source_relative = source.relative_to(root).as_posix()
+        source_text = source.read_text(encoding="utf-8")
+        for raw in iter_targets(source_text):
+            target = local_target(source_relative, raw)
             if target is None:
                 continue
             checked += 1
-            if not target.exists():
+            if target not in existing:
                 missing.append((source.relative_to(root), raw, target))
 
     print(f"HTML_COUNT={len(html_files)}")
