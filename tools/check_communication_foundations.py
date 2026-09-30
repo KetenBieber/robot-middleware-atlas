@@ -40,6 +40,7 @@ REQUIRED = {
 }
 
 SCENARIO_PAGES = (
+    "scenario-network-runtime-design",
     "scenario-latest-state-vs-event",
     "scenario-streaming-pipeline",
     "scenario-control-safety",
@@ -49,6 +50,7 @@ SCENARIO_PAGES = (
     "scenario-mechanism-matrix",
 )
 SCENARIO_REQUIRED = {
+    "scenario-network-runtime-design": ("Event Loop", "Executor", "Backpressure", "Seastar", "nginx"),
     "scenario-latest-state-vs-event": ("State", "Event", "Snapshot", "Apollo", "latest"),
     "scenario-streaming-pipeline": ("Data Age", "Drop Old", "BlockMemoryPool", "Holoscan", "Little"),
     "scenario-control-safety": ("Emergency Stop", "deadline", "priority inversion", "EtherCAT", "watchdog"),

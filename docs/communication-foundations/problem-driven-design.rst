@@ -32,6 +32,7 @@
    方案切换条件
 
 .. toctree::
+   scenario-network-runtime-design
    :maxdepth: 1
 
    scenario-latest-state-vs-event
