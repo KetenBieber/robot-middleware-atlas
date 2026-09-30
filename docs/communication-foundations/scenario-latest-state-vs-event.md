@@ -1,5 +1,7 @@
 # 场景设计一：最新状态、事件流与历史——先别急着选 Queue
 
+> **首次阅读只抓三件事：** State / Event / History 的业务差别、`mutex + copy` 为什么已经是正确方案、为什么“线程安全”不等于“一致快照”。Double Buffer 和 Seqlock 放到第二遍再看。
+
 ## 场景
 
 机器人里最常见的数据流之一：
@@ -14,11 +16,11 @@ Controller 每个周期需要机器人当前状态。
 
 第一反应很容易是：
 
-~~~cpp
+~~~text
 std::queue<State> q;
 ~~~
 
-但在决定容器之前，必须先问业务语义。
+这里只是在写“第一反应中的候选容器”，不是一段需要编译的程序。在决定容器之前，必须先问业务语义。
 
 ## 先把几个词讲清楚：State、Event、History 不是“不同容器”，而是不同业务语义
 
@@ -148,105 +150,11 @@ Controller 可能多次读到同一个 version，也可能直接从 version 1 �
 
 ---
 
-## 第一步：这到底是 State、Event 还是 History
+## 从最小正确版继续往上推
 
-三个问题：
+上面的 `LatestState` 已经把最基础的并发关系闭环了：一个对象、一把 mutex、一份 State，Writer 整体替换，Reader 整体复制。State 不大、频率和锁竞争可接受时，到这里完全可以停止，不要为了“高级”而主动换掉 mutex。
 
-~~~text
-1. 新值到达以后，旧值还有独立业务意义吗？
-2. 每一次更新都必须被 Consumer 处理吗？
-3. Consumer 需要的是当前世界，还是发生过的完整序列？
-~~~
-
-如果答案是：
-
-~~~text
-旧值很快失效
-不要求每个 estimate 都执行一次 control
-只需要当前状态
-~~~
-
-那么它是 **latest state**，不是 event queue。
-
-反过来：
-
-~~~text
-ENABLE
-START
-STOP
-FAULT_ACK
-~~~
-
-通常是 event/command，每一条的顺序与存在本身可能有意义。
-
-日志/轨迹则属于 history。
-
----
-
-## Naive 方案一：一个共享 State
-
-~~~cpp
-State state;
-~~~
-
-Estimator 写，Controller 读。
-
-多线程以后立刻产生 data race。
-
-最简单修复：
-
-~~~cpp
-std::mutex m;
-
-Estimator:
-  lock
-  state = new_state
-  unlock
-
-Controller:
-  lock
-  local = state
-  unlock
-~~~
-
-如果 State 更新频率不高、copy 成本小，这可能已经够好。
-
-不要因为看到 mutex 就自动认为设计落后。
-
----
-
-## 但 Mutex 只解决 Race，不自动解决 Snapshot
-
-假设状态由多个来源组成：
-
-~~~text
-pose
-velocity
-battery
-mode
-~~~
-
-如果它们由不同 callback 分别加锁更新，而 Controller 分多次加锁读取：
-
-~~~text
-read pose version 100
-unlock
-
-velocity callback updates version 101
-
-lock
-read velocity version 101
-~~~
-
-最终 local state 是混合版本。
-
-这和 Apollo Planning 里辅助输入逐段复制到 LocalView 的问题完全一致。
-
-所以：
-
-> **没有 data race，不等于获得业务级原子快照。**
-
-如果要求同一采样时刻的一致状态，要增加 version/snapshot protocol。
+只有当 State 变大、Reader 变多、复制或锁竞争开始成为可测瓶颈，才需要继续比较下面这些方案。此时关注点从“能不能正确同步”升级为“怎样在保持一致快照的前提下降低 Reader/Writer 成本”。
 
 ---
 
@@ -283,6 +191,8 @@ Reader acquire current
 ↓
 read B
 ~~~
+
+这里的 release/acquire 是 C++ memory-order 术语：Writer 用 release 发布索引时，要求此前对 Buffer B 的写入不能被排到发布之后；Reader 用 acquire 读到这个新索引后，才能把 Buffer B 的这些写入当成已经可见。更完整的内存序推导见 [Threads & Memory Order](threads-memory-order.md)。
 
 核心不是“两块内存”，而是：
 
@@ -425,6 +335,8 @@ Logs
 “需要跨进程”
 → 裸 pointer 改 SHM descriptor/generation
 ~~~
+
+这里的 RCU-style 指“Reader 尽量只读一个已发布版本，Writer 发布新版本后不立刻销毁旧版本，而是等旧 Reader 都退出后再回收”。它不是本页必须掌握的实现细节，只是说明“多 Reader + 读多写少”时还有另一类 ownership 方案。
 
 ---
 

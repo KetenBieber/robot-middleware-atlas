@@ -1,5 +1,7 @@
 # 场景设计三：控制命令、模式切换与 Emergency Stop，为什么不能和普通消息混成一条 Queue
 
+> **首次阅读先抓四个概念：** Deadline、Priority、Preemption、Dedicated Safety Path。WCET、Priority Inheritance / Ceiling 属于第二遍实时调度细节。
+
 ## 场景
 
 机器人控制程序同时收到：
@@ -101,9 +103,12 @@ Medium prevents Low from running
 
 ~~~cpp
 #include <atomic>
+#include <chrono>
+#include <iostream>
 #include <mutex>
 #include <queue>
 #include <string>
+#include <thread>
 
 class SupervisorInput {
 public:
@@ -135,9 +140,38 @@ private:
     std::mutex m_;
     std::queue<std::string> events_;
 };
+
+int main() {
+    SupervisorInput input;
+
+    std::thread normal_source([&] {
+        input.push_event("diagnostic: battery low");
+    });
+
+    std::thread estop_source([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        input.assert_estop();
+    });
+
+    for (int i = 0; i < 20; ++i) {
+        if (input.estop_active()) {
+            std::cout << "ESTOP is active\n";
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    normal_source.join();
+    estop_source.join();
+
+    std::string event;
+    while (input.try_pop_event(event)) {
+        std::cout << "ordinary event: " << event << "\n";
+    }
+}
 ~~~
 
-这里 ESTOP 没有进入普通 FIFO。Safety Thread 可以每个周期直接读取持久状态 `estop_active`。
+这里只存在一个 `SupervisorInput input`。两个 producer thread 和主线程都访问同一个对象；ESTOP 没有进入普通 FIFO，主线程可以直接读取持久状态 `estop_active`。
 
 即使某个线程错过了一次“ESTOP asserted”边沿通知，也不会因此把系统误认为安全。
 
@@ -188,6 +222,8 @@ CHANGE_MODE
 
 ## Naive 方案：所有消息进一个 MPMC Queue
 
+MPMC 是 Multiple Producer / Multiple Consumer：多个线程都可以向同一 Queue push，也有多个线程从中 pop。它只描述并发拓扑，不代表消息自动具有优先级或安全语义；完整定义见 [多线程 Runtime](scenario-thread-runtime.md)。
+
 ~~~text
 camera event
 log event
@@ -215,23 +251,6 @@ control/supervisor
 
 ---
 
-## Priority Queue 能否解决
-
-可以给 Emergency Stop 高优先级。
-
-但还要问：
-
-~~~text
-Consumer 当前是否正在执行一个长任务？
-Queue priority 能否抢占正在运行的 callback？
-高优先级 item 是否会被 mutex owner 阻塞？
-~~~
-
-普通 priority_queue 只决定“下一项取谁”，不能抢占当前正在执行的 code。
-
-这和 ROS Executor / Holoscan worker 的 priority 问题一样。
-
----
 
 ## 更强的方案：Dedicated Safety Path
 
@@ -308,15 +327,47 @@ instant velocity target
 
 ## Deadline 必须成为 Command 的一部分
 
-命令结构可以包含：
+下面给一个可以直接运行的最小版本。它故意让命令在 10 ms 后过期，再在 15 ms 后检查：
 
 ~~~cpp
+#include <chrono>
+#include <cstdint>
+#include <iostream>
+#include <string>
+#include <thread>
+
+using Clock = std::chrono::steady_clock;
+
 struct Command {
-    Sequence seq;
-    TimePoint created_at;
-    TimePoint deadline;
-    CommandPayload payload;
+    std::uint64_t seq;
+    Clock::time_point created_at;
+    Clock::time_point deadline;
+    std::string payload;
 };
+
+bool expired(const Command& cmd, Clock::time_point now) {
+    return now > cmd.deadline;
+}
+
+int main() {
+    const auto now = Clock::now();
+
+    Command cmd{
+        102,
+        now,
+        now + std::chrono::milliseconds(10),
+        "target_velocity=0.5"
+    };
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+
+    if (expired(cmd, Clock::now())) {
+        std::cout << "drop expired command seq="
+                  << cmd.seq << "\n";
+    } else {
+        std::cout << "execute: " << cmd.payload << "\n";
+    }
+}
 ~~~
 
 Consumer 取出后先判断：
@@ -349,20 +400,9 @@ Consumer 可以识别 stale command。
 
 ---
 
-## OS Priority 为什么必须和 Channel Design 一起看
+## 把 Priority Inversion 的结论落实到 RT 热路径
 
-假设 safety thread 用 SCHED_FIFO 90。
-
-但它需要获取一把 mutex，而 mutex 被低优先级 logger thread 持有：
-
-~~~text
-Safety high priority
-↓ waits mutex
-Logger low priority
-↓ 没有 CPU
-~~~
-
-形成 priority inversion。
+Linux 的 `SCHED_FIFO` 是实时调度策略：更高静态优先级的 runnable 线程可以抢占更低优先级线程。但**高优先级不会自动穿透共享锁**；如果 Safety Thread 需要的 mutex 被低优先级线程持有，它仍然必须等待。
 
 因此 hard/firm RT 路径应尽量避免：
 
@@ -372,9 +412,7 @@ Logger low priority
 - 不受控 logging；
 - 大对象拷贝。
 
-如果必须共享锁，要考虑 priority inheritance/ceiling 或重新划分 ownership。
-
----
+如果必须共享锁，再考虑 priority inheritance / ceiling；更优先的问题仍然是能否重新划分 ownership，让 Safety 路径根本不依赖这把锁。
 
 ## 工业案例：EtherCAT Process Image
 

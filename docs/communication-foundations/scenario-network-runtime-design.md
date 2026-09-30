@@ -1,5 +1,18 @@
 # Scenario：怎样从零设计一套机器人网络 Runtime
 
+> **知识依赖：** 多线程 Runtime 与流式 Backpressure 提供本页所需的 Queue、Worker、Data Age 和容量控制基础。核心骨架只有 Event Loop、Owner Thread、Worker Executor、Queue + Wakeup、Backpressure 五个结构；Asio Operation、Strand、Seastar shard-per-core 是在这套骨架上的进一步实现。
+
+## 分层理解这套 Runtime
+
+| 阅读层级 | 先看什么 | 暂时可以跳过什么 | 读完应回答的问题 |
+| --- | --- | --- | --- |
+| 第一遍：建立骨架 | 一连接一线程、Reactor/Event Loop、Timer、Owner Thread、Executor、Queue + Wakeup、Backpressure、Shutdown | Asio Operation、Strand、Seastar、nginx 资源池细节 | 为什么一个网络 Runtime 需要“等待、执行、跨线程唤醒、容量控制”四条线？ |
+| 第二遍：理解对象设计 | Operation、Strand、资源池、active/passive queue state | 多核 sharding 的工程细节 | 为什么不能把所有 callback、锁和生命周期都塞进一个 EventLoop 类？ |
+| 第三遍：理解多核扩展 | MPMC 热点、shard-per-core、shared-nothing、cooperative scheduling | 无 | 什么时候优化共享 Queue，什么时候直接减少共享？ |
+
+如果第一遍读到 Asio/Seastar 的名词开始吃力，直接跳到“Backpressure”“Shutdown”和“最小架构”继续主线即可；这些高级实现不会改变前面已经建立的基本模型。
+
+
 这篇文章讨论的不是“某个库怎么用”，而是一个更接近工程设计的问题：
 
 > 如果你要自己设计一套承载机器人遥测、命令、日志和网络连接的 Runtime，应该怎样从需求一步步推导出 event loop、任务队列、跨线程唤醒、Timer、worker、backpressure 和多核拓扑？
@@ -35,7 +48,9 @@ shutdown 时谁先停？
 
 第一次写服务器时，很容易写成：
 
-~~~cpp
+下面只是“一连接一线程”的控制流伪代码，不是可编译示例：
+
+~~~text
 void serve(int fd) {
     while (running) {
         Message msg = blocking_read(fd);
@@ -82,17 +97,69 @@ void serve(int fd) {
 
 ## 2. Reactor：把“等待事件”和“执行业务”分开
 
-Linux 下最直接的办法是：
+Reactor 是一种事件驱动组织方式：一个或少量 owner thread 阻塞等待“哪些 fd / timer / wakeup 已经 ready”，醒来后再把对应事件分发给 handler。它不等于 epoll；epoll 只是 Linux 上实现 readiness wait 的一种 OS primitive。
+
+先看一个**真正可运行的 Linux epoll 程序**。为了避免引入 TCP 协议细节，这里用 `eventfd` 充当一个可被 epoll 等待的 fd；换成 socket fd 后，Reactor 的等待模型不变。
 
 ~~~cpp
-for (;;) {
-    int n = epoll_wait(epfd, events, MAX_EVENTS, timeout);
+#include <chrono>
+#include <cstdint>
+#include <iostream>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
+#include <thread>
+#include <unistd.h>
+
+int main() {
+    const int epfd = ::epoll_create1(0);
+    const int wake_fd = ::eventfd(0, EFD_NONBLOCK);
+
+    if (epfd < 0 || wake_fd < 0) {
+        std::cerr << "failed to create epoll/eventfd\n";
+        return 1;
+    }
+
+    epoll_event ev{};
+    ev.events = EPOLLIN;
+    ev.data.fd = wake_fd;
+
+    if (::epoll_ctl(epfd, EPOLL_CTL_ADD, wake_fd, &ev) != 0) {
+        std::cerr << "epoll_ctl failed\n";
+        return 1;
+    }
+
+    std::thread producer([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        const std::uint64_t one = 1;
+        ::write(wake_fd, &one, sizeof(one));
+    });
+
+    epoll_event ready[4]{};
+    const int n = ::epoll_wait(epfd, ready, 4, 1000);
 
     for (int i = 0; i < n; ++i) {
-        dispatch(events[i]);
+        if (ready[i].data.fd == wake_fd) {
+            std::uint64_t value = 0;
+            ::read(wake_fd, &value, sizeof(value));
+            std::cout << "event loop woke up, value="
+                      << value << "\n";
+        }
     }
+
+    producer.join();
+    ::close(wake_fd);
+    ::close(epfd);
 }
 ~~~
+
+编译：
+
+~~~text
+g++ -std=c++17 epoll_demo.cpp -pthread -o epoll_demo
+./epoll_demo
+~~~
+
+这个程序里只有一个 Event Loop Owner：主线程。Producer Thread 不执行 Event Loop 内部逻辑，它只把 `wake_fd` 变成 readable；主线程从 `epoll_wait()` 返回后再处理 ready event。
 
 Reactor 的核心不是 `epoll` 这个 API，而是一个 ownership 决策：
 
@@ -133,7 +200,7 @@ dispatch callback
 
 libuv 的设计价值就在这里：它把不同来源的 ready work 组织成多个 phase。
 
-固定版本源码里，loop 主体会先计算 timeout，再进入 I/O poll：
+下面是 **libuv 真实源码片段**，依赖 libuv 工程上下文，不是独立程序。固定版本源码里，loop 主体会先计算 timeout，再进入 I/O poll：
 
 ~~~c
 if ((mode == UV_RUN_ONCE && can_sleep) ||
@@ -184,7 +251,9 @@ Event Loop 同时可能要消费：
 
 如果每个模块自己创建线程 sleep：
 
-~~~cpp
+下面是设计反例的伪代码：
+
+~~~text
 while (running) {
     sleep_for(10ms);
     check_timeout();
@@ -231,7 +300,9 @@ Timer 数量
 
 假设一个连接对象里有：
 
-~~~cpp
+这里只画对象成员关系，不把未定义的 Parser / SendQueue 冒充成独立 C++ 程序：
+
+~~~text
 struct Connection {
     Parser parser;
     SendQueue send_queue;
@@ -273,7 +344,9 @@ master
 
 如果一个 callback 做：
 
-~~~cpp
+下面是“长 callback”的控制流示意：
+
+~~~text
 void on_message(const Message& m) {
     run_neural_network();
     write_database();
@@ -309,6 +382,8 @@ CPU-heavy / blocking work
 
 ## 7. Executor：为什么“线程池”还不够
 
+Executor 先不要理解成“线程池的高级名字”。它更抽象：**接收一个可执行 Task，并决定这个 Task 在哪里、何时、以什么串行/并行策略执行。** ThreadPool 只是 Executor 的一种实现；单线程 Event Loop、Strand、按优先级的 Worker Pool 都可以实现 Executor 语义。
+
 这里先明确一件事：下面的 `m / cv / q` 仍然不是三个“各线程自己的局部变量”。真实线程池通常会把它们作为**同一个 ThreadPool 对象的成员**，所有 worker 线程都通过 `this` 访问同一份 queue、同一把 mutex 和同一个 condition variable。
 
 如果对 `std::mutex / std::lock_guard / std::unique_lock / std::condition_variable / wait / notify_one` 的对象关系还不熟，先完整阅读 [线程间通信：共享地址不等于共享时序](threads-memory-order.md)。那里用两个真正的 `std::thread`、完整 `main()` 和逐步时序解释了它们为什么必须这样组合。
@@ -330,7 +405,9 @@ CPU-heavy / blocking work
 
 因此下面代码表达的是“多个线程共享同一个线程池内部状态”：
 
-~~~cpp
+这里不再重复一份半完整 ThreadPool；**完整可运行版本**见 [从“一组件一线程”到真正的多线程 Runtime](scenario-thread-runtime.md)。下面只保留 worker 的关键控制流：
+
+~~~text
 std::mutex m;
 std::condition_variable cv;
 std::queue<Task> q;
@@ -383,13 +460,13 @@ Folly 的价值就在于：把这些策略拆开。
 
 假设网络线程正在：
 
-~~~cpp
+~~~text
 epoll_wait(...);
 ~~~
 
 另一个线程往 Event Loop 的任务队列塞了一个 callback：
 
-~~~cpp
+~~~text
 queue.push(task);
 ~~~
 
@@ -425,6 +502,8 @@ Armed
 Non-empty
 ~~~
 
+这里 Armed 可以读成“Consumer 已经声明：我准备睡了，如果状态从空变成有任务，请负责叫醒我”。这样 Producer 不必对每次 push 都无条件执行一次系统调用。
+
 只有“消费者可能正在睡眠”时才真正触发 wakeup。
 
 这带来一个很重要的设计结论：
@@ -451,7 +530,9 @@ drain queue
 
 如果 Runtime 只传 lambda，看起来很简单：
 
-~~~cpp
+下面只是接口形态示意：
+
+~~~text
 post([&]{
     socket.write(...);
 });
@@ -469,6 +550,8 @@ post([&]{
 
 Asio 把异步动作表示成 operation object。
 
+
+这里 allocator 决定 operation 自身的内存从哪里来；executor 决定 completion 以后在哪个执行上下文继续；continuation 是“当前异步操作完成后紧接着要继续执行的下一段工作”。第一次阅读只要知道这些信息必须跟着 operation 生命周期走，不必先掌握 Asio 的模板实现。
 这让 scheduler 不必理解业务类型，只需要处理：
 
 ~~~text
@@ -509,6 +592,8 @@ scheduler lock
 
 ## 10. Strand：不用给业务对象到处加 mutex
 
+Strand 可以先理解成“逻辑串行执行通道”：很多线程都可以向它 post handler，但同一个 Strand 保证这些 handler 不会并发执行。它不要求固定只有一个 OS thread，而是保证**同一时刻只有一个属于该 Strand 的 handler 拿到执行权**。
+
 假设一个 Session 可能收到：
 
 ~~~text
@@ -522,7 +607,9 @@ on_close
 
 朴素办法是在 Session 里加 mutex：
 
-~~~cpp
+这里是锁住业务状态机的伪代码：
+
+~~~text
 void Session::on_read(...) {
     std::lock_guard lock(m_);
     ...
@@ -557,7 +644,9 @@ serial handler lane
 
 很多 Runtime 原型都有：
 
-~~~cpp
+下面只是反模式的容器声明：
+
+~~~text
 std::queue<Task> tasks;
 ~~~
 
@@ -598,6 +687,8 @@ drop policy
 | RPC request | admission control |
 | reconnect task | coalesce |
 
+admission control 是在工作进入系统之前先判断容量，满了就拒绝/限流；coalesce 是把多个等价的待处理请求合并，例如已经排着一个“重连”任务时，后续十个重连请求不必再排十份。
+
 Backpressure 不是 Queue 的附加功能，而是业务语义。
 
 ---
@@ -620,6 +711,8 @@ global MPMC queue
 - wakeup storm。
 
 Folly 的 MPMC Queue 展示了如何用 ticket/turn 解决 slot 复用，但 Seastar 给出了更激进的答案：
+
+这里 ticket 可以理解成每次 enqueue/dequeue 获得的逻辑序号，turn 则记录某个物理 slot 当前属于第几轮复用；二者组合避免不同轮次错误地同时占用同一个 slot。
 
 > **不要优化共享，直接减少共享。**
 
@@ -700,6 +793,8 @@ shard 2 executes
 
 如果 Reactor 采用 cooperative scheduling，而 task 不主动让出 CPU：
 
+cooperative scheduling 的意思是 Runtime 不会在任意指令位置强制抢占当前 Task；Task 必须在约定的 await/yield/返回点主动把执行权交回 Reactor。
+
 ~~~text
 long task
    ↓
@@ -718,13 +813,13 @@ I/O latency rises
 
 如果每个 accept 都：
 
-~~~cpp
+~~~text
 auto* c = new Connection;
 ~~~
 
 close 后再：
 
-~~~cpp
+~~~text
 delete c;
 ~~~
 

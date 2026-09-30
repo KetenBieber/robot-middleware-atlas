@@ -1,5 +1,7 @@
 # 场景设计五：大图像/点云跨进程，怎样从 Copy IPC 走到 Shared-Memory Data Plane
 
+> **首次阅读先抓三层：** Payload 放大数据、Descriptor 描述数据、Notification 只负责唤醒。Offset、Loan、Generation 都是围绕这三层解决跨进程地址和生命周期问题。
+
 ## 场景
 
 ~~~text
@@ -60,7 +62,7 @@ Process B 则可能把同一物理页映射到：
 
 描述 payload 在哪里、大小多少、属于哪个版本的小对象，例如：
 
-~~~cpp
+~~~text
 struct FrameDescriptor {
     uint32_t slot;
     uint32_t generation;
@@ -114,14 +116,188 @@ offset = 8192
 
 Consumer 在自己的地址空间中计算：
 
-~~~cpp
-void* ptr =
-    static_cast<char*>(local_base) + offset;
+~~~text
+local_ptr = local_base + offset
 ~~~
 
 于是两个进程虽然 `local_base` 不同，却都能定位到共享 segment 中同一个逻辑位置。
 
 这就是 relative pointer / offset pointer 的基本思想。
+
+---
+
+## 一个真正可运行的 Linux SHM + Offset 示例
+
+下面不是“伪共享内存”。它真的创建 POSIX shared memory、`fork()` 出第二个进程，用 pipe 只传一个小 Descriptor，再由 Child 用 `base + offset` 找到大 payload。
+
+编译运行：
+
+~~~text
+g++ -std=c++17 shm_offset_demo.cpp -o shm_offset_demo
+./shm_offset_demo
+~~~
+
+~~~cpp
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fcntl.h>
+#include <iostream>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+struct FrameDescriptor {
+    std::uint32_t offset;
+    std::uint32_t bytes;
+    std::uint32_t generation;
+};
+
+[[noreturn]] void die(const char* what) {
+    std::perror(what);
+    std::exit(1);
+}
+
+void write_all(int fd, const void* data, std::size_t bytes) {
+    const char* p = static_cast<const char*>(data);
+    while (bytes > 0) {
+        const ssize_t n = ::write(fd, p, bytes);
+        if (n < 0) {
+            die("write");
+        }
+        p += n;
+        bytes -= static_cast<std::size_t>(n);
+    }
+}
+
+void read_all(int fd, void* data, std::size_t bytes) {
+    char* p = static_cast<char*>(data);
+    while (bytes > 0) {
+        const ssize_t n = ::read(fd, p, bytes);
+        if (n <= 0) {
+            die("read");
+        }
+        p += n;
+        bytes -= static_cast<std::size_t>(n);
+    }
+}
+
+int main() {
+    constexpr const char* kName = "/atlas_shm_offset_demo";
+    constexpr std::size_t kSegmentBytes = 4096;
+    constexpr std::uint32_t kPayloadOffset = 256;
+
+    const int shm_fd =
+        ::shm_open(kName, O_CREAT | O_RDWR, 0600);
+    if (shm_fd < 0) {
+        die("shm_open");
+    }
+
+    if (::ftruncate(shm_fd, kSegmentBytes) != 0) {
+        die("ftruncate");
+    }
+
+    void* parent_base =
+        ::mmap(nullptr,
+               kSegmentBytes,
+               PROT_READ | PROT_WRITE,
+               MAP_SHARED,
+               shm_fd,
+               0);
+    if (parent_base == MAP_FAILED) {
+        die("mmap parent");
+    }
+
+    int descriptor_pipe[2];
+    if (::pipe(descriptor_pipe) != 0) {
+        die("pipe");
+    }
+
+    const pid_t pid = ::fork();
+    if (pid < 0) {
+        die("fork");
+    }
+
+    if (pid == 0) {
+        ::close(descriptor_pipe[1]);
+
+        // 不依赖 Parent 继承来的 mapping，Child 自己重新 mmap。
+        ::munmap(parent_base, kSegmentBytes);
+        ::close(shm_fd);
+
+        const int child_fd = ::shm_open(kName, O_RDWR, 0600);
+        if (child_fd < 0) {
+            die("child shm_open");
+        }
+
+        void* child_base =
+            ::mmap(nullptr,
+                   kSegmentBytes,
+                   PROT_READ | PROT_WRITE,
+                   MAP_SHARED,
+                   child_fd,
+                   0);
+        if (child_base == MAP_FAILED) {
+            die("mmap child");
+        }
+
+        FrameDescriptor d{};
+        read_all(descriptor_pipe[0], &d, sizeof(d));
+
+        const char* payload =
+            static_cast<const char*>(child_base) + d.offset;
+
+        std::cout
+            << "child_base=" << child_base
+            << " offset=" << d.offset
+            << " generation=" << d.generation
+            << " payload=" << payload
+            << "\n"
+            << std::flush;
+
+        ::munmap(child_base, kSegmentBytes);
+        ::close(child_fd);
+        ::close(descriptor_pipe[0]);
+        _exit(0);
+    }
+
+    ::close(descriptor_pipe[0]);
+
+    char* payload =
+        static_cast<char*>(parent_base) + kPayloadOffset;
+    const char message[] = "frame-42: shared payload";
+    std::memcpy(payload, message, sizeof(message));
+
+    FrameDescriptor d{
+        kPayloadOffset,
+        static_cast<std::uint32_t>(sizeof(message)),
+        7
+    };
+
+    write_all(descriptor_pipe[1], &d, sizeof(d));
+    ::close(descriptor_pipe[1]);
+
+    ::waitpid(pid, nullptr, 0);
+
+    ::munmap(parent_base, kSegmentBytes);
+    ::close(shm_fd);
+    ::shm_unlink(kName);
+}
+~~~
+
+这段程序里两类数据非常明确：
+
+~~~text
+共享内存：
+    真正 payload
+
+匿名 pipe：
+    FrameDescriptor(offset, bytes, generation)
+~~~
+
+Child 并没有接收 Parent 的裸指针；它只接收 offset，然后基于自己的 `child_base` 重新计算本地地址。这就是后面 iceoryx2 PointerOffset、共享内存 slot/descriptor 机制的最小原型。
 
 ---
 
@@ -219,6 +395,8 @@ new frame written
 
 这与 ABA 防护中的 version/tag 思想本质相同。
 
+ABA 指“一个位置先从 A 变成 B，后来又变回 A；只比较当前值的人会误以为它从未变化”。Generation/Version 就是在 identity 里再加入一次复用次数，让“旧的 slot 3”和“重新复用后的 slot 3”不再看起来完全一样。
+
 ---
 
 ## Naive 方案：Socket + Serialization
@@ -269,154 +447,6 @@ metadata
 
 ---
 
-## 为什么不能把裸指针直接放进 SHM
-
-Process A：
-
-~~~text
-shared segment mapped at 0x7000...
-~~~
-
-Process B：
-
-~~~text
-same pages mapped at 0x9000...
-~~~
-
-A 中的 pointer value 到 B 不一定有意义。
-
-所以需要：
-
-~~~text
-offset from shared base
-slot index
-relative pointer
-handle
-~~~
-
-iceoryx2 的 PointerOffset 类设计就是在解决这个问题。
-
----
-
-## SHM Data Plane 的标准分层
-
-~~~text
-Shared Payload Pool
-  large image/pointcloud chunks
-
-Descriptor Channel
-  slot/offset + metadata
-
-Notification Channel
-  eventfd/futex/socket/event
-~~~
-
-三者不要混在一起。
-
-payload 很大，descriptor 很小，notification 只负责 wakeup。
-
----
-
-## Pool 为什么优于每帧共享内存 malloc
-
-实时 pipeline 如果每帧：
-
-~~~text
-allocate shared object
-construct
-publish
-free
-~~~
-
-仍然会引入 allocator contention、fragmentation 和失败路径。
-
-固定 chunk pool：
-
-~~~text
-slot0
-slot1
-...
-slotN
-~~~
-
-更容易实现 bounded memory 与 backpressure。
-
----
-
-## Loan / Publish / Reclaim 是核心状态机
-
-~~~text
-FREE
-↓ producer loan
-WRITING
-↓ publish
-READY
-↓ consumer borrow
-READING
-↓ all consumers release
-RECLAIMABLE
-↓
-FREE
-~~~
-
-zero-copy 真正难的不是拿到 pointer，而是**什么时候可以安全复用 slot**。
-
----
-
-## Fan-out 为什么需要 Refcount 或 Per-Consumer Cursor
-
-一个 Camera frame：
-
-~~~text
-Perception
-Recorder
-Visualizer
-~~~
-
-如果共享同一 chunk：
-
-~~~text
-slot can recycle
-only after
-all required consumers release
-~~~
-
-候选：
-
-~~~text
-atomic refcount
-per-consumer cursor
-generation + ownership bitmap
-copy for slow branch
-~~~
-
-慢 recorder 可能拖住整个 pool。
-
-这时可能需要把 recorder 从主 pool 隔离。
-
----
-
-## Generation 为什么重要
-
-固定 slot 会循环复用：
-
-~~~text
-slot 3 generation 100
-↓ recycle
-slot 3 generation 101
-~~~
-
-Consumer 如果拿着旧 descriptor：
-
-~~~text
-slot=3, generation=100
-~~~
-
-就能识别已经 stale。
-
-这和 lock-free queue 的 per-slot sequence、ABA 防护是同一种模式。
-
----
 
 ## Notification 为什么不能代替共享状态
 
@@ -459,6 +489,8 @@ Producer/other consumers 还活着。
 ~~~text
 process registry
 heartbeat/liveness
+
+这些词可以先按职责理解：process registry 记录“哪些参与者存在”；heartbeat/liveness 判断进程是否还活着；owner epoch 给每次进程启动一个新的 incarnation/version；lease 表示“所有权只在一段时间内有效”；central daemon 则把清理和仲裁集中到一个独立管理进程。并不是每套 SHM Runtime 都需要同时拥有这五种机制。
 owner epoch
 generation
 lease

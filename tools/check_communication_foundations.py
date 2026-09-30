@@ -169,6 +169,49 @@ def check_markdown(slug: str, required: tuple[str, ...], errors: list[str]) -> b
     return True
 
 
+def check_scenario_runnable_cpp(slug: str, errors: list[str]) -> int:
+    """Require every Scenario cpp fence to be a standalone teaching program."""
+    path = FOLDER / f"{slug}.md"
+    if not path.is_file():
+        return 0
+
+    lines = path.read_text(encoding="utf-8-sig").splitlines()
+    count = 0
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].lstrip()
+        if stripped.startswith("~~~cpp"):
+            token = "~~~"
+        elif stripped.startswith("```cpp"):
+            token = "```"
+        else:
+            i += 1
+            continue
+
+        start = i + 1
+        i += 1
+        body: list[str] = []
+        while i < len(lines) and not lines[i].lstrip().startswith(token):
+            body.append(lines[i])
+            i += 1
+
+        count += 1
+        joined = "\n".join(body)
+        if "#include" not in joined:
+            errors.append(
+                f"{path.relative_to(ROOT)}:{start}: cpp teaching block missing includes; "
+                "use a text fence for pseudocode/source sketches"
+            )
+        if not re.search(r"\bint\s+main\s*\(", joined):
+            errors.append(
+                f"{path.relative_to(ROOT)}:{start}: cpp teaching block is not standalone; "
+                "add main() or use a text fence"
+            )
+        i += 1
+
+    return count
+
+
 def check_hierarchy(errors: list[str]) -> None:
     index = FOLDER / "index.rst"
     if not index.is_file():
@@ -230,6 +273,7 @@ def main() -> int:
     errors: list[str] = []
     foundation_count = 0
     scenario_count = 0
+    scenario_cpp_count = 0
     atlas_count = 0
 
     for slug in PAGES:
@@ -239,6 +283,7 @@ def main() -> int:
     for slug in SCENARIO_PAGES:
         if check_markdown(slug, SCENARIO_REQUIRED[slug], errors):
             scenario_count += 1
+        scenario_cpp_count += check_scenario_runnable_cpp(slug, errors)
 
     for slug, required in ATLAS_PAGES.items():
         if check_markdown(slug, required, errors):
@@ -248,6 +293,7 @@ def main() -> int:
 
     print(f"COMM_FOUNDATIONS_PAGES={foundation_count}/{len(PAGES)}")
     print(f"COMM_SCENARIO_PAGES={scenario_count}/{len(SCENARIO_PAGES)}")
+    print(f"COMM_SCENARIO_RUNNABLE_CPP={scenario_cpp_count}")
     print(f"COMM_ATLAS_PAGES={atlas_count}/{len(ATLAS_PAGES)}")
     print(f"COMM_TOP_LEVEL_VIEWS={len(TOP_VIEWS)}")
     print(f"COMM_FOUNDATIONS_ERRORS={len(errors)}")

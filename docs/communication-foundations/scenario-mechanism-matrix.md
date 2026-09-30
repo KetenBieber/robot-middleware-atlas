@@ -1,24 +1,44 @@
 # 场景 × 机制矩阵：从工程问题快速跳到候选设计
 
-同一种“通信”需求可能对应完全不同的数据结构与 OS primitive。先用数据语义、时间约束、边界和 failure semantics 缩小候选范围，再进入具体实现。
+这页是 **Scenario 系列的复习索引，不是入门文章**。如果表格里的术语有一半以上陌生，先回前面的场景页，不要试图一次把整张表背下来。
 
-| 场景 | 数据语义 | 优先候选 | 常见反模式 | 真实案例 |
+## 读矩阵前只需要知道六组词
+
+- latest state / double buffer / seqlock：见 [最新状态、事件流与历史](scenario-latest-state-vs-event.md)；
+- SPSC / MPSC / MPMC / work stealing：见 [多线程 Runtime](scenario-thread-runtime.md)；
+- bounded queue / drop-old / backpressure / admission control：见 [高频 Sensor → 慢速 Perception](scenario-streaming-pipeline.md)；
+- eventfd / epoll / WaitSet / owner thread：见 [机器人网络 Runtime](scenario-network-runtime-design.md)；
+- SHM / descriptor / offset / loan / generation：见 [大对象跨进程 IPC](scenario-large-payload-ipc.md)；
+- tensor handle / fence / RDMA / registration：属于高级异构数据面，见 [GPU Tensor 跨模块与跨主机](scenario-distributed-gpu.md)。
+
+矩阵的正确读法是从左向右：**先确认业务语义，再看候选机制**。不要反过来从“我想用 lock-free queue”开始找场景。
+
+## 基础 Runtime 场景
+
+| 场景 | 先确认的数据语义 | 第一候选 | 常见反模式 | 对应学习页/案例 |
 | --- | --- | --- | --- | --- |
-| Estimator 200 Hz → Controller 1 kHz | latest state | versioned mailbox / double buffer / seqlock | unbounded FIFO 保存所有历史 | Apollo latest auxiliary state、控制程序 |
-| IMU driver → estimator | ordered high-rate stream | SPSC bounded ring | generic MPMC queue | 驱动/控制 runtime |
-| 多 callback → supervisor | events | bounded MPSC | 多线程直接共享 vector/deque 无协议 | Cyber/普通机器人 supervisor |
-| Emergency Stop | critical event | dedicated/priority path + bounded state | 与日志/普通 task 共用 backlog queue | 工业控制安全链 |
-| Camera 60 Hz → Perception 25 Hz | freshness stream | small bounded queue + drop-old/latest | reliable unbounded FIFO | Holoscan video pipeline |
-| Logger 多来源写盘 | loss-tolerant events | MPSC + batching | 每个 producer 同步写磁盘 | logging runtime |
-| 多 worker task runtime | runnable tasks | per-worker queue + optional stealing | 单全局 hot queue | Holoscan EventBasedScheduler |
-| Executor 等多类事件 | readiness | eventfd/epoll/WaitSet | 高频 sleep polling | DDS WaitSet、UCX arm |
-| 大图像跨进程 | large shared payload | SHM pool + descriptor + notification | serialize/copy 整帧 | iceoryx2 / DDS SHM |
-| GPU Tensor 同机跨模块 | device-resident payload | tensor handle + stream/event + pool | D2H→CPU message→H2D | Holoscan |
-| GPU/NPU Buffer 同机跨进程 | accelerator-resident payload | stable slot + generation + capability broker + fence | 直接传 pointer/fd 整数 | rosidl::Buffer CUDA VMM / QC dma-buf |
-| 大 Tensor 跨主机 | heterogeneous large payload | UCX/RDMA + registration + bounded pool | protobuf/TCP copy all | UCX/Holoscan distributed |
-| EtherCAT PDO 周期 | cyclic process image | staged contiguous IOmap + cyclic thread | 每个设备单独 socket/send | SOEM/IgH |
-| Planner/状态多输入 | snapshot | versioned snapshot / staged LocalView | “加 mutex 就等于原子快照” | Apollo Planning |
-| 配置/路由 control plane | low-frequency topology | map/hash/list/cache | lock-free everything | Holoscan FlowGraph |
+| Estimator 200 Hz → Controller 1 kHz | latest state | mutex + snapshot；有瓶颈再看 versioned/double buffer | unbounded FIFO 保存所有历史 | latest-state Scenario / Apollo |
+| IMU driver → estimator | ordered high-rate stream | bounded SPSC ring | 一上来就 generic MPMC | thread/queue foundations |
+| 多 callback → supervisor | ordered events | bounded MPSC | 多线程直接共享 vector/deque 无协议 | thread-runtime Scenario |
+| Emergency Stop | critical persistent state + event | dedicated safety state/path | 与日志/普通 task 共用 backlog queue | control-safety Scenario |
+| Camera 60 Hz → Perception 25 Hz | freshness stream | small bounded queue + drop-old | reliable unbounded FIFO | streaming Scenario / Holoscan |
+| Logger 多来源写盘 | loss-tolerant events | MPSC + batch | 每个 producer 同步写磁盘 | runtime cases |
+| 多 Worker Task Runtime | runnable tasks | global queue 起步；有竞争再 per-worker | 还没测 contention 就先上复杂 stealing | thread-runtime Scenario |
+| Event Loop 多类事件 | readiness | epoll/WaitSet + wakeup fd | 高频 sleep polling | network-runtime Scenario |
+| 大图像跨进程 | large shared payload | SHM pool + descriptor + notification | 每帧 serialize/copy 整帧 | large-payload IPC / iceoryx2 |
+| EtherCAT PDO 周期 | cyclic process image | staged contiguous IOmap + cyclic thread | 每个设备各自 socket/send | SOEM / IgH |
+| Planner 多输入 | snapshot | staged/versioned snapshot | “加 mutex 就等于原子快照” | latest-state Scenario / Apollo |
+| 配置/路由 control plane | low-frequency topology | 普通 map/hash/list/cache | 为低频配置路径强行 lock-free | runtime architecture pages |
+
+## 异构/GPU 场景：基础打牢后再读
+
+| 场景 | 数据语义 | 候选机制 | 先别踩的坑 |
+| --- | --- | --- | --- |
+| GPU Tensor 同进程跨模块 | device-resident payload | tensor handle + stream/event + pool | CPU 返回不等于 GPU 数据 ready |
+| GPU/NPU Buffer 同机跨进程 | accelerator-resident payload | stable slot + generation + capability transfer + fence | 直接传 pointer/fd 整数 |
+| 大 Tensor 跨主机 | heterogeneous large payload | UCX/RDMA + registration + bounded pool | 默认 D2H→TCP→H2D 全拷贝 |
+
+这里的 **fence** 是“证明某次异步访问已经完成、Buffer 可以进入下一生命周期阶段”的同步对象；**capability transfer/broker** 是“把 fd、GPU handle、DMA-BUF 等不能只靠整数值跨进程使用的 OS/设备能力安全交给另一进程”的机制。它们不是第一遍 Scenario 阅读的必备知识。
 
 ---
 

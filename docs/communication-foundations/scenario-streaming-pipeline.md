@@ -1,5 +1,7 @@
 # 场景设计二：高频 Sensor → 慢速 Perception，怎样避免“系统还在跑但看到过去”
 
+> **首次阅读只抓四个词：** Producer Rate、Queueing Delay、Data Age、Backpressure。Little's Law、GPU in-flight 与工业案例都可以第二遍再看。
+
 ## 场景
 
 ~~~text
@@ -191,34 +193,6 @@ L = 60 × 0.025 = 1.5
 ---
 
 
-## Naive 方案：Unbounded FIFO
-
-~~~cpp
-std::queue<Frame> frames;
-~~~
-
-Producer 每秒 +60，Consumer 每秒 -25。
-
-净积压：
-
-~~~text
-35 frames/s
-~~~
-
-10 秒就是 350 frames。
-
-如果每帧间隔约 16.7 ms，Consumer 已经看到数秒前的环境。
-
-这是一类危险故障：
-
-~~~text
-程序活着
-CPU/GPU 还在算
-没有 crash
-但信息已经过期
-~~~
-
----
 
 ## 第一约束不是“无损”，而是 Max Data Age
 
@@ -306,6 +280,8 @@ GPU in-flight
 capture buffering
 ~~~
 
+其中 jitter 是“同一个阶段的处理时间或到达间隔会抖动而不是恒定”；burst 是“短时间内集中到达一批数据”；in-flight 表示对象已经离开 Queue、但仍被 CPU/GPU/NIC 或下游持有，暂时不能回收。
+
 但核心原则不变：
 
 > **容量是时延预算的结果，不是拍脑袋的常量。**
@@ -334,25 +310,11 @@ Holoscan 的 BlockMemoryPool 正好把这种资源显式出来。
 
 ---
 
-## Little's Law 可以给 Pool 一个第一估算
+## Pool 容量继续沿用前面的 Little's Law
 
-假设：
+前面已经从 `L = λW` 推导过平均 in-flight。把系统边界扩大到 GPU/NIC 和下游持有以后，`W` 也必须包含这些阶段；实际 Pool 还要为 jitter、burst 和 fan-out 留出裕量。这里不再重复一次公式推导。
 
-~~~text
-arrival rate λ = 60/s
-GPU stage latency W = 25 ms
-~~~
-
-平均 in-flight：
-
-~~~text
-L ≈ λ × W
-  ≈ 1.5
-~~~
-
-只配 1 block 几乎肯定太紧。
-
-再加 jitter、fan-out、下游持有，实际通常需要更高裕量。
+fan-out 指同一份输入同时送往多个下游，例如一帧图像同时进入 Perception、Recorder 和 Visualizer；最慢的分支可能延长 Buffer 生命周期。
 
 ---
 
@@ -486,7 +448,7 @@ FPS 只是其中一个指标。
 
 ~~~text
 如果业务要求每帧都处理
-→ 不能简单 drop-old，需要降输入 rate / 增算力 / admission
+→ 不能简单 drop-old，需要降输入 rate / 增算力 / admission control
 
 如果 temporal model 依赖连续帧
 → latest-only 可能破坏模型语义，需要 sampling/window
@@ -496,6 +458,8 @@ FPS 只是其中一个指标。
 
 如果跨主机传大 Tensor
 → 继续进入 UCX/RDMA/device data plane
+
+admission control 的意思是“在工作进入昂贵阶段之前先判断系统是否还有容量”，容量不足就拒绝、延迟或限流，而不是先把任务塞进去再让 Queue 无限增长。
 ~~~
 
 深入机制：

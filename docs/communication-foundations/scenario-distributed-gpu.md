@@ -1,5 +1,7 @@
 # 场景设计六：VLM/VLA 的 GPU Tensor 怎样跨模块、跨进程甚至跨主机
 
+> **知识依赖：** 本场景建立在大对象 IPC 的 Payload / Descriptor / Notification、Offset 和 Loan 之上。进入 GPU/NPU memory domain 后，最重要的两个问题仍然是“数据位于哪类内存”和“哪个完成信号证明 Buffer 已经可以进入下一生命周期阶段”。
+
 ## 场景
 
 现代具身 pipeline：
@@ -38,11 +40,15 @@ GPU
 
 传统接口：
 
-~~~cpp
+~~~text
 send(void* data, size_t bytes);
 ~~~
 
 对异构系统不够。
+
+这里的 `Memory Domain` 指“这块内存由谁分配、谁可以直接访问、通过什么总线或 API 访问”。例如普通 Host RAM、Pinned Host、CUDA Device、DMA-BUF 背后的设备内存都属于不同 domain。
+
+`Pinned Host` 是被固定在物理内存中的 Host Buffer，避免被 OS 换出，常用于 DMA；`DMA` 是设备不经 CPU 逐字节搬运、直接访问内存的机制；`RDMA` 则把这种直接访问能力扩展到远端主机的注册内存。
 
 至少要知道：
 
@@ -62,21 +68,52 @@ RDMA registered memory
 
 ## Tensor Handle 应该包含什么
 
-概念模型：
+下面给一个可以独立编译的“元数据模型”。它不调用 CUDA，只把异构 Buffer 接口中必须显式携带的信息建模出来：
 
 ~~~cpp
-struct TensorHandle {
-    MemoryDomain domain;
-    DeviceId device;
-    BufferId buffer;
-    size_t bytes;
-    Shape shape;
-    DType dtype;
-    Stride stride;
-    Generation generation;
-    CompletionFence last_use;
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+
+enum class MemoryDomain {
+    Host,
+    PinnedHost,
+    CudaDevice,
+    DmaBuffer,
+    RdmaRegistered
 };
+
+struct TensorHandle {
+    MemoryDomain domain = MemoryDomain::Host;
+    int device_id = -1;
+    std::uint64_t buffer_id = 0;
+    std::size_t bytes = 0;
+    std::array<std::size_t, 4> shape{};
+    std::uint64_t generation = 0;
+    std::uint64_t completion_token = 0;
+};
+
+int main() {
+    TensorHandle h;
+    h.domain = MemoryDomain::CudaDevice;
+    h.device_id = 0;
+    h.buffer_id = 42;
+    h.bytes = 224 * 224 * 3 * sizeof(float);
+    h.shape = {1, 3, 224, 224};
+    h.generation = 7;
+    h.completion_token = 1024;
+
+    std::cout
+        << "buffer=" << h.buffer_id
+        << " bytes=" << h.bytes
+        << " generation=" << h.generation
+        << " completion_token=" << h.completion_token
+        << "\n";
+}
 ~~~
+
+这里 `buffer_id` 不是裸指针，而是 Runtime 可以解释的稳定标识；`generation` 用来区分 Buffer 复用前后的不同实例；`completion_token` 只是教学版占位符，真实系统里可能映射到 CUDA event、timeline semaphore、fence fd 或其他完成信号。
 
 消息控制面传 handle/schema；大 payload 留在原 memory domain。
 
