@@ -5,6 +5,8 @@
 :local:
 :::
 
+
+本页代码约定更严格：所有标成 ``cpp`` 的代码块都是单文件最小可运行程序，包含必要的 ``#include``、共享对象和 ``main()``；算法推导、错误写法和状态机草图统一使用 ``text``。这样读者不需要猜某个片段还缺哪些对象、线程入口或生命周期代码。
 这一页不再重复 API，而是通过一组逐层增加约束的小项目，把线程通信真正写成程序组织能力。
 
 最终目标是一条可以迁移到控制、感知、日志、设备驱动甚至嵌入式平台的数据流：
@@ -62,17 +64,144 @@ deque
 
 但真正值得学的是 **close protocol**。
 
-### 状态与不变量
+### 先运行一个完整版本
 
-~~~cpp
-struct State {
-    std::deque<Message> queue;
-    std::size_t capacity;
-    bool closed;
-};
+这一节不再只展示 `State` 结构体。先把 bounded、blocking、close、join 全部放进同一个最小程序。
+
+编译运行：
+
+~~~text
+g++ -std=c++17 -O2 -pthread bounded_channel_demo.cpp -o bounded_channel_demo
+./bounded_channel_demo
 ~~~
 
-共享不变量：
+~~~cpp
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <iostream>
+#include <mutex>
+#include <thread>
+
+template<class T>
+class BoundedChannel {
+public:
+    explicit BoundedChannel(std::size_t capacity)
+        : capacity_(capacity) {}
+
+    bool push(T value) {
+        std::unique_lock<std::mutex> lock(m_);
+
+        not_full_.wait(lock, [&] {
+            return closed_ || queue_.size() < capacity_;
+        });
+
+        if (closed_) {
+            return false;
+        }
+
+        queue_.push_back(std::move(value));
+
+        lock.unlock();
+        not_empty_.notify_one();
+        return true;
+    }
+
+    bool pop(T& out) {
+        std::unique_lock<std::mutex> lock(m_);
+
+        not_empty_.wait(lock, [&] {
+            return closed_ || !queue_.empty();
+        });
+
+        if (queue_.empty()) {
+            return false;
+        }
+
+        out = std::move(queue_.front());
+        queue_.pop_front();
+
+        lock.unlock();
+        not_full_.notify_one();
+        return true;
+    }
+
+    void close() {
+        {
+            std::lock_guard<std::mutex> lock(m_);
+            closed_ = true;
+        }
+
+        not_empty_.notify_all();
+        not_full_.notify_all();
+    }
+
+private:
+    const std::size_t capacity_;
+
+    std::mutex m_;
+    std::condition_variable not_empty_;
+    std::condition_variable not_full_;
+    std::deque<T> queue_;
+    bool closed_ = false;
+};
+
+int main() {
+    BoundedChannel<int> channel(2);
+
+    std::thread consumer([&] {
+        int value = 0;
+
+        while (channel.pop(value)) {
+            std::cout << "consume " << value << "\n";
+
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(10));
+        }
+
+        std::cout << "consumer exits\n";
+    });
+
+    std::thread producer_a([&] {
+        for (int i = 0; i < 10; ++i) {
+            if (!channel.push(100 + i)) {
+                return;
+            }
+        }
+    });
+
+    std::thread producer_b([&] {
+        for (int i = 0; i < 10; ++i) {
+            if (!channel.push(200 + i)) {
+                return;
+            }
+        }
+    });
+
+    producer_a.join();
+    producer_b.join();
+
+    channel.close();
+    consumer.join();
+}
+~~~
+
+对象关系只有一套：
+
+~~~text
+BoundedChannel<int> channel
+        |
+        +-- one mutex
+        +-- one deque
+        +-- one not_empty cv
+        +-- one not_full cv
+        +-- one closed flag
+             ^
+             |
+      all producer/consumer threads
+~~~
+
+### 不变量
 
 ~~~text
 0 <= queue.size() <= capacity
@@ -84,66 +213,39 @@ closed && queue.empty()
 → Consumer 可以退出
 ~~~
 
-### 为什么需要两个条件变量
+### 为什么需要两个 Condition Variable
 
-~~~text
-not_empty
-not_full
-~~~
+`not_empty` 等“有数据”；`not_full` 等“有容量”。
 
-Producer 在 full 时等待容量，Consumer 在 empty 时等待数据。
+Producer 在 full 时等待 Consumer 释放 slot；Consumer 在 empty 时等待 Producer 发布数据。这使 bounded queue 同时承担数据容器和 flow-control 边界。
 
-这已经让 queue 成为双向 flow-control primitive：
+### close() 为什么必须 notify_all
 
-~~~text
-Consumer 通过“释放 slot”
-把 backpressure 反馈给 Producer
-~~~
+可能有多个 Producer 睡在 `not_full`，也可能有 Consumer 睡在 `not_empty`。只把 `closed_=true` 写进内存并不会自动让睡眠线程重新获得 CPU。
 
-### close() 应做什么
-
-正确方向：
+所以关闭协议是：
 
 ~~~text
 lock
 closed = true
 unlock
+
 notify_all(not_empty)
 notify_all(not_full)
 ~~~
 
-为什么是 notify_all？
-
-因为可能同时存在：
-
-~~~text
-多个 Producer 睡在 not_full
-多个 Consumer 睡在 not_empty
-~~~
-
-如果关闭只改 bool 不唤醒，它们不会自动获得 CPU 检查新状态。
-
-### 实验
-
-故意制造：
-
-1. capacity=2；
-2. Producer 每 1 ms 产生一条；
-3. Consumer 每 10 ms 处理一条；
-4. 运行 1 s 后调用 close；
-5. 记录 Producer blocked time；
-6. 验证所有线程都能 join。
-
-这里第一次把：
+这个例子最重要的不是 Queue API，而是第一次把：
 
 ~~~text
 capacity
 backpressure
 condition variable
 shutdown
+join
 ~~~
 
-真正连起来。
+真正闭环起来。
+
 
 ## Project B：把 Sensor → Estimator 改成 SPSC Ring
 
@@ -159,102 +261,186 @@ Estimator thread
 
 这时一把全局 mutex 可以工作，但我们故意把拓扑约束利用起来。
 
-### 数据结构
+### 先运行一个完整 SPSC Ring
 
-~~~cpp
-template<class T, std::size_t N>
-class SpscRing {
-    std::array<T, N> slots_;
-    std::atomic<std::uint64_t> head_{0};
-    std::atomic<std::uint64_t> tail_{0};
-};
+这里明确利用拓扑约束：
+
+~~~text
+exactly one Producer
+exactly one Consumer
 ~~~
 
-约定：
+编译运行：
+
+~~~text
+g++ -std=c++17 -O2 -pthread spsc_ring_demo.cpp -o spsc_ring_demo
+./spsc_ring_demo
+~~~
+
+~~~cpp
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <iostream>
+#include <thread>
+
+template<class T, std::size_t N>
+class SpscRing {
+public:
+    bool try_push(const T& value) {
+        const auto head =
+            head_.load(std::memory_order_relaxed);
+
+        const auto tail =
+            tail_.load(std::memory_order_acquire);
+
+        if (head - tail == N) {
+            return false;
+        }
+
+        slots_[head % N] = value;
+
+        head_.store(
+            head + 1,
+            std::memory_order_release);
+
+        return true;
+    }
+
+    bool try_pop(T& out) {
+        const auto tail =
+            tail_.load(std::memory_order_relaxed);
+
+        const auto head =
+            head_.load(std::memory_order_acquire);
+
+        if (tail == head) {
+            return false;
+        }
+
+        out = slots_[tail % N];
+
+        tail_.store(
+            tail + 1,
+            std::memory_order_release);
+
+        return true;
+    }
+
+private:
+    std::array<T, N> slots_{};
+
+    // 只有 Producer 写 head_。
+    std::atomic<std::uint64_t> head_{0};
+
+    // 只有 Consumer 写 tail_。
+    std::atomic<std::uint64_t> tail_{0};
+};
+
+int main() {
+    SpscRing<int, 8> ring;
+
+    std::atomic<bool> done{false};
+    std::atomic<int> dropped{0};
+
+    std::thread producer([&] {
+        for (int i = 1; i <= 100; ++i) {
+            if (!ring.try_push(i)) {
+                dropped.fetch_add(
+                    1,
+                    std::memory_order_relaxed);
+            }
+
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(1));
+        }
+
+        done.store(
+            true,
+            std::memory_order_release);
+    });
+
+    std::thread consumer([&] {
+        int value = 0;
+        int consumed = 0;
+
+        while (true) {
+            if (ring.try_pop(value)) {
+                ++consumed;
+
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(3));
+
+                continue;
+            }
+
+            if (done.load(
+                    std::memory_order_acquire)) {
+                break;
+            }
+
+            std::this_thread::yield();
+        }
+
+        std::cout
+            << "consumed=" << consumed
+            << " dropped=" << dropped.load()
+            << "\n";
+    });
+
+    producer.join();
+    consumer.join();
+}
+~~~
+
+### 为什么这个 Ring 能不用一把全局 mutex
+
+约定是：
 
 ~~~text
 head = next write logical position
 tail = next read logical position
 ~~~
 
-只有 Producer 写 head，只有 Consumer 写 tail。
-
-### Producer
-
-~~~cpp
-bool try_push(const T& value) {
-    auto head = head_.load(std::memory_order_relaxed);
-    auto tail = tail_.load(std::memory_order_acquire);
-
-    if (head - tail == N) {
-        return false;
-    }
-
-    slots_[head % N] = value;
-
-    head_.store(head + 1, std::memory_order_release);
-    return true;
-}
-~~~
-
-### Consumer
-
-~~~cpp
-bool try_pop(T& value) {
-    auto tail = tail_.load(std::memory_order_relaxed);
-    auto head = head_.load(std::memory_order_acquire);
-
-    if (tail == head) {
-        return false;
-    }
-
-    value = slots_[tail % N];
-
-    tail_.store(tail + 1, std::memory_order_release);
-    return true;
-}
-~~~
-
-### 为什么 memory order 这样放
-
-Producer：
+并且：
 
 ~~~text
+Producer only writes head
+Consumer only writes tail
+~~~
+
+Producer 写 payload 后，用 release-store 发布新的 head；Consumer acquire-load head 后，才读取对应 payload。
+
+反方向也是一样：Consumer 完成读取后 release-store tail；Producer acquire-load tail 后，才把对应 slot 当成可复用。
+
+~~~text
+Producer:
 write payload
 ↓
 release head
-~~~
 
-Consumer：
-
-~~~text
+Consumer:
 acquire head
 ↓
 read payload
-~~~
-
-Consumer 不能在 Producer 正式发布 head 之前读那个 slot。
-
-反方向：
-
-~~~text
-Consumer read complete
 ↓
 release tail
 
-Producer acquire tail
+Producer:
+acquire tail
 ↓
-知道 slot 可以复用
+reuse slot
 ~~~
 
-这是一套完整 ownership handoff。
+这个程序故意让 Consumer 比 Producer 慢，所以 `try_push()` 会返回 false，`dropped` 会增长。这里的 overflow policy 是 **drop-new**；如果业务要求 drop-old、block 或 latest-only，Ring 协议必须相应改变，不能只改一个注释。
 
 ### 实验
 
-分别测试：
+再分别测试：
 
 ~~~text
-capacity = 1 / 2 / 8 / 64
+capacity = 2 / 8 / 64
 Consumer stall = 0 / 1 / 5 ms
 ~~~
 
@@ -267,7 +453,6 @@ p99 age
 CPU usage
 ~~~
 
-再把 head 和 tail 故意放在同一 cache line，然后用 padding 分开，比较高频下的差异。
 
 ## Project C：多 Callback 汇聚到一个 Supervisor：MPSC Queue
 
@@ -282,61 +467,177 @@ watchdog callback -------/
 
 多个 Producer 都想把 event 写给一个 Consumer。
 
-### 先写错误版本
+### 第一版先写一个正确的 MPSC 基线
 
-~~~cpp
-auto pos = head++;
-slots[pos % N] = event;
-~~~
-
-问自己：
-
-> 两个 Producer 同时读 head 怎么办？
-
-然后自然逼出 atomic reservation。
-
-### 第二版：只有 fetch_add 仍然不够
-
-~~~cpp
-auto pos = head.fetch_add(1);
-slots[pos % N] = event;
-~~~
-
-再制造：
+在研究 atomic reservation 前，先确认业务拓扑：
 
 ~~~text
-P0 reserve 10
-P0 被抢占
-
-P1 reserve 11
-P1 写完
+many Producers
+     |
+     v
+one shared queue
+     |
+     v
+one Consumer
 ~~~
 
-Consumer 能不能直接相信 head==12？
+最容易证明正确的版本仍然是 mutex + condition variable。
 
-不能，因为 slot 10 还没有真正发布。
+编译运行：
 
-### 第三版：每槽 sequence
+~~~text
+g++ -std=c++17 -O2 -pthread mpsc_baseline.cpp -o mpsc_baseline
+./mpsc_baseline
+~~~
 
 ~~~cpp
-struct Slot {
-    std::atomic<std::uint64_t> sequence;
-    Event event;
+#include <condition_variable>
+#include <deque>
+#include <iostream>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+struct Event {
+    int producer_id;
+    int sequence;
 };
+
+class MpscQueue {
+public:
+    void push(Event e) {
+        {
+            std::lock_guard<std::mutex> lock(m_);
+            queue_.push_back(e);
+        }
+
+        cv_.notify_one();
+    }
+
+    bool pop(Event& out) {
+        std::unique_lock<std::mutex> lock(m_);
+
+        cv_.wait(lock, [&] {
+            return closed_ || !queue_.empty();
+        });
+
+        if (queue_.empty()) {
+            return false;
+        }
+
+        out = queue_.front();
+        queue_.pop_front();
+        return true;
+    }
+
+    void close() {
+        {
+            std::lock_guard<std::mutex> lock(m_);
+            closed_ = true;
+        }
+
+        cv_.notify_all();
+    }
+
+private:
+    std::mutex m_;
+    std::condition_variable cv_;
+    std::deque<Event> queue_;
+    bool closed_ = false;
+};
+
+int main() {
+    MpscQueue queue;
+
+    std::thread consumer([&] {
+        Event e{};
+
+        while (queue.pop(e)) {
+            std::cout
+                << "producer=" << e.producer_id
+                << " seq=" << e.sequence
+                << "\n";
+        }
+    });
+
+    std::vector<std::thread> producers;
+
+    for (int producer_id = 0;
+         producer_id < 4;
+         ++producer_id) {
+        producers.emplace_back(
+            [&, producer_id] {
+                for (int seq = 0; seq < 10; ++seq) {
+                    queue.push(
+                        Event{producer_id, seq});
+                }
+            });
+    }
+
+    for (auto& producer : producers) {
+        producer.join();
+    }
+
+    queue.close();
+    consumer.join();
+}
 ~~~
 
-把 queue 分成：
+这个版本已经回答了最重要的问题：四个 Producer 访问的是**同一个** `MpscQueue queue`，所有 push 由同一把 `m_` 串行化，Consumer 只有一个。
+
+### 为什么普通 head++ 不够
+
+下面开始是**机制伪代码，不是完整可运行程序**：
 
 ~~~text
-reservation
-payload write
-publication
-reclaim
+pos = head++
+slots[pos % N] = event
 ~~~
 
-四个阶段。
+两个 Producer 可以同时读到旧 head，于是都认为自己拿到了同一个 slot。
 
-最重要的产物不是“一个最快的 MPSC”，而是一张状态机：
+### 只有 fetch_add 也还不够
+
+~~~text
+pos = head.fetch_add(1)
+slots[pos % N] = event
+~~~
+
+atomic fetch_add 可以让 Producer 拿到不同 ticket，但 ticket 只证明：
+
+~~~text
+reservation succeeded
+~~~
+
+它不证明对应 slot 的 payload 已经写完。
+
+制造时序：
+
+~~~text
+P0 reserve slot 10
+P0 被 OS 抢占
+
+P1 reserve slot 11
+P1 写完 slot 11
+
+global head == 12
+~~~
+
+Consumer 不能因为 head==12 就假设 slot 10、11 都已经 READY。
+
+### 所以需要 per-slot publication state
+
+概念结构：
+
+~~~text
+Slot {
+    sequence
+    payload
+}
+~~~
+
+状态机：
 
 ~~~text
 FREE_FOR_p
@@ -350,7 +651,30 @@ READING_p
 FREE_FOR_(p+N)
 ~~~
 
-只要这张图能讲清楚，之后去读任何 bounded concurrent queue 都有抓手。
+完整的 per-slot sequence / lock-free MPSC 推导放在 [并发队列与进展保证](concurrent-queues-progress.md)。本 Lab 到这里的目标不是让你复制一个半成品 lock-free queue，而是先看清：
+
+~~~text
+reservation
+!=
+publication
+!=
+reclamation
+~~~
+
+### 再测竞争
+
+让 2、4、8 个 Producer 同时启动，对比：
+
+~~~text
+mutex baseline latency
+CAS / reservation retry
+enqueue latency
+consumer lag
+cache miss
+~~~
+
+这样“多 Producer 竞争一个热点状态”才会从名词变成可观察现象。
+
 
 ### 再测竞争
 

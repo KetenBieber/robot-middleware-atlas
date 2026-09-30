@@ -274,6 +274,7 @@ def main() -> int:
     foundation_count = 0
     scenario_count = 0
     scenario_cpp_count = 0
+    lab_cpp_count = 0
     atlas_count = 0
 
     for slug in PAGES:
@@ -285,6 +286,8 @@ def main() -> int:
             scenario_count += 1
         scenario_cpp_count += check_scenario_runnable_cpp(slug, errors)
 
+    lab_cpp_count = check_scenario_runnable_cpp("thread-dataflow-lab", errors)
+
     for slug, required in ATLAS_PAGES.items():
         if check_markdown(slug, required, errors):
             atlas_count += 1
@@ -294,6 +297,7 @@ def main() -> int:
     print(f"COMM_FOUNDATIONS_PAGES={foundation_count}/{len(PAGES)}")
     print(f"COMM_SCENARIO_PAGES={scenario_count}/{len(SCENARIO_PAGES)}")
     print(f"COMM_SCENARIO_RUNNABLE_CPP={scenario_cpp_count}")
+    print(f"COMM_THREAD_LAB_RUNNABLE_CPP={lab_cpp_count}")
     print(f"COMM_ATLAS_PAGES={atlas_count}/{len(ATLAS_PAGES)}")
     print(f"COMM_TOP_LEVEL_VIEWS={len(TOP_VIEWS)}")
     print(f"COMM_FOUNDATIONS_ERRORS={len(errors)}")
