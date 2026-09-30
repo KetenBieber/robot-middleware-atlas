@@ -20,6 +20,132 @@ std::queue<State> q;
 
 但在决定容器之前，必须先问业务语义。
 
+## 先把几个词讲清楚：State、Event、History 不是“不同容器”，而是不同业务语义
+
+在这个场景里最容易犯的错误，是一看到“线程 A 产生数据、线程 B 消费数据”就直接想到 Queue。
+
+但 Queue 只是**数据结构**。在决定数据结构之前，先决定“数据到底代表什么”。
+
+### State：描述“现在世界是什么样”
+
+例如：当前姿态、当前速度、当前电池电压、当前模式、当前目标速度。
+
+如果新状态来了，旧状态通常会迅速失去价值。Controller 在 110 ms 时更关心 105 ms 的速度，而不是要求先把 100 ms 的速度处理一遍。
+
+> **State 的核心语义：Reader 关心一个一致、尽可能新的快照。**
+
+### Event：描述“某件事发生过”
+
+例如 ENABLE、START、STOP、FAULT_ACK、一次 ACK 到达。新 Event 到来以后，旧 Event 不一定失效；它的存在性和顺序本身可能就是业务语义。
+
+### History：为了回放、统计和追溯保存序列
+
+例如过去 10 秒轨迹、故障日志、传感器历史窗口。它的目标不是只读最新，而是保留时间范围内的序列。
+
+~~~text
+State   -> latest/snapshot
+Event   -> ordered queue
+History -> ring/log/timeseries
+~~~
+
+这三种语义可以共存在同一个系统里，不能用一个“万能 Queue”统一。
+
+---
+
+## Data Race、互斥和 Snapshot 是三个不同问题
+
+### Data Race 是 C++ 语言层问题
+
+一个线程写共享对象、另一个线程同时读，而没有同步，就可能形成 data race。`std::mutex` 首先解决的是：**同一时刻不要让多个线程无协议地访问同一份可变状态。**
+
+### 但“没有 Race”不等于“拿到同一版本”
+
+假设状态由 pose 和 velocity 组成，Writer 分两个临界区更新，Reader 也分两次读取，就可能得到：
+
+~~~text
+pose@100 + velocity@101
+~~~
+
+这没有 data race，却是业务级不一致快照。
+
+所以要分清：
+
+~~~text
+mutex correctness
+    = 不发生无同步并发访问
+
+snapshot correctness
+    = 一组字段来自同一个逻辑版本
+~~~
+
+---
+
+## 一个可以直接运行的 Latest-State 小程序
+
+先不要上 seqlock、double buffer。最容易理解且正确的版本，就是“一把 mutex 保护整个 State，一次性 copy”。
+
+~~~cpp
+#include <chrono>
+#include <iostream>
+#include <mutex>
+#include <thread>
+
+struct State {
+    int version = 0;
+    double position = 0.0;
+    double velocity = 0.0;
+};
+
+class LatestState {
+public:
+    void publish(State s) {
+        std::lock_guard<std::mutex> lock(m_);
+        state_ = s;
+    }
+
+    State read() {
+        std::lock_guard<std::mutex> lock(m_);
+        return state_;
+    }
+
+private:
+    std::mutex m_;
+    State state_;
+};
+
+int main() {
+    LatestState latest;
+
+    std::thread estimator([&] {
+        for (int i = 1; i <= 5; ++i) {
+            State s;
+            s.version = i;
+            s.position = i * 0.1;
+            s.velocity = i * 1.0;
+            latest.publish(s);
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    });
+
+    std::thread controller([&] {
+        for (int i = 0; i < 10; ++i) {
+            State s = latest.read();
+            std::cout << "version=" << s.version
+                      << " position=" << s.position
+                      << " velocity=" << s.velocity << "\n";
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    });
+
+    estimator.join();
+    controller.join();
+}
+~~~
+
+这里只存在一份 `LatestState latest`，里面也只有一份 mutex 和 State。Estimator 与 Controller 都通过引用访问它。
+
+Controller 可能多次读到同一个 version，也可能直接从 version 1 读到 version 2；它**不要求每个 estimator update 都被恰好消费一次**。这就是 Latest State 与 FIFO Event Queue 最核心的区别。
+
 ---
 
 ## 第一步：这到底是 State、Event 还是 History

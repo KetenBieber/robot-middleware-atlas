@@ -13,6 +13,183 @@ Perception: 25 FPS
 真正的问题不是 queue API，而是：**过载以后要保什么，丢什么，如何限制 Data Age。**
 
 ---
+## 先建立四个基础量：Rate、Latency、Queueing Delay、Data Age
+
+这类场景里最容易把“模型推理 25 ms”和“系统延迟 25 ms”混为一谈，其实完全不是一回事。
+
+### Producer Rate / Consumer Rate
+
+Camera 60 FPS 意味着平均到达间隔约：
+
+~~~text
+T_p = 1 / 60 s ≈ 16.7 ms
+~~~
+
+Perception 25 FPS 意味着平均服务时间约：
+
+~~~text
+T_c = 1 / 25 s = 40 ms
+~~~
+
+因为 40 ms > 16.7 ms，如果每一帧都必须进入同一个 FIFO，那么 Consumer 从长期平均意义上一定追不上 Producer。这不是优化问题，而是数学上必然积压。
+
+### Processing Latency
+
+某一帧真正执行算法花多久，例如 TensorRT inference = 24 ms。
+
+### Queueing Delay
+
+一帧在真正开始处理前，可能已经在 queue 里等待 80 ms。即使模型本身只跑 24 ms，端到端也至少已经 104 ms。
+
+### Data Age
+
+对机器人更重要的是：Consumer 真正使用这帧时，距离传感器采样已经过去多久。
+
+~~~text
+Data Age
+=
+capture buffering
++ queueing delay
++ scheduler delay
++ processing latency
++ downstream holding
+~~~
+
+所以“系统没 crash”远远不够。
+
+---
+
+## 什么叫 Backpressure
+
+Backpressure 不是“队列满了”的同义词。
+
+> **Backpressure 是下游处理能力不足时，把“我现在接不动更多工作”这个事实向上游传播。**
+
+例如 Perception Queue 满时，系统可以选择：
+
+~~~text
+1. 阻塞 Camera
+2. 拒绝新 Frame
+3. 丢旧 Frame
+4. 只保留最新
+5. 降采样
+6. 暂停调度昂贵算子
+~~~
+
+这些才是 backpressure policy。Queue capacity 只是触发它的一种状态量。
+
+## Bounded Queue 与 Unbounded Queue
+
+`std::queue` 默认没有容量上限。所谓 unbounded queue，不是“内存真的无限”，而是程序没有定义容量与过载策略，直到 allocator / OS 替你失败。
+
+Bounded queue 则明确 `capacity=N`；达到 N 后必须决定 block、drop、overwrite 还是 reject。
+
+实时系统最危险的往往不是显式报错，而是**延迟不断增长但表面仍然正常**。
+
+---
+
+## 一个可以直接运行的 Drop-Old Queue
+
+下面模拟 Producer 每 10 ms 一帧、Consumer 每 40 ms 一帧、Queue capacity=3。队列满时丢最旧帧。
+
+~~~cpp
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <iostream>
+#include <mutex>
+#include <thread>
+
+struct Frame {
+    int id;
+    std::chrono::steady_clock::time_point created;
+};
+
+class DropOldQueue {
+public:
+    explicit DropOldQueue(std::size_t capacity)
+        : capacity_(capacity) {}
+
+    void push(Frame f) {
+        {
+            std::lock_guard<std::mutex> lock(m_);
+            if (q_.size() == capacity_) {
+                std::cout << "drop old frame "
+                          << q_.front().id << "\n";
+                q_.pop_front();
+            }
+            q_.push_back(std::move(f));
+        }
+        cv_.notify_one();
+    }
+
+    Frame pop() {
+        std::unique_lock<std::mutex> lock(m_);
+        cv_.wait(lock, [&] { return !q_.empty(); });
+        Frame f = std::move(q_.front());
+        q_.pop_front();
+        return f;
+    }
+
+private:
+    std::size_t capacity_;
+    std::mutex m_;
+    std::condition_variable cv_;
+    std::deque<Frame> q_;
+};
+
+int main() {
+    DropOldQueue q(3);
+
+    std::thread producer([&] {
+        for (int i = 0; i < 20; ++i) {
+            q.push(Frame{i, std::chrono::steady_clock::now()});
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    });
+
+    std::thread consumer([&] {
+        for (int i = 0; i < 8; ++i) {
+            Frame f = q.pop();
+            auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - f.created).count();
+            std::cout << "consume frame " << f.id
+                      << " age=" << age << " ms\n";
+            std::this_thread::sleep_for(std::chrono::milliseconds(40));
+        }
+    });
+
+    producer.join();
+    consumer.join();
+}
+~~~
+
+这里 mutex、condition_variable、deque 都属于同一个 `DropOldQueue` 对象。和普通 FIFO 的关键区别是：**容量有界 + overflow policy 明确**。
+
+---
+
+## Little's Law 到底在说什么
+
+常见公式：
+
+~~~text
+L = λW
+~~~
+
+这里 `λ` 是平均到达率，`W` 是一个 item 平均在系统里停留的时间，`L` 是平均同时在系统中的 item 数。
+
+例如 λ=60/s，W=0.025 s：
+
+~~~text
+L = 60 × 0.025 = 1.5
+~~~
+
+直觉就是：流量越大、每一项停留越久，同时在途的项自然越多。
+
+这个 L 不只是 queue length，它可能包含 queue 中、CPU 正在处理、GPU in-flight、DMA in-flight、下游仍持有 buffer 的所有对象。因此用 Little's Law 估算 Buffer Pool 时，必须先定义“系统边界”。
+
+---
+
 
 ## Naive 方案：Unbounded FIFO
 

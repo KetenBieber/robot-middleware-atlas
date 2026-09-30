@@ -24,6 +24,203 @@ Perception Process
 
 ---
 
+## 先建立进程、地址空间和共享内存的基本模型
+
+### 每个进程都有自己的 Virtual Address Space
+
+两个进程即使运行同一个程序，也有各自独立的虚拟地址空间。
+
+例如 Process A 可能把某一物理页映射到：
+
+~~~text
+0x7000_0000 -> physical page P
+~~~
+
+Process B 则可能把同一物理页映射到：
+
+~~~text
+0x9200_0000 -> physical page P
+~~~
+
+底层 physical page 相同，但 virtual address 不同。
+
+> **共享内存共享的是底层 pages，不代表两个进程里的 pointer value 必须相同。**
+
+这就是为什么把一个进程中的裸指针整数值直接发给另一个进程通常没有意义。
+
+---
+
+## Payload、Descriptor、Notification 是三层不同东西
+
+### Payload
+
+真正的大数据，例如 8 MB image、point cloud、tensor bytes。
+
+### Descriptor
+
+描述 payload 在哪里、大小多少、属于哪个版本的小对象，例如：
+
+~~~cpp
+struct FrameDescriptor {
+    uint32_t slot;
+    uint32_t generation;
+    uint32_t bytes;
+    uint64_t timestamp_ns;
+};
+~~~
+
+Descriptor 很小，可以放进 socket、pipe、ring queue 或其他控制通道。
+
+### Notification
+
+只负责告诉另一边：**共享状态可能变化了，值得醒来检查一下。**
+
+例如 eventfd、futex wake、condition_variable、socket readiness。
+
+因此常见结构是：
+
+~~~text
+Payload Pool
+    存大数据
+
+Descriptor Queue
+    存 slot/generation/metadata
+
+Notification
+    负责 wakeup
+~~~
+
+这和线程 Producer/Consumer 中的 `queue = truth, condition_variable = wakeup` 是同一条设计原则。
+
+---
+
+## 为什么 Offset 能跨进程，而 Pointer 通常不能
+
+假设 shared segment 的逻辑布局：
+
+~~~text
+base
+ |
+ +-- offset 0
+ +-- offset 4096
+ +-- offset 8192
+~~~
+
+Producer 只传：
+
+~~~text
+offset = 8192
+~~~
+
+Consumer 在自己的地址空间中计算：
+
+~~~cpp
+void* ptr =
+    static_cast<char*>(local_base) + offset;
+~~~
+
+于是两个进程虽然 `local_base` 不同，却都能定位到共享 segment 中同一个逻辑位置。
+
+这就是 relative pointer / offset pointer 的基本思想。
+
+---
+
+## 为什么固定 Pool 比“每帧 mmap 一次”更自然
+
+实时 data plane 希望把昂贵和不确定的资源操作尽量移出 hot path。
+
+初始化阶段：
+
+~~~text
+allocate N large blocks
+map/register
+建立 metadata
+~~~
+
+运行阶段：
+
+~~~text
+loan slot
+write payload
+publish descriptor
+consumer read
+release slot
+~~~
+
+这样避免每帧 malloc/mmap/setup/free 带来的 allocator contention、page fault、fragmentation 与不可预测延迟。
+
+---
+
+## Loan 到底是什么意思
+
+Loan 不是“某个 API 看起来像零拷贝”。
+
+> **Loan 表示 Runtime 暂时把一个可写 slot 的独占使用权交给 Producer。**
+
+状态可以写成：
+
+~~~text
+FREE
+  | loan()
+  v
+WRITING
+  | publish()
+  v
+READY
+~~~
+
+Producer 在 WRITING 期间可以直接填共享 payload；publish 后，Consumer 才应该观察这块内容。
+
+所以 zero-copy 真正困难的是 ownership protocol，而不只是拿到一个 pointer。
+
+---
+
+## Refcount 为什么能支持 Fan-out
+
+如果同一帧同时交给 Perception、Recorder、Visualizer，不能第一个 Consumer release 后就立即复用 slot。
+
+一种直接方案：
+
+~~~text
+refcount = 3
+Perception done  -> 2
+Recorder done    -> 1
+Visualizer done  -> 0
+slot recyclable
+~~~
+
+但 atomic refcount 也会带来共享写、cache contention，并且慢 Consumer 会长期占住 buffer。
+
+所以工业 Runtime 也会采用 per-consumer cursor、ownership bitmap，或者给慢支路单独复制。
+
+---
+
+## Generation 是怎样防 Stale Descriptor 的
+
+只用 `slot=3` 不够，因为 slot 会循环复用。
+
+~~~text
+slot 3, generation 100
+consumer holds old descriptor
+
+slot recycled
+
+slot 3, generation 101
+new frame written
+~~~
+
+旧 Consumer 如果只记住 slot=3，就可能把 generation 101 的新数据误认成 generation 100。
+
+所以更完整的 identity 是：
+
+~~~text
+(slot, generation)
+~~~
+
+这与 ABA 防护中的 version/tag 思想本质相同。
+
+---
+
 ## Naive 方案：Socket + Serialization
 
 ~~~text

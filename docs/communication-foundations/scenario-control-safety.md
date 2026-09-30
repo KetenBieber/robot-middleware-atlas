@@ -18,6 +18,141 @@ logs
 但业务 criticality、顺序语义、deadline 完全不同。
 
 ---
+## 先把 Safety 场景里的几个词分开
+
+### Criticality
+
+Criticality 表示一条工作失败、延迟或丢失以后，后果有多严重。debug log 丢一条和 Emergency Stop 延迟 200 ms，不是同一等级的问题。
+
+### Deadline
+
+Deadline 不是“希望尽快”，而是：**某条工作在什么时间以后即使完成，也已经失去正确性。**
+
+例如命令 created_at=10.000 s、deadline=10.020 s；如果 10.100 s 才执行，可靠执行旧命令可能反而更危险。
+
+### Priority
+
+Priority 只表达多个可运行工作之间谁先获得执行机会。它不自动保证 deadline。
+
+### Preemption
+
+Preemption 指当前正在 CPU 上运行的工作，是否可以被更高优先级线程中断并让出 CPU。
+
+所以：
+
+~~~text
+priority queue
+!=
+preemptive scheduler
+~~~
+
+Queue priority 只能决定“下一项拿谁”，通常不能中断已经开始执行的长 callback。
+
+---
+
+## 为什么“一条高优先级 Queue”仍可能不够
+
+假设普通 Task A 正在执行 50 ms，而 ESTOP 在第 1 ms 到达。即使 ESTOP 已经排到 priority queue 最前面，Worker 仍要等 A 返回后才能重新取 Queue。
+
+因此安全路径必须同时看：
+
+~~~text
+queue ordering
+callback WCET
+OS thread priority
+preemption
+shared locks
+~~~
+
+`WCET` 是 Worst-Case Execution Time，即一段代码在最坏情况下可能执行多久。实时设计关心的通常不是平均 1 ms，而是“最坏会不会偶尔跑到 30 ms”。
+
+---
+
+## Priority Inversion 是怎样一步步发生的
+
+设 Logger Thread priority=10，Safety Thread priority=90。
+
+Logger 先持有 mutex；Safety 随后想拿同一把 mutex，于是高优先级 Safety 被低优先级 Logger 阻塞。
+
+如果中间还有 priority=50 的 Medium Thread 持续 runnable，它可能不断抢占 Logger，使 Logger 更迟才能运行到 unlock。
+
+~~~text
+High waits Low
+Medium prevents Low from running
+~~~
+
+这就是经典 priority inversion。
+
+### Priority Inheritance
+
+一种策略是：高优先级线程等待低优先级 mutex owner 时，临时提升 owner 的调度优先级，让它尽快运行到 unlock。
+
+### Priority Ceiling
+
+另一类实时协议是为共享资源规定优先级上限，线程进入临界区时按规则提升优先级，限制不可控的优先级反转。
+
+但工程里更根本的办法往往是：**Safety path 尽量不要和 Logger 共享这把锁。**
+
+---
+
+## 一个最小“安全状态 + 普通事件”结构
+
+下面故意把 persistent safety state 与普通 event queue 分开。
+
+~~~cpp
+#include <atomic>
+#include <mutex>
+#include <queue>
+#include <string>
+
+class SupervisorInput {
+public:
+    void assert_estop() {
+        estop_active_.store(true, std::memory_order_release);
+    }
+
+    bool estop_active() const {
+        return estop_active_.load(std::memory_order_acquire);
+    }
+
+    void push_event(std::string e) {
+        std::lock_guard<std::mutex> lock(m_);
+        events_.push(std::move(e));
+    }
+
+    bool try_pop_event(std::string& out) {
+        std::lock_guard<std::mutex> lock(m_);
+        if (events_.empty()) {
+            return false;
+        }
+        out = std::move(events_.front());
+        events_.pop();
+        return true;
+    }
+
+private:
+    std::atomic<bool> estop_active_{false};
+    std::mutex m_;
+    std::queue<std::string> events_;
+};
+~~~
+
+这里 ESTOP 没有进入普通 FIFO。Safety Thread 可以每个周期直接读取持久状态 `estop_active`。
+
+即使某个线程错过了一次“ESTOP asserted”边沿通知，也不会因此把系统误认为安全。
+
+这就是：
+
+~~~text
+edge/event
++
+persistent truth
+~~~
+
+组合的意义。
+
+---
+
 
 ## 第一步：把 Command 分成两类
 

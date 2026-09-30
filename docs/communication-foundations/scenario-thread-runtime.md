@@ -26,8 +26,200 @@ Supervisor
 小系统里完全可行。
 
 问题在模块数量、任务频率和 blocking pattern 增长以后出现。
+## 先把 Runtime 里的五个基本名词分开
+
+### Component
+
+Component 是业务模块，例如 Perception、Planning、Localization、Logger。它是逻辑概念，**Component 不等于 Thread**。
+
+### OS Thread
+
+`std::thread` 最终对应操作系统可调度执行实体。线程有自己的 stack、register context、scheduler state、priority 与 CPU affinity。操作系统真正调度的是 thread，不是你的 Perception 类。
+
+### Task
+
+Task 是“一次可执行工作”，例如处理一帧图像、执行一次 timer callback、处理一次 network completion、写一个 log batch。
+
+一个 Component 可以不断产生很多 Task。
+
+### Worker
+
+Worker 是专门从任务队列中取 Task 并执行的线程。
+
+~~~text
+Task Queue
+   |
+   +--> Worker 0
+   +--> Worker 1
+   +--> Worker 2
+~~~
+
+### Execution Context
+
+Execution Context 表示：**这段工作在哪一类执行环境中运行，它受到什么线程、调度、优先级和串行化约束。**
+
+~~~text
+Control execution context
+    = dedicated 1 kHz RT thread
+
+Network execution context
+    = event-loop owner thread
+
+Background execution context
+    = shared worker pool
+~~~
+
+所以“十个 Component”并不意味着“十个 Thread”。
 
 ---
+
+## 为什么线程太多会有成本
+
+每个线程都要维护自己的 stack 和调度状态；当 runnable threads 明显多于 CPU cores 时，OS 还要频繁决定谁运行。
+
+Context switch 时需要保存和恢复寄存器、program counter、stack pointer 等状态。若线程工作集不同，还可能引入 cache/TLB 扰动。
+
+因此“一模块一线程”不是错误，只是在模块数和 workload 增长后，不一定再是最经济的映射。
+
+---
+
+## MPMC、MPSC、SPSC 到底是什么
+
+它们描述 Queue 的 producer/consumer topology：
+
+~~~text
+SPSC = Single Producer / Single Consumer
+MPSC = Multiple Producer / Single Consumer
+SPMC = Single Producer / Multiple Consumer
+MPMC = Multiple Producer / Multiple Consumer
+~~~
+
+例如 Camera Thread → Inference Thread 是典型 SPSC；多个 sensor callback → 一个 Supervisor 更像 MPSC。
+
+Topology 会直接决定 Queue 需要承担多少同步复杂度。
+
+---
+
+## 什么叫 Contention 和 Cache-Line Bouncing
+
+假设四个 Worker 都操作同一把 mutex：
+
+~~~text
+W0 --\
+W1 ----> mutex -> global queue
+W2 --/
+W3 -/
+~~~
+
+同一时刻只能一个进入临界区，其余线程等待、重试或睡眠，这叫 lock contention。
+
+换成 atomic/CAS 也不等于竞争消失。如果所有核心都反复修改同一个 atomic head，它所在的 cache line 会在核心之间频繁转移 ownership，这就是 cache-line bouncing。
+
+> **lock-free 不等于没有硬件级共享成本。**
+
+Per-worker queue / shard-per-core 的价值之一，就是减少共享写热点。
+
+---
+
+## 一个可以直接运行的最小 Worker Pool
+
+下面不是工业 ThreadPool，而是把对象关系讲清楚的最小版本。
+
+~~~cpp
+#include <condition_variable>
+#include <functional>
+#include <iostream>
+#include <mutex>
+#include <queue>
+#include <thread>
+#include <vector>
+
+class ThreadPool {
+public:
+    explicit ThreadPool(int n) {
+        for (int i = 0; i < n; ++i) {
+            workers_.emplace_back([this, i] {
+                worker_loop(i);
+            });
+        }
+    }
+
+    void post(std::function<void()> task) {
+        {
+            std::lock_guard<std::mutex> lock(m_);
+            tasks_.push(std::move(task));
+        }
+        cv_.notify_one();
+    }
+
+    ~ThreadPool() {
+        {
+            std::lock_guard<std::mutex> lock(m_);
+            stopping_ = true;
+        }
+        cv_.notify_all();
+        for (auto& t : workers_) {
+            t.join();
+        }
+    }
+
+private:
+    void worker_loop(int id) {
+        while (true) {
+            std::function<void()> task;
+
+            {
+                std::unique_lock<std::mutex> lock(m_);
+                cv_.wait(lock, [&] {
+                    return stopping_ || !tasks_.empty();
+                });
+
+                if (stopping_ && tasks_.empty()) {
+                    return;
+                }
+
+                task = std::move(tasks_.front());
+                tasks_.pop();
+            }
+
+            std::cout << "worker " << id << " runs task\n";
+            task();
+        }
+    }
+
+    std::mutex m_;
+    std::condition_variable cv_;
+    std::queue<std::function<void()>> tasks_;
+    std::vector<std::thread> workers_;
+    bool stopping_ = false;
+};
+
+int main() {
+    ThreadPool pool(3);
+    for (int i = 0; i < 8; ++i) {
+        pool.post([i] {
+            std::cout << "task " << i << "\n";
+        });
+    }
+}
+~~~
+
+这里 `m_ / cv_ / tasks_` 都只有一份，三个 Worker 线程共享它们，所以这就是一个最小的 global MPMC task queue。
+
+---
+
+## Work Stealing 到底“偷”的是什么
+
+Per-worker Queue 以后，每个 Worker 主要从自己的 Queue 取任务。如果 W0 的 Q0 很满，而 W1 的 Q1 为空，W1 可以从 Q0 取走**尚未开始执行**的 Task。
+
+它不会中断 W0 当前正在执行的 callback。
+
+因此：
+
+> **Work Stealing 解决的是待执行工作负载不均，不是实时抢占。**
+
+---
+
 
 ## Naive 方案：一组件一线程
 
