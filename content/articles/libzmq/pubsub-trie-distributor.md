@@ -60,6 +60,50 @@ subscription:  XSUB -> XPUB
 
 也就是说过滤可以发生在不同层，取决于 transport、proxy 和 socket 组合。
 
+## XSUB 为什么必须缓存 subscription，而不能只转发一次命令
+
+`xsub_t::xattach_pipe()` 会把本地已经存在的全部 subscriptions 重放给新 upstream pipe；发生 hiccup 后也会再次发送。
+
+因此 subscription tree 同时承担两种角色：
+
+~~~text
+local filtering truth
++
+replayable control-plane state
+~~~
+
+如果 subscribe 只是“一次性网络包”，重连后新 XPUB 根本无法恢复当前订阅关系。
+
+## XPUB 保存的是 prefix -> pipe 集合
+
+XPUB 侧需要回答的不只是“某个 prefix 是否有人订阅”，还要知道**具体哪些 pipe**订阅了它。所以使用 multi-value trie，把 prefix 节点关联到多个 `pipe_t*`。
+
+发布一条 `robot/arm/joint/3/state` 时，不必线性遍历所有 subscription 做字符串 `starts_with`。Trie 沿 topic bytes 前进，并在每个命中的 prefix 节点上枚举关联 pipe。
+
+这些 pipe 不会另外复制到临时 vector；callback 直接调用 `dist_t::match()`，把目标交换进 matching prefix。于是：
+
+~~~text
+MTrie 决定谁命中
+DIST 决定哪些命中 pipe 当前可写
+Pipe 决定单连接容量与 ownership
+Socket option 决定过载时对应用暴露什么语义
+~~~
+
+## multipart publish 为什么不能每帧重新匹配
+
+假设第一帧匹配出 A、B 两个 subscriber。发送到 frame 2 之前，C 新订阅了同一 topic。
+
+如果每帧重新匹配，C 会只收到后半条 multipart message；反过来，某个 subscriber 中途退订也可能只收到前半条。
+
+因此 matching set 必须在完整 message 边界上保持稳定。这里再次出现同一个设计原则：调度单位是完整 message，不是 frame。
+
+## 本地过滤为什么可能消耗 owner-thread 公平性
+
+`xsub_t::xrecv()` 对不匹配消息会继续循环读取，甚至把该 multipart 的剩余 frame 全部弹出。源码保留了一个 TODO：持续到来的 non-matching 流可能让这个循环长时间占据执行线程，从而破坏 non-blocking 调用的直觉。
+
+这说明“过滤放在哪里”不仅影响 CPU 成本，也直接影响 Runtime fairness。把 filter 留到 subscriber owner thread，就必须把最坏过滤工作量纳入延迟分析。
+
+
 ## lossy 与 HWM
 
 XPUB 最终调用 dist，而 dist 中某个 pipe 可能因 HWM 不可写。PUB/XPUB 的 `_lossy` 选项决定是否允许在慢订阅者处丢消息，或要求 HWM 检查通过。

@@ -104,4 +104,4 @@ OS socket
 control: object_t -> command_t -> mailbox -> poller -> owner thread
 ~~~
 
-后续按 Mailbox → yqueue/ypipe → Pipe/HWM → socket_base → io_thread/poller → session → engine → socket patterns 的顺序继续拆。
+Mailbox、yqueue/ypipe、Pipe/HWM、socket owner、I/O Reactor、Session/Engine 与 socket pattern 共同组成这套消息 Runtime：底层负责所有权、发布、唤醒和容量，上层再叠加公平调度、显式路由与订阅匹配语义。

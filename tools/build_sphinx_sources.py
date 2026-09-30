@@ -160,6 +160,7 @@ ARTICLE_ORDER = {
         "ypipe-yqueue-spsc",
         "pipe-hwm-backpressure",
         "socket-command-owner",
+        "io-thread-poller",
         "session-stream-engine",
         "fq-lb-dist-schedulers",
         "dealer-router-routing",
