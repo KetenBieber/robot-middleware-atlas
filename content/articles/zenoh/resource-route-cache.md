@@ -879,3 +879,219 @@ self.with_mapped_nullable_expr(expr, /* make_if_unknown */ false, |tables, res| 
 4. 最后加入局部 matches 失效和全局 version 失效；统计实际 route compute 次数，证明 hit 与 invalidation 确实发生。
 
 Resource tree 的价值不是把字符串换成树，而是把声明期建立的结构、数据期复用的 Route 和拓扑变化时的失效协议组合成一个整体。缺少任何一部分，缓存都可能返回已经过时的目的地集合。
+
+## 局部失效与全局版本失效是两套不同协议
+
+固定提交里，Zenoh 并不是只有一种“清空缓存”的办法。
+
+资源级变化，例如某个 subscriber/queryable 的声明只影响一个 key-expression 及其相交集合时，会走局部失效：
+
+~~~rust
+fn disable_data_routes(&mut self, res: &mut Arc<Resource>) {
+    if res.ctx.is_some() {
+        get_mut_unchecked(res)
+            .context_mut()
+            .hats[self.region()]
+            .disable_data_routes();
+
+        get_mut_unchecked(res)
+            .context_mut()
+            .disable_data_routes();
+
+        for match_ in &res.context().matches {
+            let mut match_ = match_.upgrade().unwrap();
+            if !Arc::ptr_eq(&match_, res) {
+                get_mut_unchecked(&mut match_)
+                    .context_mut()
+                    .hats[self.region()]
+                    .disable_data_routes();
+
+                get_mut_unchecked(&mut match_)
+                    .context_mut()
+                    .disable_data_routes();
+            }
+        }
+    }
+}
+~~~
+
+Query route 的局部失效结构相同，对应 HAT 方法 `disable_query_routes()`：只清当前 region 的 query cache，并沿 `matches` 失效所有相交 Resource 的对应缓存。
+
+这里的关键设计是：
+
+> 声明变化并不意味着整个路由表都脏了。
+
+Zenoh 已经提前维护了 `matches: Vec<Weak<Resource>>`，所以局部声明变化可以沿相交图传播失效，而不是遍历所有 Resource。
+
+~~~text
+subscriber on robot/**
+        |
+        v
+Resource("robot/**")
+        |
+      matches
+   /      |      \
+  v       v       v
+robot/a  robot/b  robot/c
+   |        |        |
+ clear    clear    clear
+ local route cache
+~~~
+
+代价是声明期必须维护准确的 matches 图。
+
+## 全局拓扑变化通过 routes_version 失效
+
+如果变化影响整个 routing topology，Zenoh 不会遍历所有 Resource 调 `clear()`。
+
+固定源码：
+
+~~~rust
+pub(crate) fn disable_all_routes(&mut self) {
+    let routes_version = &mut self.routes_version;
+    *routes_version = routes_version.saturating_add(1);
+}
+~~~
+
+HAT 级全局失效还会同时推进区域级 `routes_version` 与全局 `routes_version`。
+
+缓存对象本身可以暂时留在内存中，但命中条件变成：
+
+~~~rust
+if version != self.version {
+    return None;
+}
+~~~
+
+于是：
+
+~~~text
+拓扑变化
+   |
+routes_version += 1
+   |
+旧 Route 对象仍在
+   |
+下一次 get_route()
+   |
+version mismatch
+   |
+cache miss
+   |
+compute_route()
+   |
+set_route(new_version)
+~~~
+
+它把“拓扑变化时扫描全部缓存”的成本转换成“后续首次访问按需重建”。
+
+## Routes 为什么同时按 Region 与 NodeId 建索引
+
+固定实现：
+
+~~~rust
+pub(crate) struct Routes<T> {
+    mapping: RegionMap<NodeIdMap<T>>,
+    version: u64,
+}
+
+pub(crate) type NodeIdMap<T> = Vec<Option<T>>;
+~~~
+
+逻辑键不是：
+
+~~~text
+resource -> route
+~~~
+
+而是：
+
+~~~text
+resource context
+  + source Region
+  + mapped source NodeId
+  + routes_version
+    -> Route
+~~~
+
+原因是同一个资源从不同路由域、不同拓扑来源进入时，允许的下一跳可能不同。若 cache key 只用 Resource，就可能把“从 A 算出的 route”误用于“从 B 到达的消息”。
+
+## get_or_set_route 的读快路径与写慢路径
+
+固定实现先用读锁命中缓存；miss 后获取写锁，再二次检查：
+
+~~~rust
+if let Some(route) = routes.read().unwrap().get_route(version, region, node_id) {
+    return route.clone();
+}
+
+let mut routes = routes.write().unwrap();
+
+if let Some(route) = routes.get_route(version, region, node_id) {
+    return route.clone();
+}
+
+let route = compute_route();
+routes.set_route(version, region, node_id, route.clone());
+~~~
+
+这表达的是标准 cache miss double-check：
+
+~~~text
+Thread A                  Thread B
+--------                  --------
+read: miss
+                          read: miss
+write lock
+compute + insert
+unlock
+                          write lock
+                          second check: hit
+~~~
+
+如果没有第二次检查，两个同时 miss 的线程会重复计算同一 route。
+
+## 两级版本号说明 Zenoh 同时维护 region-local 与 merged route
+
+数据路径先为每个 HAT region 计算局部 route：
+
+~~~text
+ctx.hats[region].data_routes
+        |
+tables.data.hats[region].routes_version
+~~~
+
+然后 `get_data_route()` 再把所有 region 的结果按目的 Face ID 合并：
+
+~~~text
+region A route --\
+region B route ----> RouteBuilder -> merged Route
+region C route --/
+~~~
+
+最终 merged route 缓存在：
+
+~~~text
+ctx.data_routes
+        |
+tables.data.routes_version
+~~~
+
+所以这不是“同一个缓存存两份”，而是：
+
+~~~text
+HAT-specific route cache
+        ↓
+cross-region merged route cache
+~~~
+
+## 路由缓存的正确性不变量
+
+可以把 Zenoh Route Cache 的正确性压缩成四条：
+
+1. **identity**：缓存必须绑定来源 Region 与 NodeId；
+2. **version**：拓扑版本不一致的 Route 永远不能命中；
+3. **dependency**：局部声明变化必须失效当前 Resource 与所有相交 Resource；
+4. **immutability**：命中后的 `Arc<Route>` 作为不可变快照共享，不能原地修改。
+
+真正复杂的不是“用了缓存”，而是 **缓存什么时候失效，以及谁负责证明旧 Route 已经不可再用**。

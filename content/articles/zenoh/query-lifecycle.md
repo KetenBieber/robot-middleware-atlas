@@ -543,3 +543,251 @@ Session 为每个 Query 启动 timeout task。到期后，它以 qid 从 `querie
 8. 最后实现 `Latest` 等 consolidation 策略。
 
 这条顺序先固定生命周期不变量，再增加路由和便利 API。Query 系统最难修复的错误通常不是匹配错一个 key，而是某条失败路径没有发 Final，导致状态永久留在 map 中。
+
+## Final、timeout 与 Face close 竞争的是 pending entry 的所有权
+
+路由层真正的共享状态在：
+
+~~~text
+FaceState::pending_queries
+~~~
+
+正常 Final、方向 timeout 与 Face close 都可能尝试结束同一个方向。
+
+正常 Final 的核心是：
+
+~~~rust
+let queries_lock = zwrite!(tables_ref.queries_lock);
+
+match get_mut_unchecked(face).pending_queries.remove(&qid) {
+    Some(query) => {
+        drop(queries_lock);
+        finalize_pending_query(query);
+    }
+    None => {}
+}
+~~~
+
+方向 timeout 也做同一件事；Face close 则一次性 drain：
+
+~~~rust
+pub(crate) fn finalize_pending_queries(
+    tables_ref: &TablesLock,
+    face: &mut Arc<FaceState>,
+) {
+    let queries_lock = zwrite!(tables_ref.queries_lock);
+
+    for (_, query) in get_mut_unchecked(face).pending_queries.drain() {
+        finalize_pending_query(query);
+    }
+
+    drop(queries_lock);
+}
+~~~
+
+而 `Face::send_close()` 的 teardown 路径会显式调用这条 drain。
+
+因此竞争关系是：
+
+~~~text
+normal Final --------\
+timeout --------------> pending_queries.remove(qid)
+Face close -----------/            |
+                                  winner
+                                    |
+                           finalize_pending_query()
+~~~
+
+只有成功取得 map entry 的分支拥有这一条方向的最终回收权。
+
+## queries_lock 把 pending map 变成线性化点
+
+这里的 `queries_lock` 不是为了保护 payload，而是定义 query direction 生命周期的线性化点：
+
+~~~text
+entry exists
+    |
+remove / drain under queries_lock
+    |
+entry no longer exists
+~~~
+
+一旦某个分支把 entry 移走，其他并发分支只能观察到 `None`。
+
+因此 timeout 与正常 Final 不会重复执行 `finalize_pending_query()`。
+
+这个设计比多个终止路径各自维护一个 completed bool 更稳健：
+
+> 谁拿走“拥有终止权的对象”，谁负责 cleanup。
+
+## CancellationToken 只取消方向清理任务，不负责 fan-in
+
+每个 pending entry 保存：
+
+~~~text
+(
+  Arc<Query>,
+  CancellationToken
+)
+~~~
+
+`finalize_pending_query()` 先取消该方向 timeout，再用 `Arc::into_inner` 判断自己是否是最后一个方向：
+
+~~~rust
+pub(crate) fn finalize_pending_query(
+    query: (Arc<Query>, CancellationToken),
+) {
+    let (query, cancellation_token) = query;
+
+    cancellation_token.cancel();
+
+    if let Some(query) = Arc::into_inner(query) {
+        query
+            .src_face
+            .primitives
+            .clone()
+            .send_response_final(&mut ResponseFinal {
+                rid: query.src_qid,
+                ext_qos: query.src_qos,
+                ext_tstamp: None,
+            });
+    }
+}
+~~~
+
+只要其他 pending direction 仍持有同一个 `Arc<Query>`，`into_inner` 就返回 `None`。
+
+只有最后一个 owner 被取走时，才向上游发送唯一 Final。
+
+## Arc::into_inner 在这里就是 fan-out/fan-in barrier
+
+假设请求被路由到三个下游：
+
+~~~text
+                    Arc<Query>
+                   /    |    \
+                  /     |     \
+             Face A   Face B   Face C
+~~~
+
+A 正常完成：
+
+~~~text
+remove A
+strong refs: 3 -> 2
+Arc::into_inner -> None
+~~~
+
+B timeout：
+
+~~~text
+remove B
+strong refs: 2 -> 1
+Arc::into_inner -> None
+~~~
+
+C 因 Face close 被 drain：
+
+~~~text
+remove C
+last owner
+Arc::into_inner -> Some(Query)
+        |
+        v
+send upstream ResponseFinal
+~~~
+
+引用计数本身承担了 `remaining_branches` 的角色。
+
+## 为什么 route_query 必须立刻 drop 临时 Arc
+
+这种设计有严格前提：不能存在多余的强引用。
+
+固定源码在 route fan-out 结束后专门释放临时引用，因为否则：
+
+~~~text
+pending A
+pending B
+temporary local Arc
+
+A done
+B done
+temporary Arc remains
+
+Arc::into_inner -> None
+~~~
+
+所有网络方向明明都完成了，上游却收不到 Final。
+
+所以“引用计数充当状态机”虽然简洁，但 ownership discipline 必须非常严格。
+
+## Face close 为什么先停止任务，再 drain pending query
+
+固定 `send_close()` 路径先终止 Face-owned task，再调用 `finalize_pending_queries()`。
+
+顺序可以抽象成：
+
+~~~text
+stop Face-owned async producers
+        |
+        v
+drain remaining pending direction state
+        |
+        v
+propagate Final when last Arc owner disappears
+        |
+        v
+continue entity/resource teardown
+~~~
+
+原则是：
+
+> 先停止未来事件来源，再收敛已经存在的状态。
+
+## Query 生命周期其实有两层状态机
+
+应用 Session 层：
+
+~~~text
+QueryState[qid]
+   |
+   +-- local Final
+   +-- remote Final
+   |
+ nb_final -> 0
+   |
+ remove QueryState
+~~~
+
+路由 Face 层：
+
+~~~text
+pending_queries[dst_qid]
+   |
+   +-- normal Final
+   +-- direction timeout
+   +-- Face close
+   |
+ remove entry
+   |
+ last Arc<Query> ?
+   |
+ yes -> upstream Final
+~~~
+
+两层解决的问题不同：
+
+- Session 层解决“本地 + 远端生产方向是否都结束”；
+- routing 层解决“远端 fan-out 的所有具体下一跳是否都结束”。
+
+不能把这两个完成协议合成一个全局计数器。
+
+## Query Final 最值得迁移的五个 Runtime 原则
+
+1. **完成信号显式存在**，不能靠“暂时没新 Reply”推断结束；
+2. **每个 fan-out direction 有独立 pending identity**；
+3. **所有终止路径竞争同一个 entry ownership**；
+4. **fan-in completion 由唯一最后 owner 触发**；
+5. **shutdown 先阻止新异步事件，再 drain 旧状态**。
+
+这套模式同样适用于 RPC aggregator、并行数据库 query、分布式搜索以及机器人多后端请求汇聚。
