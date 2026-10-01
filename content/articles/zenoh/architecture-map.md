@@ -273,6 +273,130 @@ Face 代表路由器看到的一侧连接关系，保存远端角色、资源映
 
 策略检查不能只发生在首次声明。拓扑、身份或配置变化后，旧 Route snapshot 必须因 version/policy epoch 失效；否则数据面可能继续使用变更前允许的目的地。版本号因此既是性能机制，也是安全更新边界。
 
+
+## Region 是 Face 创建时确定的路由身份
+
+Zenoh 的 `Region` 不应理解成运行中可以随意改写的标签。固定提交里，unicast transport 建立时，Runtime 先根据本地模式、远端角色、gateway 配置和握手阶段得到的 remote bound 计算 `Region` 与 `Bound`：
+
+~~~text
+TransportPeer + gateway config + remote bound
+                  |
+                  v
+         compute_region_of()
+             |          |
+             v          v
+           Region     Bound
+~~~
+
+随后 `Gateway::new_transport_unicast()` 把这两个结果交给 `FaceStateBuilder::new()`，写入新建 Face：
+
+~~~rust
+let builder = FaceStateBuilder::new(
+    fid,
+    zid,
+    region,
+    remote_bound,
+    mux.clone(),
+    tables.hats.map_ref(|hat| hat.new_face()),
+);
+~~~
+
+因此，一个 Face 的 region 是 transport/Face 创建事务的一部分，而不是数据转发时每条消息重新计算的动态属性。数据路径才能直接使用 `tables.hats[src_face.region]` 选择对应 HAT。
+
+`compute_region_of()` 同时考虑 local `WhatAmI`、remote `WhatAmI`、gateway south preset/custom subregion，以及双方的 `Bound`。自定义 gateway 还可以按 zid、interface、mode、region name 把远端放入具体的 `Region::South { id, mode }`。所以 Region 是 routing domain/HAT ownership 维度，不是物理网卡编号或机器人业务分组。
+
+### 已建立 Face 不做 in-place region migration
+
+固定生产源码里没有常规运行时的 `face.region = new_region` 路径。这个选择是必要的，因为 Face 已经挂着大量依赖 region 的状态：
+
+~~~text
+Face
+├── region
+├── HAT face contexts
+├── resource mappings
+├── remote subscribers/queryables
+├── interests
+└── pending queries
+~~~
+
+如果只改 region 字段，而不迁移这些状态，旧 HAT 与新 HAT 会同时持有不一致的声明、mapping 和 route ownership。
+
+所以固定实现采取更清晰的生命周期：
+
+~~~text
+transport / Face creation
+        |
+ compute Region
+        |
+ register Face in owner HAT
+        |
+       ...
+        |
+ transport close
+        |
+ unregister old Face completely
+        |
+ optional reconnect
+        |
+ create a new Face
+        |
+ compute Region again
+~~~
+
+如果 gateway 配置在两次连接之间改变，重连产生的新 Face 会重新经过 `compute_region_of()`；旧 Face 不做半状态迁移。
+
+### routing topology 变化不等于 Face region 变化
+
+另一类变化是 router link-state 或 link weight 改变。此时 Face 仍属于原 region，但该 region 的 HAT 内部 topology tree 会重算：
+
+~~~text
+OAM_LINKSTATE / link-weight update
+          |
+          v
+    compute_trees()
+          |
+  +-------+-------+
+  v       v       v
+pubsub  query    token
+ tree    tree     tree
+ change  change   change
+          |
+          v
+ disable_all_routes()
+          |
+ routes_version changes
+~~~
+
+固定源码的 `do_compute_trees()` 在更新 pub/sub、query 和 token tree 后统一调用 `disable_all_routes()`。因此应区分：
+
+~~~text
+Face.region
+  = 连接属于哪个 routing domain / HAT
+
+routing tree
+  = 该 domain 当前应该经过哪个 successor
+~~~
+
+前者主要在 Face 生命周期边界确定；后者可以随 link-state 动态重算。
+
+### RegionMap 把每个 routing domain 变成独立 HAT
+
+Gateway 初始化时会根据配置预先建立 North、Local 和各类 South/custom subregion，并为每个 region 创建对应 HAT。运行时不是一套全局路由算法，而更接近：
+
+~~~text
+RegionMap<Hat>
+   ├── North
+   ├── South(Client)
+   ├── South(Peer)
+   ├── South(Router)
+   ├── custom South #N
+   └── Local
+~~~
+
+Face 创建时 `partition_mut(&region)` 明确区分 owner HAT 与其他 HAT，使跨 region 声明传播和注销有清晰的所有权边界。
+
+由此可以得到四条不变量：Face 与 Region 一起创建；HAT ownership 由 `Face.region` 决定；拓扑树变化通过 route recompute + version invalidation 生效；重新分类通过重建 Face，而不是修改活跃 Face 的 region 标签。
+
 ## Route cache 与失效
 
 局部声明变化可沿 Resource 的 `matches` 精确清除相关缓存；拓扑/Face 大变化则递增全局 version。旧缓存下一次访问发现版本不匹配，再惰性重算。全局失效动作接近 `O(1)`，代价是变化后的首批请求出现重算抖动。

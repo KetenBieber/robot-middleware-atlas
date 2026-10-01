@@ -391,6 +391,172 @@ async fn close_inner(&self, _: ()) {
 
 源码位置：[`Runtime::close_inner`](https://github.com/eclipse-zenoh/zenoh/blob/9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5/zenoh/src/net/runtime/mod.rs#L1307-L1325)。
 
+
+## Transport 关闭如何进入 Routing teardown
+
+`Runtime::close_inner()` 描述的是整个 Runtime 主动关闭，但网络断线还有另一条更常见的入口：transport 自己通知 peer session 已关闭。
+
+Unicast transport handler 的调用链是：
+
+~~~text
+TransportPeerEventHandler::closed()
+        |
+RuntimeSession::closed()
+        |
+main_handler.closed()
+        |
+DeMux::closed()
+        |
+Face::send_close()
+~~~
+
+固定源码中，`RuntimeSession::closed()` 先让主 routing handler 收到关闭，再处理 configured endpoint 的重连逻辑；而 `DeMux::closed()` 的核心动作就是 `self.face.send_close()`。因此 transport close 不只是“socket 没了”，它会向上转换成一次完整的 routing Face 注销事务。
+
+### del_link 与 closed 是不同生命周期层级
+
+`RuntimeSession` 还单独接收 `del_link(link)`。它会通知各 handler，并让 `Runtime::closed_link()` 针对具体 endpoint 决定是否重连；但 DeMux 的 `del_link()` 本身为空，真正删除 Face 的是整个 peer transport 的 `closed()`。
+
+这反映出 transport session 与 link 是不同对象：
+
+~~~text
+Transport session
+   ├── Link A
+   └── Link B
+~~~
+
+单条 Link 消失不等于 routing peer 已死亡。只有整个 peer transport session 关闭，才执行 Face teardown。
+
+### Face::send_close 是有顺序的注销事务
+
+Face 关闭不是直接执行 `tables.faces.remove(fid)`。固定实现先停止仍可能制造并发事件的对象：
+
+~~~text
+1. terminate Face task_controller
+2. finalize pending queries
+3. finalize pending interests
+~~~
+
+然后取得 control lock 与 Tables 写锁，继续：
+
+~~~text
+4. unregister_face_entities()
+   ├── subscribers
+   ├── queryables
+   └── tokens
+5. invalidate affected routes
+6. reconcile remaining ownership across Hats
+7. remove local/remote resource mappings
+8. Resource::clean()
+9. Hat::close_face()
+10. tables.faces.remove(fid)
+11. release locks
+12. send deferred declarations
+~~~
+
+这是典型的 quiesce → detach → reclaim 协议。若最先删除 Face，其他结构仍然保留该 Face 的声明、mapping、pending query 和 route ownership，teardown 就会留下悬空逻辑状态。
+
+### pending query 在 Tables 大规模修改前先收敛
+
+`Face::send_close()` 的前几步是：
+
+~~~rust
+let mut state = self.state.clone();
+
+state.task_controller
+    .terminate_all(Duration::from_secs(10));
+
+finalize_pending_queries(&self.tables, &mut state);
+
+let ctrl_lock = zlock!(self.tables.ctrl_lock);
+let mut wtables = zwrite!(self.tables.tables);
+~~~
+
+`finalize_pending_query()` 可能向源 Face 传播 `ResponseFinal`，因此它被放在大规模 routing table teardown 之前，而不是持 Tables 写锁执行所有外部完成动作。设计上把 query lifecycle convergence 与 routing table mutation 分成两个阶段。
+
+### Face 注销同时是一轮跨 Region 状态重算
+
+一个 subscriber/queryable 可能因为跨 region propagation 在多个 HAT 中都有状态。owner Face 关闭后不能简单删除 Resource。
+
+Subscriber 的结构大致是：
+
+~~~text
+unregister_face_entities()
+       |
+removed subscriber Resource
+       |
+disable_data_routes(resource)
+       |
+scan all Hats for remaining owners
+       |
+   +---+---+
+   |       |
+ none     remain
+   |       |
+unpropagate/clean   keep or transfer ownership
+~~~
+
+Queryable 还需要重新 merge 不同 region 的 `QueryableInfo`。因此 Face close 是 routing-state reconciliation，而不仅是内存释放。
+
+### Resource mapping 为什么在实体注销后才拆
+
+Face 的 local/remote expression mapping 在关闭尾部才清理：先从对应 Resource 移除 FaceContext，再调用 `Resource::clean()`。这是因为前面的 entity unregister 仍然需要 Resource 与 Face context 判断剩余 owner、传播关系和 cache invalidation。
+
+正确顺序可以抽象为：
+
+~~~text
+stop event producers
+   -> converge protocol state
+   -> unregister logical entities
+   -> detach indexes/mappings
+   -> reclaim objects
+~~~
+
+### Transport 断开之后的 reconnect 创建新 Face
+
+`RuntimeSession::closed()` 在主 handler 完成关闭后，会检查配置的 connect endpoints。若整个 Runtime 没有关闭，它可能启动 `peers_connector_retry(...)`；单 link 丢失时，非 Client runtime 还可启动 `peer_connector_retry(endpoint)`。
+
+所以重连的真实生命周期是：
+
+~~~text
+old transport Face
+      |
+   closed()
+      |
+fully unregister old routing state
+      |
+ connector retry
+      |
+ new transport
+      |
+compute_region_of()
+      |
+   new Face
+~~~
+
+重连不会复活旧 Face，也不会继承旧 Face 的 pending query、mapping 或声明 ownership。新的 transport 必须重新经过 region 计算和 Face 注册。
+
+### 主动 Runtime close 与意外 transport close 的共同不变量
+
+两条路径入口不同：
+
+~~~text
+主动关闭:
+Runtime::close_inner()
+ -> stop Runtime tasks
+ -> manager.close()
+ -> clear handlers/resources
+
+网络断线:
+TransportPeerEventHandler::closed()
+ -> DeMux::closed()
+ -> Face::send_close()
+ -> optional reconnect
+~~~
+
+但它们共享同一组原则：先阻止旧 producer 制造新事件；再收敛 pending protocol state；再从 routing tables 注销；最后释放 Face/Resource ownership；任何新连接都建立新的 Face 生命周期。
+
+所以 transport teardown 的本质不是 close socket，而是把网络生命周期事件转换成 routing ownership 的一致性事务。
+
 ## 显式 close 比依赖 Drop 更可诊断
 
 最后一个逻辑 Session handle 析构时，`Session::drop` 会尝试同步关闭，但错误只能记录到日志。显式调用：

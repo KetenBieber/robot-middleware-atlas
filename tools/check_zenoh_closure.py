@@ -20,8 +20,12 @@ ARTICLE_NAMES = (
     "rust-cpp-design-lab",
     "design-recap",
 )
-
 REQUIRED = {
+    "architecture-map": (
+        "compute_region_of", "FaceStateBuilder", "Face.region",
+        "RegionMap", "compute_trees", "disable_all_routes",
+        "routes_version", "new Face",
+    ),
     "query-lifecycle": (
         "QueryState", "ResponseFinal", "pending_queries",
         "QueryCleanup", "finalize_pending_query", "Arc::into_inner",
@@ -31,6 +35,11 @@ REQUIRED = {
         "ResourceContext", "matches", "RegionMap", "NodeIdMap",
         "routes_version", "get_or_set_route", "disable_data_routes",
         "disable_query_routes",
+    ),
+    "backpressure-close": (
+        "RuntimeSession::closed", "DeMux::closed", "Face::send_close",
+        "finalize_pending_queries", "unregister_face_entities",
+        "tables.faces.remove", "peers_connector_retry", "compute_region_of",
     ),
 }
 
