@@ -17,8 +17,10 @@ ARTICLE_NAMES = (
     "event-based-scheduler",
     "gxf-event-runtime-internals",
     "gxf-entity-executor-router",
+    "operator-materialization-lifecycle",
     "conditions-connectors-backpressure",
     "allocator-cuda-memory",
+    "cuda-stream-event-propagation",
     "distributed-ucx-runtime",
 )
 GUIDE_NAMES = (
@@ -67,6 +69,15 @@ REQUIRED = {
         "StagingQueue",
         "ExpiringMessageAvailableSchedulingTerm",
     ),
+    "operator-materialization-lifecycle": (
+        "initialize_base",
+        "initialize_graph_entity",
+        "GXFWrapper",
+        "EntityExecutor::executeEntity",
+        "syncInbox",
+        "syncOutbox",
+        "EntityGroup",
+    ),
     "conditions-connectors-backpressure": (
         "DoubleBufferReceiver",
         "DownstreamMessageAffordableCondition",
@@ -79,6 +90,17 @@ REQUIRED = {
         "RMMAllocator",
         "CudaStreamPool",
         "set_deallocation_stream",
+    ),
+    "cuda-stream-event-propagation": (
+        "CudaStreamId",
+        "CudaStreamHandle",
+        "receive_cuda_stream",
+        "set_cuda_stream",
+        "cudaEventRecord",
+        "cudaStreamWaitEvent",
+        "propagate_stream_to_entity_memory_buffers",
+        "set_deallocation_stream",
+        "execution dependency",
     ),
     "distributed-ucx-runtime": (
         "UcxTransmitter",
