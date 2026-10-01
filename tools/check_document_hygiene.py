@@ -26,6 +26,7 @@ PROJECTS = (
     "yarp",
     "ecal",
     "lcm",
+    "ros1",
     "cyclonedds",
     "fastdds",
     "zenoh",

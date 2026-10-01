@@ -32,6 +32,7 @@ PROJECTS = {
     "zenoh": ("Eclipse Zenoh", "9fcd9cb5d364192c3e8a27e66de76f4bc750d1d5"),
     "lcm": ("LCM", "ad0c54cee0ec048ef12357c34349ec1443158864"),
     "libzmq": ("ZeroMQ / libzmq", "46493370217ac135246617fa2f6ac819d8b61bfc"),
+    "ros1": ("ROS1 Communication Runtime", "30483a9f218f1545eec16d3934bf3cb042e2cb5b"),
     "ethercat": ("IgH EtherCAT Master", "61cc654f5b721ddd54df0f58bdd34106d91c5359"),
     "soem": ("SOEM", "304d1c05eab77dc0d426f1a5cf09c8cc7dc03713"),
     "cyclonedds": ("Eclipse Cyclone DDS", "e54e991f75a3e67f8e628da3171122e36ea5b872"),
@@ -61,6 +62,7 @@ PROJECT_OVERVIEWS = {
 
 它的价值在于机制少而边界清楚：publish 可以一直追到 ``sendmsg/iovec``，receive 可以一直追到 fragment reassembly 与锁外 callback。相应代价也直接可见——多播没有端到端可靠性，分片放大丢包概率，队列容量和主线程调用 ``handle`` 的节奏决定数据是否及时。""",
     "libzmq": """libzmq 把 socket pattern 建立在一套显式消息 Runtime 之上：msg_t 管消息存储与共享引用，pipe/ypipe 与 mailbox/command 管线程间数据面和控制面，session/engine/ZMTP 管网络协议；Context 还维护 inproc endpoint registry、socket slot 与 Reaper，monitor 把运行时状态重新编码成消息流，proxy 则在普通 socket 之上继续传播 backpressure。\n\n本专题固定到 46493370。完整主线覆盖小消息内联与大消息 fan-out、SPSC queue、HWM、owner-thread command、协议握手与重连、inproc pending bind、monitor event schema、steerable proxy，以及 linger、TERM/TERM_ACK、seqnum、Reaper DONE 共同组成的多层 shutdown barrier。""",
+    "ros1": """ROS1 把机器人通信拆成三个明显的运行时平面：rosmaster 通过 XML-RPC 维护中心化 graph，节点之间再用 requestTopic 协商 TCPROS/UDPROS 数据通道，收到的 payload 最后经过 SubscriptionQueue、CallbackQueue 与 Spinner 执行业务回调。\n\n本专题固定到 ros_comm 30483a9f，并对照 roscpp_core a1a19427 与 nodelet_core 5ed9cabe。重点不是 ROS API，而是 RegistrationManager 双索引、publisherUpdate、requestTopic、TCPROS framing、Serializer<T>、有界 callback queue、Spinner 线程模型与 Nodelet intra-process ownership 怎样共同构成 ROS1 通信 Runtime，并为后续 ROS2/RMW/Executor 对照建立基线。""",
     "orocos": """Orocos RTT 围绕实时组件建立明确的执行边界。TaskContext 暴露生命周期 hooks、Operation 和 Port；Activity 提供线程与周期，ExecutionEngine 统一处理消息、端口事件和组件更新；ConnPolicy 决定数据连接使用最新值还是有界缓冲，以及采用何种同步策略。
 
 它最值得追踪的问题是“谁的线程执行这段代码”。ClientThread 与 OwnThread operation、周期与事件驱动 Activity、DATA 与 BUFFER policy 会给出完全不同的阻塞和数据年龄语义。所谓实时性最终取决于容器进度保证、hook 的最坏执行时间、OS priority/affinity 与关闭顺序能否形成闭环。""",
@@ -173,6 +175,16 @@ ARTICLE_ORDER = {
         "proxy-device-runtime",
         "linger-termination-protocol",
         "context-reaper-lifecycle",
+    ],
+    "ros1": [
+        "overview",
+        "master-discovery",
+        "topic-connection",
+        "tcpros-transport",
+        "serialization-message",
+        "callback-queue-spinner",
+        "nodelet-intra-process",
+        "limitations-and-ros2-transition",
     ],
     "ecal": [
         "foundations",
@@ -417,6 +429,7 @@ GUIDE_ORDER: dict[str, list[str]] = {
     "seastar": [],
     "nginx": [],
     "libzmq": [],
+    "ros1": [],
     "cyber": ["use-environment", "use-pubsub", "closed-loop-project", "use-component-operations", "case-study-apollo-planning"],
     "ecal": ["use-environment", "use-pubsub", "closed-loop-project", "use-operations", "case-study-mqtt-bridge"],
     "zenoh": ["use-environment", "use-pubsub-query", "use-operations", "case-study-rmw-zenoh"],
@@ -452,6 +465,7 @@ PROJECT_STORIES = {
 
 再沿 :doc:`UDP 发送 <udpm-publish-protocol>`、:doc:`接收与分片重组 <receive-reassembly>` 和 :doc:`订阅分发 <subscription-dispatch>` 追踪同一条消息，找出谁在收包、谁在调用用户代码，以及取消订阅为何需要延迟回收。读完 typed pub/sub 后进入 :doc:`双进程闭环工程 <closed-loop-project>`，把 schema、CMake、sender、receiver 和退出验收逐文件连起来；最后用 :doc:`C ABI 与 C++ 实验 <c-abi-cpp-design-lab>` 将设计压缩到可写、可测试的最小系统，再看 :doc:`Drake 集成 <case-study-drake>`。""",
     "libzmq": """从 :doc:`总览 <overview>` 与 :doc:`msg_t 存储 <msg-storage-refcount>` 建立消息 envelope，再沿 :doc:`Mailbox <mailbox-command-wakeup>`、:doc:`yqueue/ypipe <ypipe-yqueue-spsc>`、:doc:`Pipe/HWM <pipe-hwm-backpressure>` 和 :doc:`Socket owner <socket-command-owner>` 看数据与 command 怎样跨线程；随后插入 :doc:`inproc Endpoint Registry <inproc-endpoint-registry>`，理解同一 Context 内不用网络 fd 也仍要处理 discovery、Pipe ownership、HWM 与 seqnum。\n\n网络侧从 :doc:`I/O thread/poller <io-thread-poller>`、:doc:`Session/Engine <session-stream-engine>` 进入 :doc:`ZMTP 握手 <zmtp-handshake-mechanism>` 与 :doc:`TCP 重连 <tcp-reconnect-state-machine>`；:doc:`Monitor Event <monitor-event-observability>` 把这些状态变成结构化观测消息。再用 :doc:`FQ/LB/Distributor <fq-lb-dist-schedulers>`、:doc:`DEALER/ROUTER <dealer-router-routing>`、:doc:`PUB/SUB <pubsub-trie-distributor>` 建立 socket pattern，最后进入 :doc:`Proxy/Device <proxy-device-runtime>` 看上层 forwarding 怎样传播 backpressure。关闭阶段先读 :doc:`Linger/终止协议 <linger-termination-protocol>`，再以 :doc:`Context/Reaper <context-reaper-lifecycle>` 收束 socket slot、poller detach、异步销毁与 Context DONE join。""",
+    "ros1": """从 :doc:`Runtime 总览 <overview>` 把 ROS1 分成 graph discovery、payload transport 和 callback execution 三个平面；再沿 :doc:`Master/Discovery <master-discovery>` 追 RegistrationManager、NodeRef、registerSubscriber 与 publisherUpdate，理解中心化发现为何不进入消息热路径。\n\n随后用 :doc:`Topic 建链 <topic-connection>` 把 publisher XML-RPC URI 经 requestTopic 转换成 TCPROS endpoint，再进入 :doc:`TCPROS <tcpros-transport>` 跟踪 TransportTCP、Connection、header 与 length framing。消息表示由 :doc:`序列化 <serialization-message>` 展开 Serializer<T>、lazy encode/decode 与 buffer ownership；执行侧在 :doc:`CallbackQueue/Spinner <callback-queue-spinner>` 中分析 bounded queue、condition variable、single/multi-thread worker 与 callback lifetime。最后用 :doc:`Nodelet <nodelet-intra-process>` 解释同地址空间 no-copy 和 plugin/container 调度，再通过 :doc:`ROS1→ROS2 <limitations-and-ros2-transition>` 按 discovery、QoS、type support、RMW 和 Executor 职责建立后续源码对照。""",
     "orocos": """先从 :doc:`1 ms 控制循环的失败 <foundations>` 出发：把设备、命令与日志塞进同一个线程为什么不够；然后沿 :doc:`TaskContext 生命周期 <taskcontext-lifecycle>` 给配置、启动、异常和释放划边界。
 
 接着进入 :doc:`Activity 与 ExecutionEngine <activity-execution-engine>`，区分“任务可以运行”和“哪个 OS 线程真正执行”；再读 :doc:`Port 与 Channel <ports-channels>` 及 :doc:`Operation 线程模型 <operation-threading>`，理解样本与控制命令的不同时间语义。最后通过 :doc:`C++ 实验 <cpp-design-lab>` 验证对象寿命、虚接口和并发关闭，再对照 :doc:`RTT/ROS 集成 <case-study-rtt-ros>`。""",

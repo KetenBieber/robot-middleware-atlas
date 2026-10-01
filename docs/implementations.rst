@@ -18,9 +18,9 @@ Cyber 适合研究消息驱动任务、CRoutine、Scheduler、Processor 和有�
 消息总线、发现与分布式数据空间
 --------------------------------
 
-:doc:`YARP <generated/yarp/index>`、:doc:`eCAL <generated/ecal/index>`、:doc:`LCM <generated/lcm/index>`、:doc:`ZeroMQ / libzmq <generated/libzmq/index>`、:doc:`Cyclone DDS <generated/cyclonedds/index>`、:doc:`Fast DDS <generated/fastdds/index>` 与 :doc:`Zenoh <generated/zenoh/index>` 都在解决“数据怎样从一个软件实体到另一个实体”，但承担的语义不同。
+:doc:`ROS1 Communication Runtime <generated/ros1/index>`、:doc:`YARP <generated/yarp/index>`、:doc:`eCAL <generated/ecal/index>`、:doc:`LCM <generated/lcm/index>`、:doc:`ZeroMQ / libzmq <generated/libzmq/index>`、:doc:`Cyclone DDS <generated/cyclonedds/index>`、:doc:`Fast DDS <generated/fastdds/index>` 与 :doc:`Zenoh <generated/zenoh/index>` 都在解决“数据怎样从一个软件实体到另一个实体”，但承担的语义不同。
 
-LCM 适合观察极简多播消息数据面；libzmq 适合观察 socket pattern 背后的消息 Runtime——mailbox/command、SPSC ypipe、HWM/LWM、owner I/O thread、session 与 transport engine 怎样把跨线程消息和网络事件组织成一体；eCAL/YARP 更强调运行时发现、连接与多 transport；DDS 把 discovery、QoS、History 和可靠性纳入标准模型；Zenoh 进一步把 pub/sub、query、storage 和跨网路由放在统一 key space 中。
+ROS1 适合把机器人通信的三条基本链一次看清：Master/XML-RPC 负责 graph discovery，TCPROS/UDPROS 负责节点间数据面，CallbackQueue/Spinner 负责把通信 readiness 转成业务执行；Nodelet 又展示同进程部署怎样改变 payload ownership 与复制成本。LCM 适合观察极简多播消息数据面；libzmq 适合观察 socket pattern 背后的消息 Runtime——mailbox/command、SPSC ypipe、HWM/LWM、owner I/O thread、session 与 transport engine 怎样把跨线程消息和网络事件组织成一体；eCAL/YARP 更强调运行时发现、连接与多 transport；DDS 把 discovery、QoS、History 和可靠性纳入标准模型；Zenoh 进一步把 pub/sub、query、storage 和跨网路由放在统一 key space 中。
 
 同机 Zero-copy 与异构数据面
 ---------------------------
@@ -71,6 +71,7 @@ Holoscan 再把 queue capacity、GPU allocator、CUDA stream/event 和 UCX trans
    generated/folly/index
    generated/seastar/index
    generated/libzmq/index
+   generated/ros1/index
    generated/nginx/index
    generated/orocos/index
    generated/yarp/index
