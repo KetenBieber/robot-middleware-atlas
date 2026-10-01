@@ -18,6 +18,7 @@ ARTICLE_NAMES = (
     "tcpros-transport",
     "serialization-message",
     "callback-queue-spinner",
+    "service-rpc-runtime",
     "nodelet-intra-process",
     "limitations-and-ros2-transition",
 )
@@ -55,6 +56,12 @@ REQUIRED = {
         "RMW", "Executor", "QoS", "wait set",
         "Nodelet", "TCPROS", "CallbackQueue"
     ),
+    "service-rpc-runtime": (
+        "ServiceManager", "lookupService", "ServiceServerLink",
+        "ServiceClientLink", "ServicePublication", "call_queue_",
+        "condition_variable", "persistent",
+    ),
+
 }
 
 PROCESS_LANGUAGE = re.compile(

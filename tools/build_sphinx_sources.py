@@ -185,6 +185,7 @@ ARTICLE_ORDER = {
         "tcpros-transport",
         "serialization-message",
         "callback-queue-spinner",
+        "service-rpc-runtime",
         "nodelet-intra-process",
         "limitations-and-ros2-transition",
     ],
@@ -195,9 +196,13 @@ ARTICLE_ORDER = {
         "qos-contract-mapping",
         "executor-waitset",
         "receive-take-callback",
+        "service-client-server-runtime",
+        "action-protocol-composition",
+        "action-goal-state-executor",
         "intra-process-manager",
         "loaned-message-zero-copy",
         "ros1-vs-ros2-architecture",
+        "service-rpc-comparison",
         "latency-budget-comparison",
         "copy-serialization-comparison",
         "scheduling-comparison",
@@ -485,8 +490,8 @@ PROJECT_STORIES = {
 
 再沿 :doc:`UDP 发送 <udpm-publish-protocol>`、:doc:`接收与分片重组 <receive-reassembly>` 和 :doc:`订阅分发 <subscription-dispatch>` 追踪同一条消息，找出谁在收包、谁在调用用户代码，以及取消订阅为何需要延迟回收。读完 typed pub/sub 后进入 :doc:`双进程闭环工程 <closed-loop-project>`，把 schema、CMake、sender、receiver 和退出验收逐文件连起来；最后用 :doc:`C ABI 与 C++ 实验 <c-abi-cpp-design-lab>` 将设计压缩到可写、可测试的最小系统，再看 :doc:`Drake 集成 <case-study-drake>`。""",
     "libzmq": """从 :doc:`总览 <overview>` 与 :doc:`msg_t 存储 <msg-storage-refcount>` 建立消息 envelope，再沿 :doc:`Mailbox <mailbox-command-wakeup>`、:doc:`yqueue/ypipe <ypipe-yqueue-spsc>`、:doc:`Pipe/HWM <pipe-hwm-backpressure>` 和 :doc:`Socket owner <socket-command-owner>` 看数据与 command 怎样跨线程；随后插入 :doc:`inproc Endpoint Registry <inproc-endpoint-registry>`，理解同一 Context 内不用网络 fd 也仍要处理 discovery、Pipe ownership、HWM 与 seqnum。\n\n网络侧从 :doc:`I/O thread/poller <io-thread-poller>`、:doc:`Session/Engine <session-stream-engine>` 进入 :doc:`ZMTP 握手 <zmtp-handshake-mechanism>` 与 :doc:`TCP 重连 <tcp-reconnect-state-machine>`；:doc:`Monitor Event <monitor-event-observability>` 把这些状态变成结构化观测消息。再用 :doc:`FQ/LB/Distributor <fq-lb-dist-schedulers>`、:doc:`DEALER/ROUTER <dealer-router-routing>`、:doc:`PUB/SUB <pubsub-trie-distributor>` 建立 socket pattern，最后进入 :doc:`Proxy/Device <proxy-device-runtime>` 看上层 forwarding 怎样传播 backpressure。关闭阶段先读 :doc:`Linger/终止协议 <linger-termination-protocol>`，再以 :doc:`Context/Reaper <context-reaper-lifecycle>` 收束 socket slot、poller detach、异步销毁与 Context DONE join。""",
-    "ros1": """从 :doc:`Runtime 总览 <overview>` 把 ROS1 分成 graph discovery、payload transport 和 callback execution 三个平面；再沿 :doc:`Master/Discovery <master-discovery>` 追 RegistrationManager、NodeRef、registerSubscriber 与 publisherUpdate，理解中心化发现为何不进入消息热路径。\n\n随后用 :doc:`Topic 建链 <topic-connection>` 把 publisher XML-RPC URI 经 requestTopic 转换成 TCPROS endpoint，再进入 :doc:`TCPROS <tcpros-transport>` 跟踪 TransportTCP、Connection、header 与 length framing。消息表示由 :doc:`序列化 <serialization-message>` 展开 Serializer<T>、lazy encode/decode 与 buffer ownership；执行侧在 :doc:`CallbackQueue/Spinner <callback-queue-spinner>` 中分析 bounded queue、condition variable、single/multi-thread worker 与 callback lifetime。最后用 :doc:`Nodelet <nodelet-intra-process>` 解释同地址空间 no-copy 和 plugin/container 调度，再通过 :doc:`ROS1→ROS2 <limitations-and-ros2-transition>` 按 discovery、QoS、type support、RMW 和 Executor 职责建立后续源码对照。""",
-    "ros2": """从 :doc:`Runtime 总览 <overview>` 建立 rclcpp → rcl → rmw → DDS 与 WaitSet/Executor 两条主链，再用 :doc:`publish 调用链 <publish-rcl-rmw-dds>` 比较 Cyclone/Fast DDS 两种 backend 落点。控制面进入 :doc:`DDS Discovery 与 ROS Graph <discovery-graph-cache>`，随后用 :doc:`QoS Contract <qos-contract-mapping>` 理解 offered/requested compatibility。\n\n执行面沿 :doc:`Executor/WaitSet <executor-waitset>` 与 :doc:`Reader→take→callback <receive-take-callback>` 追踪 readiness 到用户代码；内存面进入 :doc:`IntraProcessManager <intra-process-manager>` 和 :doc:`Loaned Message/Zero-copy <loaned-message-zero-copy>`。完成 :doc:`ROS1↔ROS2 架构对照 <ros1-vs-ros2-architecture>` 后，进入横向工程专题：:doc:`延迟预算 <latency-budget-comparison>`、:doc:`复制与序列化 <copy-serialization-comparison>`、:doc:`Spinner vs Executor <scheduling-comparison>`、:doc:`Queue vs History/QoS <backlog-qos-comparison>`、:doc:`Master vs DDS Discovery <discovery-failure-comparison>`。最后用 :doc:`30 Hz 视觉→1 kHz 控制链 <control-chain-case-study>` 把数据年龄、stale-data policy、CallbackGroup 与 fixed-rate control loop 放到同一条机器人闭环中。""",
+    "ros1": """从 :doc:`Runtime 总览 <overview>` 把 ROS1 分成 graph discovery、payload transport 和 callback execution 三个平面；再沿 :doc:`Master/Discovery <master-discovery>` 追 RegistrationManager、NodeRef、registerSubscriber 与 publisherUpdate，理解中心化发现为何不进入消息热路径。\n\nTopic 主线用 :doc:`Topic 建链 <topic-connection>`、:doc:`TCPROS <tcpros-transport>`、:doc:`序列化 <serialization-message>` 与 :doc:`CallbackQueue/Spinner <callback-queue-spinner>` 把发现、字节传输和用户回调拆开；随后进入 :doc:`Service RPC Runtime <service-rpc-runtime>`，理解 lookupService、ServiceServerLink/ServiceClientLink、call_queue_、condition_variable 与 persistent connection 如何实现同步 RPC。最后用 :doc:`Nodelet <nodelet-intra-process>` 解释同地址空间 no-copy，再通过 :doc:`ROS1→ROS2 <limitations-and-ros2-transition>` 建立后续 RMW/Executor 对照。""",
+    "ros2": """从 :doc:`Runtime 总览 <overview>` 建立 rclcpp → rcl → rmw → DDS 与 WaitSet/Executor 两条主链，再用 :doc:`publish 调用链 <publish-rcl-rmw-dds>`、:doc:`DDS Discovery 与 ROS Graph <discovery-graph-cache>`、:doc:`QoS Contract <qos-contract-mapping>`、:doc:`Executor/WaitSet <executor-waitset>` 与 :doc:`Reader→take→callback <receive-take-callback>` 走完 Topic 数据面。\n\nRPC 语义进入 :doc:`Service Runtime <service-client-server-runtime>`，追 request_id、pending_requests_ 与 execute_service/execute_client；长期任务再进入 :doc:`Action 协议组成 <action-protocol-composition>` 和 :doc:`Goal 状态机与 Executor <action-goal-state-executor>`，把 3 个 Service、2 个 Topic、GoalUUID、result retention 与 cancel state machine 拼成完整协议。内存面继续读 :doc:`IntraProcessManager <intra-process-manager>` 与 :doc:`Loaned Message/Zero-copy <loaned-message-zero-copy>`。完成 :doc:`ROS1↔ROS2 架构对照 <ros1-vs-ros2-architecture>` 与 :doc:`Service RPC 对照 <service-rpc-comparison>` 后，再进入延迟、复制、调度、QoS、discovery 与控制链专题。""",
     "orocos": """先从 :doc:`1 ms 控制循环的失败 <foundations>` 出发：把设备、命令与日志塞进同一个线程为什么不够；然后沿 :doc:`TaskContext 生命周期 <taskcontext-lifecycle>` 给配置、启动、异常和释放划边界。
 
 接着进入 :doc:`Activity 与 ExecutionEngine <activity-execution-engine>`，区分“任务可以运行”和“哪个 OS 线程真正执行”；再读 :doc:`Port 与 Channel <ports-channels>` 及 :doc:`Operation 线程模型 <operation-threading>`，理解样本与控制命令的不同时间语义。最后通过 :doc:`C++ 实验 <cpp-design-lab>` 验证对象寿命、虚接口和并发关闭，再对照 :doc:`RTT/ROS 集成 <case-study-rtt-ros>`。""",

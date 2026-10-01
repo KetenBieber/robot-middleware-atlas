@@ -23,9 +23,13 @@ ARTICLE_NAMES = (
     "qos-contract-mapping",
     "executor-waitset",
     "receive-take-callback",
+    "service-client-server-runtime",
+    "action-protocol-composition",
+    "action-goal-state-executor",
     "intra-process-manager",
     "loaned-message-zero-copy",
     "ros1-vs-ros2-architecture",
+    "service-rpc-comparison",
     "latency-budget-comparison",
     "copy-serialization-comparison",
     "scheduling-comparison",
@@ -94,6 +98,26 @@ REQUIRED = {
         "queue_size", "KEEP_LAST", "CallbackGroup",
         "SingleThreadedExecutor", "Age", "stale-data",
     ),
+    "service-client-server-runtime": (
+        "rmw_create_service", "rmw_create_client", "sequence_number",
+        "pending_requests_", "execute_service", "execute_client",
+        "rmw_take_request", "rmw_take_response",
+    ),
+    "service-rpc-comparison": (
+        "ServiceServerLink", "call_queue_", "request_id",
+        "pending_requests_", "CallbackQueue", "WaitSet", "persistent",
+    ),
+    "action-protocol-composition": (
+        "send_goal", "cancel_goal", "get_result",
+        "feedback", "status", "GoalUUID",
+        "pending_goal_responses", "result_requests_",
+    ),
+    "action-goal-state-executor": (
+        "GOAL_STATE_ACCEPTED", "GOAL_STATE_EXECUTING", "GOAL_STATE_CANCELING",
+        "rcl_action_transition_goal_state", "goal_results_", "result_requests_",
+        "next_ready_event", "Waitable",
+    ),
+
 }
 
 EXTRA_PINS = {
@@ -110,6 +134,11 @@ EXTRA_PINS = {
     "backlog-qos-comparison": (ROS1_PIN, RMW_DDS_COMMON_PIN),
     "discovery-failure-comparison": (ROS1_PIN, RMW_DDS_COMMON_PIN),
     "control-chain-case-study": (ROS1_PIN,),
+    "service-client-server-runtime": (RCL_PIN,),
+    "service-rpc-comparison": (ROS1_PIN, RCL_PIN),
+    "action-protocol-composition": (RCL_PIN,),
+    "action-goal-state-executor": (RCL_PIN,),
+
 }
 
 
