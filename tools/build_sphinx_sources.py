@@ -34,6 +34,7 @@ PROJECTS = {
     "libzmq": ("ZeroMQ / libzmq", "46493370217ac135246617fa2f6ac819d8b61bfc"),
     "ros1": ("ROS1 Communication Runtime", "30483a9f218f1545eec16d3934bf3cb042e2cb5b"),
     "ros2": ("ROS2 Communication Runtime", "cfdb3b7dcea4a503c0acaa304d033636beeb1dba"),
+    "rmwzenoh": ("ROS 2 rmw_zenoh Runtime", "3b5b9bf424443f9800dd148b5f1cc2053bbc37fe"),
     "ethercat": ("IgH EtherCAT Master", "61cc654f5b721ddd54df0f58bdd34106d91c5359"),
     "soem": ("SOEM", "304d1c05eab77dc0d426f1a5cf09c8cc7dc03713"),
     "cyclonedds": ("Eclipse Cyclone DDS", "e54e991f75a3e67f8e628da3171122e36ea5b872"),
@@ -65,6 +66,7 @@ PROJECT_OVERVIEWS = {
     "libzmq": """libzmq 把 socket pattern 建立在一套显式消息 Runtime 之上：msg_t 管消息存储与共享引用，pipe/ypipe 与 mailbox/command 管线程间数据面和控制面，session/engine/ZMTP 管网络协议；Context 还维护 inproc endpoint registry、socket slot 与 Reaper，monitor 把运行时状态重新编码成消息流，proxy 则在普通 socket 之上继续传播 backpressure。\n\n本专题固定到 46493370。完整主线覆盖小消息内联与大消息 fan-out、SPSC queue、HWM、owner-thread command、协议握手与重连、inproc pending bind、monitor event schema、steerable proxy，以及 linger、TERM/TERM_ACK、seqnum、Reaper DONE 共同组成的多层 shutdown barrier。""",
     "ros1": """ROS1 把机器人通信拆成三个明显的运行时平面：rosmaster 通过 XML-RPC 维护中心化 graph，节点之间再用 requestTopic 协商 TCPROS/UDPROS 数据通道，收到的 payload 最后经过 SubscriptionQueue、CallbackQueue 与 Spinner 执行业务回调。\n\n本专题固定到 ros_comm 30483a9f，并对照 roscpp_core a1a19427 与 nodelet_core 5ed9cabe。重点不是 ROS API，而是 RegistrationManager 双索引、publisherUpdate、requestTopic、TCPROS framing、Serializer<T>、有界 callback queue、Spinner 线程模型与 Nodelet intra-process ownership 怎样共同构成 ROS1 通信 Runtime，并为后续 ROS2/RMW/Executor 对照建立基线。""",
     "ros2": """ROS2 把机器人通信进一步拆成 rclcpp 应用语义、rcl C 核心、RMW 中间件契约、DDS 数据面与 Executor 执行平面。一次 publish 可能先走 IntraProcessManager，也可能进入 rcl_publish → rmw_publish → Cyclone/Fast DDS；接收方向则从 RMW readiness 进入 WaitSet、take 与 CallbackGroup。\n\n本专题固定到 rclcpp Humble cfdb3b7d，并对照 rcl cbaee7c9、rmw_dds_common e26ba107、rmw_cyclonedds e370e09c 与 rmw_fastrtps da0c2d31。重点是 RMW 分层、distributed discovery + GraphCache、QoS compatibility、Executor/WaitSet、take/callback、intra-process ownership 与 LoanedMessage/SHM capability 怎样共同决定数据年龄、复制与调度边界。""",
+    "rmwzenoh": """rmw_zenoh 展示了 ROS 2 RMW contract 如何落到一套并非 DDS/RTPS 的分布式通信模型：一个 Context 共享一个 Zenoh Session，Node/Publisher/Subscription/Service/Client 通过 liveliness token 重建 ROS Graph，Topic 使用 key expression + CDR payload + attachment，Service 则映射到 Query/Queryable。\n\n本专题固定到 rmw_zenoh 3b5b9bf4。重点不是配置 RMW_IMPLEMENTATION，而是语义适配：GraphCache 如何补齐 ROS graph、SubscriptionData 如何把 Zenoh callback 隔离到本地 queue 与 WaitSet、QoS 哪些由本地状态实现、Service 如何保存 Query correlation，以及共享 Session、liveliness token、waiter 与异步 callback 怎样形成安全 shutdown。""",
     "orocos": """Orocos RTT 围绕实时组件建立明确的执行边界。TaskContext 暴露生命周期 hooks、Operation 和 Port；Activity 提供线程与周期，ExecutionEngine 统一处理消息、端口事件和组件更新；ConnPolicy 决定数据连接使用最新值还是有界缓冲，以及采用何种同步策略。
 
 它最值得追踪的问题是“谁的线程执行这段代码”。ClientThread 与 OwnThread operation、周期与事件驱动 Activity、DATA 与 BUFFER policy 会给出完全不同的阻塞和数据年龄语义。所谓实时性最终取决于容器进度保证、hook 的最坏执行时间、OS priority/affinity 与关闭顺序能否形成闭环。""",
@@ -209,6 +211,16 @@ ARTICLE_ORDER = {
         "backlog-qos-comparison",
         "discovery-failure-comparison",
         "control-chain-case-study",
+    ],
+    "rmwzenoh": [
+        "overview",
+        "context-session-router",
+        "graph-liveliness-cache",
+        "publisher-subscription-dataflow",
+        "subscription-waitset",
+        "service-queryable-rpc",
+        "qos-events-shm",
+        "shutdown-dds-comparison",
     ],
     "ecal": [
         "foundations",
@@ -455,6 +467,7 @@ GUIDE_ORDER: dict[str, list[str]] = {
     "libzmq": [],
     "ros1": [],
     "ros2": [],
+    "rmwzenoh": [],
     "cyber": ["use-environment", "use-pubsub", "closed-loop-project", "use-component-operations", "case-study-apollo-planning"],
     "ecal": ["use-environment", "use-pubsub", "closed-loop-project", "use-operations", "case-study-mqtt-bridge"],
     "zenoh": ["use-environment", "use-pubsub-query", "use-operations", "case-study-rmw-zenoh"],
@@ -492,6 +505,7 @@ PROJECT_STORIES = {
     "libzmq": """从 :doc:`总览 <overview>` 与 :doc:`msg_t 存储 <msg-storage-refcount>` 建立消息 envelope，再沿 :doc:`Mailbox <mailbox-command-wakeup>`、:doc:`yqueue/ypipe <ypipe-yqueue-spsc>`、:doc:`Pipe/HWM <pipe-hwm-backpressure>` 和 :doc:`Socket owner <socket-command-owner>` 看数据与 command 怎样跨线程；随后插入 :doc:`inproc Endpoint Registry <inproc-endpoint-registry>`，理解同一 Context 内不用网络 fd 也仍要处理 discovery、Pipe ownership、HWM 与 seqnum。\n\n网络侧从 :doc:`I/O thread/poller <io-thread-poller>`、:doc:`Session/Engine <session-stream-engine>` 进入 :doc:`ZMTP 握手 <zmtp-handshake-mechanism>` 与 :doc:`TCP 重连 <tcp-reconnect-state-machine>`；:doc:`Monitor Event <monitor-event-observability>` 把这些状态变成结构化观测消息。再用 :doc:`FQ/LB/Distributor <fq-lb-dist-schedulers>`、:doc:`DEALER/ROUTER <dealer-router-routing>`、:doc:`PUB/SUB <pubsub-trie-distributor>` 建立 socket pattern，最后进入 :doc:`Proxy/Device <proxy-device-runtime>` 看上层 forwarding 怎样传播 backpressure。关闭阶段先读 :doc:`Linger/终止协议 <linger-termination-protocol>`，再以 :doc:`Context/Reaper <context-reaper-lifecycle>` 收束 socket slot、poller detach、异步销毁与 Context DONE join。""",
     "ros1": """从 :doc:`Runtime 总览 <overview>` 把 ROS1 分成 graph discovery、payload transport 和 callback execution 三个平面；再沿 :doc:`Master/Discovery <master-discovery>` 追 RegistrationManager、NodeRef、registerSubscriber 与 publisherUpdate，理解中心化发现为何不进入消息热路径。\n\nTopic 主线用 :doc:`Topic 建链 <topic-connection>`、:doc:`TCPROS <tcpros-transport>`、:doc:`序列化 <serialization-message>` 与 :doc:`CallbackQueue/Spinner <callback-queue-spinner>` 把发现、字节传输和用户回调拆开；随后进入 :doc:`Service RPC Runtime <service-rpc-runtime>`，理解 lookupService、ServiceServerLink/ServiceClientLink、call_queue_、condition_variable 与 persistent connection 如何实现同步 RPC。最后用 :doc:`Nodelet <nodelet-intra-process>` 解释同地址空间 no-copy，再通过 :doc:`ROS1→ROS2 <limitations-and-ros2-transition>` 建立后续 RMW/Executor 对照。""",
     "ros2": """从 :doc:`Runtime 总览 <overview>` 建立 rclcpp → rcl → rmw → DDS 与 WaitSet/Executor 两条主链，再用 :doc:`publish 调用链 <publish-rcl-rmw-dds>`、:doc:`DDS Discovery 与 ROS Graph <discovery-graph-cache>`、:doc:`QoS Contract <qos-contract-mapping>`、:doc:`Executor/WaitSet <executor-waitset>` 与 :doc:`Reader→take→callback <receive-take-callback>` 走完 Topic 数据面。\n\nRPC 语义进入 :doc:`Service Runtime <service-client-server-runtime>`，追 request_id、pending_requests_ 与 execute_service/execute_client；长期任务再进入 :doc:`Action 协议组成 <action-protocol-composition>` 和 :doc:`Goal 状态机与 Executor <action-goal-state-executor>`，把 3 个 Service、2 个 Topic、GoalUUID、result retention 与 cancel state machine 拼成完整协议。内存面继续读 :doc:`IntraProcessManager <intra-process-manager>` 与 :doc:`Loaned Message/Zero-copy <loaned-message-zero-copy>`。完成 :doc:`ROS1↔ROS2 架构对照 <ros1-vs-ros2-architecture>` 与 :doc:`Service RPC 对照 <service-rpc-comparison>` 后，再进入延迟、复制、调度、QoS、discovery 与控制链专题。""",
+    "rmwzenoh": """先从 :doc:`Runtime 总览 <overview>` 理解“RMW contract 不变、底层 primitive 全换掉”的整体映射；随后进入 :doc:`Context/Session/Router <context-session-router>`，建立共享 Session、NodeData、GraphCache 与 Router 的 ownership。控制面继续读 :doc:`Liveliness/GraphCache <graph-liveliness-cache>`，看 ROS Graph 如何从 Zenoh liveliness keyspace 重建。\n\n数据面沿 :doc:`Publisher/Subscription <publisher-subscription-dataflow>` 跟踪 CDR、attachment、weak_ptr 与 history queue，再用 :doc:`Subscription Queue/WaitSet <subscription-waitset>` 解释 lost-wakeup 防护和 Executor 边界。RPC 进入 :doc:`Service Queryable <service-queryable-rpc>`，理解 Query handle、GID+sequence correlation 与 delayed reply。最后用 :doc:`QoS/Events/SHM <qos-events-shm>` 分清 native、emulated、metadata 与 unsupported 语义，再以 :doc:`Shutdown 与 DDS-RMW 对照 <shutdown-dds-comparison>` 收束生命周期和 RMW 抽象边界。""",
     "orocos": """先从 :doc:`1 ms 控制循环的失败 <foundations>` 出发：把设备、命令与日志塞进同一个线程为什么不够；然后沿 :doc:`TaskContext 生命周期 <taskcontext-lifecycle>` 给配置、启动、异常和释放划边界。
 
 接着进入 :doc:`Activity 与 ExecutionEngine <activity-execution-engine>`，区分“任务可以运行”和“哪个 OS 线程真正执行”；再读 :doc:`Port 与 Channel <ports-channels>` 及 :doc:`Operation 线程模型 <operation-threading>`，理解样本与控制命令的不同时间语义。最后通过 :doc:`C++ 实验 <cpp-design-lab>` 验证对象寿命、虚接口和并发关闭，再对照 :doc:`RTT/ROS 集成 <case-study-rtt-ros>`。""",

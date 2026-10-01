@@ -27,6 +27,7 @@ PROJECTS = (
     "ecal",
     "lcm",
     "ros1",
+    "rmwzenoh",
     "cyclonedds",
     "fastdds",
     "zenoh",
