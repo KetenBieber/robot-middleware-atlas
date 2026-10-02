@@ -49,6 +49,11 @@ REQUIRED = {
         "payload",
         "operation_aborted",
         "reclamation",
+        "post_deferred_completions",
+        "work_cleanup",
+        "deregister_descriptor",
+        "handler_work",
+        "stop_all_threads",
     ),
 }
 

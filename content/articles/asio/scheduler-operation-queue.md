@@ -108,6 +108,8 @@ already executing handler
 
 前两者可以请求取消，最后一种只能由业务代码合作结束。
 
+这里最容易漏掉的一层，是“取消以后 work debt 怎么结算”：Reactor 并不会直接 delete pending operation，而是把它改写成 `operation_aborted` completion 再交回 Scheduler；Scheduler 又要等 completion/upcall 边界结束后才能释放对应 outstanding work。完整链路见 [Work、Lifetime 与 Cancellation](work-lifetime-cancellation.md)。
+
 ## 可迁移的最小骨架
 
 ~~~cpp

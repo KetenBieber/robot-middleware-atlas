@@ -113,6 +113,8 @@ abandon/destroy operations
 
 Kernel registration 生命周期与 userspace operation 生命周期必须分别回收。
 
+尤其要注意：`deregister_descriptor()` 可以先让 fd 脱离 epoll、把 descriptor state 标成 shutdown，再把原先 pending 的 operation 作为 `operation_aborted` deferred completion 交给 Scheduler。因此“descriptor 已关闭”和“handler 永远不会再执行”不是同一个边界；这条生命周期链在 [Work、Lifetime 与 Cancellation](work-lifetime-cancellation.md) 中单独展开。
+
 ## 可迁移原则
 
 1. OS resource 通常需要用户态 control block。
