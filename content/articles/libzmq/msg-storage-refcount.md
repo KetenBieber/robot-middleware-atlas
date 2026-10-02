@@ -349,6 +349,8 @@ VSM、constant message 和 delimiter 可以按固定表示复制；真正需要�
 
 没有匹配 Pipe 时直接释放：
 
+这里讨论的是 payload ownership；而 `dist_t` 为什么能用 matching / active / eligible 三层前缀在 O(1) membership transition 下维护当前订阅集合、背压和 multipart generation，见 [FQ / LB / DIST：Active Prefix、Multipart 原子性与消息调度器](fq-lb-dist-schedulers.md)。
+
 ~~~cpp
 if (_matching == 0) {
     int rc = msg_->close ();

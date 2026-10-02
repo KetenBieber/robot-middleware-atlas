@@ -4,6 +4,8 @@
 
 DEALER 和 ROUTER 很适合用来观察：socket pattern 的语义并不是藏在 transport 里，而是由 Pipe + scheduler + routing metadata 组合出来。
 
+其中 DEALER 直接复用 `fq_t + lb_t`；这两个调度器怎样用 active prefix、intrusive index 与 multipart transaction 维持公平性和单目标粘性，见 [FQ / LB / DIST：Active Prefix、Multipart 原子性与消息调度器](fq-lb-dist-schedulers.md)。
+
 ## DEALER 几乎就是 FQ + LB
 
 `dealer_t::xattach_pipe()` 同时执行：

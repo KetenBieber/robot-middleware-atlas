@@ -4,6 +4,8 @@
 
 PUB/SUB 的关键不是广播本身，而是：订阅状态怎样从 Subscriber 反向传播到 Publisher，再让 Publisher 只选择匹配的 pipes。
 
+这里的 Trie 只负责语义匹配；匹配后的 Pipe 怎样进入 `dist_t` 的 matching prefix、背压 Pipe 怎样退出 active/eligible 区、multipart 中途恢复的订阅者为什么只能参加下一条完整消息，见 [FQ / LB / DIST：Active Prefix、Multipart 原子性与消息调度器](fq-lb-dist-schedulers.md)。
+
 ## XPUB attach 后为什么先读订阅
 
 `xpub_t::xattach_pipe()` 先 `_dist.attach(pipe_)`，随后主动调用 `xread_activated(pipe_)`，把 pipe 中已经排队的 subscribe/cancel command 读出来。

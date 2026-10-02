@@ -1003,6 +1003,8 @@ socket/session scheduler
 
 # 十三、Pipe 是低层 Queue 与高层 Scheduler 的桥
 
+单条 `pipe_t` 只回答“这条连接当前能不能继续进展”；多条 Pipe 如何被放进 active prefix、如何 O(1) 失活/恢复、multipart 如何冻结 destination / participant set，则由 [FQ / LB / DIST：Active Prefix、Multipart 原子性与消息调度器](fq-lb-dist-schedulers.md) 负责。
+
 ## 42. ypipe 只知道
 
 ~~~text
