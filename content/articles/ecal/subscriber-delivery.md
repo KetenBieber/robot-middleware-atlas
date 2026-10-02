@@ -236,6 +236,8 @@ payload 指针从 reader layer 传入，没有在函数入口变成 owning buffe
 
 同一把 `m_receive_callback_mutex` 还有一个可直接复现的重入死锁：业务 callback 里发现机器人进入急停，就调用 `sub.RemoveReceiveCallback()` 试图立刻停用自己。`ApplySample()` 尚未返回，仍持有这把普通、非递归的 `std::mutex`；`RemoveReceiveCallback()` 又尝试锁它，于是当前线程等待自己释放锁，callback 无法返回，后续该 Subscriber 的 UDP/TCP/SHM 数据和关闭清理都可能停住。源码可对照 `CSubscriber::RemoveReceiveCallback()` 与 `CSubscriberImpl::RemoveReceiveCallback()`：公开句柄先 `weak_ptr::lock()`，实现函数随后正好锁 `m_receive_callback_mutex`。安全做法是 callback 只记录/排入“停用订阅”的控制请求，让另一条控制线程在 callback 返回后调用移除接口。不能换成递归锁来掩盖问题，因为那只允许同线程再次进入，不会解决 callback 与 transport teardown 的职责交叠。
 
+这里真正需要区分的是“锁外执行用户代码”和“注销返回时已经静默”两种不同保证。后者还需要显式 in-flight drain；完整模型见 [Callback 重入与 Quiescence](callback-reentrancy-quiescence.md)。
+
 ## 同一 Subscriber 的 callback 串行
 
 `receive_callback_mutex` 覆盖 ApplySample 的主要处理过程。即使 UDP、TCP 和 SHM 在不同线程同时到达，同一 SubscriberImpl 也一次只处理一条样本。
