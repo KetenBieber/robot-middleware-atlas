@@ -78,6 +78,8 @@ _poller->set_pollin (_mailbox_handle);
 
 于是同一个 I/O owner 可以同时等待网络 fd、timer 和跨线程 command。
 
+真正关键的不只是“mailbox 有一个可 poll 的 fd”，而是 writer publish、reader sleep registration 与 wake decision 被 `ypipe::_c` 的 CAS 串成同一个 lost-wakeup-safe handoff；多个 sender 再由 `_sync` 串成一个逻辑 writer。完整协议见 [Mailbox：跨线程 Command、Lost Wakeup 与 Owner-Thread 执行模型](mailbox-command-wakeup.md)。
+
 ## Session 是消息世界与 transport 世界的边界
 
 `session_base_t` 一边读写内部 pipe，一边挂接 transport engine。Engine 才真正拥有 OS fd、non-blocking I/O、encoder/decoder、handshake、heartbeat 与 framing。

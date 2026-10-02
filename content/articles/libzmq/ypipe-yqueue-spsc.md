@@ -13,6 +13,8 @@ exactly one logical reader
 
 在 libzmq mailbox 中，多个真实 sender 会先经过 mutex，被串行化成一个 logical writer，然后才进入 `ypipe_t`。
 
+Mailbox 场景里 `_c == nullptr` 还有一个更强的含义：它是 reader 已完成 empty check、正式登记为 passive 的跨线程状态。writer 的 `flush()` 与 reader 的 `check_read()` 在同一个 CAS 点竞争，从而关闭“queue empty → producer publish → consumer sleep”的 lost-wakeup 窗口；这一层与 signaler/poller 如何连接，见 [Mailbox：跨线程 Command、Lost Wakeup 与 Owner-Thread 执行模型](mailbox-command-wakeup.md)。
+
 ## 一个 ypipe 实例里哪些字段属于谁
 
 一只 `ypipe_t<T, N>` 只有一个对象实例：

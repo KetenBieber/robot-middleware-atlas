@@ -20,6 +20,8 @@ process_command()
 
 只看执行权，这个模型已经很漂亮：foreign thread 不直接修改目标对象的大量 mutable state，而是把状态迁移送回 owner thread。
 
+这条命令真正怎样安全进入 owner thread——包括 MPSC sender 如何被串成 SPSC writer、`_c` 怎样同时编码 publication boundary 与 reader passive state、以及 signaler 为什么只在被动读者需要唤醒时才写 fd——见 [Mailbox：跨线程 Command、Lost Wakeup 与 Owner-Thread 执行模型](mailbox-command-wakeup.md)。
+
 但它马上带来一个更困难的问题：
 
 > command 已经发出、还没有被 owner thread 处理时，目标对象能不能先析构？

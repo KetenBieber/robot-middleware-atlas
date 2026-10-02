@@ -36,7 +36,21 @@ REQUIRED = {
     "msg-storage-refcount": (
         "msg_t_size", "max_vsm_size", "add_refs", "rm_refs", "dist_t"
     ),
-    "mailbox-command-wakeup": ("mailbox_t", "signaler", "ypipe", "mutex"),
+    "mailbox-command-wakeup": (
+        "mailbox_t",
+        "signaler",
+        "ypipe",
+        "mutex",
+        "_c == NULL",
+        "lost wakeup",
+        "compare_exchange_strong",
+        "memory_order_acq_rel",
+        "ctx_t::_slots",
+        "process_command",
+        "PASSIVE",
+        "doorbell",
+        "mailbox_safe_t",
+    ),
     "ypipe-yqueue-spsc": ("ypipe", "yqueue", "_c", "flush"),
     "pipe-hwm-backpressure": (
         "HWM", "_out_active", "_msgs_written", "activate_write"

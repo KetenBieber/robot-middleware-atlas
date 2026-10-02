@@ -105,6 +105,8 @@ this == io_thread_t
 io_thread_t::in_event()
 ~~~
 
+这只 fd 只是 doorbell。真正的 command 保存在 `mailbox_t::_cpipe`，而是否需要 ring doorbell 由 `ypipe::flush()` 对 reader passive state 的 CAS 结果决定；因此 poller wakeup 与 command publication 并不是两个独立动作。完整交接协议见 [Mailbox：跨线程 Command、Lost Wakeup 与 Owner-Thread 执行模型](mailbox-command-wakeup.md)。
+
 普通网络 fd 的 event sink 则通常是：
 
 ~~~text
