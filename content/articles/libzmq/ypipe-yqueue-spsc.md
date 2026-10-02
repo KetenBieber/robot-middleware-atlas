@@ -15,6 +15,8 @@ exactly one logical reader
 
 Mailbox 场景里 `_c == nullptr` 还有一个更强的含义：它是 reader 已完成 empty check、正式登记为 passive 的跨线程状态。writer 的 `flush()` 与 reader 的 `check_read()` 在同一个 CAS 点竞争，从而关闭“queue empty → producer publish → consumer sleep”的 lost-wakeup 窗口；这一层与 signaler/poller 如何连接，见 [Mailbox：跨线程 Command、Lost Wakeup 与 Owner-Thread 执行模型](mailbox-command-wakeup.md)。
 
+当同一套 ypipe 被用于真正的消息数据面时，`pipe_t` 又在其上叠加完整 message 计数、HWM/LWM、active/inactive 调度资格、multipart publication 和异步终止协议。也就是说，ypipe 只提供“发布与睡眠边界”，上层怎样把“无数据/无容量”变成调度状态，要继续看 [Pipe 与 HWM：Backpressure、Progress Feedback 与异步关闭状态机](pipe-hwm-backpressure.md)。
+
 ## 一个 ypipe 实例里哪些字段属于谁
 
 一只 `ypipe_t<T, N>` 只有一个对象实例：

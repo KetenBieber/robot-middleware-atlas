@@ -4,6 +4,8 @@
 
 ZeroMQ 的 socket pattern 并不是每个类型都从零实现。真正复用度很高的是三种调度器：`fq_t` 负责输入公平队列，`lb_t` 负责输出负载均衡，`dist_t` 负责一对多分发。
 
+这些调度器里的 `_active` / `_eligible` 并不是自己凭空判断 pipe 是否可用：底层 `pipe_t` 在 queue empty 或 HWM 命中时把 endpoint 标成 inactive，peer 通过 `activate_read` / `activate_write` 再把它恢复。容量事实如何跨线程传播并最终改变这些 active prefix，见 [Pipe 与 HWM：Backpressure、Progress Feedback 与异步关闭状态机](pipe-hwm-backpressure.md)。
+
 ## fq_t：从多个 Pipe 公平读取
 
 `fq_t` 维护 `_pipes / _active / _current / _more`。active pipes 被放在数组前半段，inactive pipes 被交换到后半段。

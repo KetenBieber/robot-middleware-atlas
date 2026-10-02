@@ -1,94 +1,136 @@
-# Pipe 与 HWM：Backpressure、双向通道与异步关闭状态机
+# Pipe 与 HWM：Backpressure、Progress Feedback 与异步关闭状态机
 
 固定源码版本：`46493370217ac135246617fa2f6ac819d8b61bfc`。
 
-`ypipe_t` 只解决“一个 writer 怎样把完整 item 发布给一个 reader”。ZeroMQ socket 还需要更高一层对象来表达：双向 endpoint、multipart message、容量、恢复通知、routing metadata、断连以及异步销毁。这个对象就是 `pipe_t`。
+`ypipe_t` 解决的是一个更底层的问题：
 
-因此 `pipe_t` 不是“再包一层 queue”。它已经是一只小型通信状态机。
+> 一个 logical writer 怎样把完整 item 发布给一个 logical reader。
 
-## pipepair 里到底有几个对象
+但 ZeroMQ 的 socket runtime 还需要表达：
 
-`pipepair()` 创建：
+- 双向 endpoint；
+- 多个 pending message；
+- multipart 原子性；
+- 容量上限；
+- producer 暂停；
+- consumer progress 回授；
+- producer 恢复；
+- socket pattern 调度集合；
+- 跨线程 control command；
+- linger / drain；
+- 双端异步终止。
 
-~~~text
-2 x pipe_t endpoint
-2 x unidirectional ypipe
-~~~
+这一层由 `pipe_t` 承担。
 
-对象关系：
-
-~~~text
-               direction 0 -> 1
-        +-------------------------------->
-        |           upipe1
-        |
-   pipe[0]                              pipe[1]
-        |                                  |
-        |           upipe2                 |
-        +<---------------------------------+
-               direction 1 -> 0
-~~~
-
-两个 endpoint 各自保存：
+所以 `pipe_t` 不应理解成：
 
 ~~~text
-_in_pipe
-_out_pipe
-_peer
+ypipe wrapper
 ~~~
 
-而且它们是交叉连接的：
+而更接近：
+
+> **一条跨线程 message channel 的 resource-local flow-control state machine。**
+
+它同时把：
 
 ~~~text
-pipe[0]._in_pipe  == upipe1
-pipe[1]._out_pipe == upipe1
-
-pipe[1]._in_pipe  == upipe2
-pipe[0]._out_pipe == upipe2
+data plane
+control plane
+capacity accounting
+scheduler eligibility
+lifecycle
 ~~~
 
-固定源码中的构造关系：
+压进一个稳定的 endpoint 对象里。
+
+---
+
+# 一、先建立完整对象图
+
+## 1. pipepair() 创建的不是“一条双向队列”
+
+源码：
 
 ~~~cpp
-pipes_[0] =
-  new pipe_t (parents_[0],
-              upipe1,
-              upipe2,
-              hwms_[1],
-              hwms_[0],
-              conflate_[0]);
-
-pipes_[1] =
-  new pipe_t (parents_[1],
-              upipe2,
-              upipe1,
-              hwms_[0],
-              hwms_[1],
-              conflate_[1]);
+pipepair(
+  object_t *parents_[2],
+  pipe_t *pipes_[2],
+  const int hwms_[2],
+  const bool conflate_[2])
 ~~~
 
-双向通信没有要求底层 queue 变成“双向队列”；而是组合两条单向 SPSC channel。
-
-## 每个 endpoint 属于谁
-
-`pipe_t` 继承 `object_t`，因此有所属 thread id。peer endpoint 可以属于另一个线程。
-
-典型关系：
+实际创建：
 
 ~~~text
-socket/application owner thread
-    |
-    +-- pipe endpoint A
-           |
-           | command passing
-           v
-    +-- pipe endpoint B
-         session / I/O owner thread
+2 × pipe_t endpoint
+2 × unidirectional queue
 ~~~
 
-两个 endpoint 不应该直接跨线程任意修改对方内部字段。
+关系：
 
-需要让 peer 改状态时，使用 `object_t::send_*()` command：
+~~~text
+                 direction 0 → 1
+      +----------------------------------+
+      |                                  |
+      |              upipe1              |
+      v                                  |
+   pipe[0]                            pipe[1]
+      |                                  ^
+      |              upipe2              |
+      +----------------------------------+
+                 direction 1 → 0
+~~~
+
+即：
+
+~~~text
+pipe[0]._in_pipe  = upipe1
+pipe[1]._out_pipe = upipe1
+
+pipe[1]._in_pipe  = upipe2
+pipe[0]._out_pipe = upipe2
+~~~
+
+双向通信不是靠一个“双向并发容器”实现，而是：
+
+~~~text
+two one-way ownership channels
+~~~
+
+组合出来的。
+
+---
+
+## 2. 为什么两个 endpoint 要分开
+
+因为两端可以属于不同 execution domain：
+
+~~~text
+application/socket owner thread
+        |
+        +-- pipe endpoint A
+                ||
+                || two ypipes
+                ||
+        +-- pipe endpoint B
+                |
+          session / I/O owner thread
+~~~
+
+每一端都只直接修改自己的：
+
+- `_in_active`；
+- `_out_active`；
+- `_msgs_read`；
+- `_msgs_written`；
+- `_peers_msgs_read`；
+- `_state`；
+- `_sink`。
+
+需要改变 peer 状态时，不跨线程直接写 peer 字段。
+
+而是：
 
 ~~~text
 send_activate_read(peer)
@@ -96,99 +138,86 @@ send_activate_write(peer, msgs_read)
 send_pipe_term(peer)
 send_pipe_term_ack(peer)
 send_hiccup(peer, ...)
+send_pipe_hwm(peer, ...)
 ~~~
 
-所以：
+通过 command/mailbox 返回 peer owner thread。
+
+---
+
+## 3. Pipe 内部同时存在 Data Plane 与 Control Plane
+
+数据面：
 
 ~~~text
+msg_t
+  ↓
 ypipe
-  -> data plane
-
-object command/mailbox
-  -> control plane
+  ↓
+peer pipe
 ~~~
 
-这两条路径在 `pipe_t` 中汇合。
-
-## _in_active / _out_active 不是“连接是否存在”
-
-成员：
+控制面：
 
 ~~~text
-_in_active
-_out_active
+command_t
+  ↓
+mailbox
+  ↓
+peer owner thread
+  ↓
+peer pipe::process_*
 ~~~
 
-表示当前 endpoint 是否值得继续尝试 read/write。
+这两个面有不同职责。
 
-### input 读空
+数据面传：
 
-`check_read()`：
+~~~text
+business payload
+delimiter
+routing frames
+~~~
+
+控制面传：
+
+~~~text
+activation
+termination
+HWM update
+hiccup
+stats
+~~~
+
+---
+
+# 二、真正的背压不是“queue.size() >= HWM”
+
+## 4. 最朴素的容量检查为什么很诱人
+
+很多人第一反应：
 
 ~~~cpp
-if (!_in_pipe->check_read ()) {
-    _in_active = false;
+if (queue.size() >= hwm)
     return false;
-}
 ~~~
 
-底层 ypipe 已进入 passive 后，继续反复 polling 同一 pipe 没有意义。
+但跨线程 SPSC queue 中，这个思路有几个问题：
 
-状态变成：
+- writer 要读取 reader 正在热更新的 size；
+- size 可能需要额外共享原子状态；
+- cache line 在两核间频繁 bouncing；
+- multipart frame 数不等于业务 message 数；
+- queue implementation 可能并没有便宜且一致的 size；
+- consumer progress 不需要每条 message 都实时同步给 producer。
 
-~~~text
-in_active = false
-~~~
+libzmq 选择了另一种模型。
 
-等 peer 新 publish 数据时，通过：
+---
 
-~~~text
-activate_read command
-~~~
+## 5. 三个单调计数
 
-重新激活。
-
-### output 达到 HWM
-
-`check_write()`：
-
-~~~cpp
-if (unlikely (!_out_active || _state != active))
-    return false;
-
-const bool full = !check_hwm ();
-
-if (unlikely (full)) {
-    _out_active = false;
-    return false;
-}
-~~~
-
-达到容量边界以后：
-
-~~~text
-out_active = false
-~~~
-
-调用方不应该继续热循环尝试写。等 reader 消费足够多，再通过 `activate_write` 恢复。
-
-因此 active flag 的含义更接近：
-
-~~~text
-“当前有进展可能吗？”
-~~~
-
-而不是：
-
-~~~text
-“物理连接还活着吗？”
-~~~
-
-## HWM 不是 queue.size()
-
-`pipe_t` 不通过跨线程读取底层容器 size 来计算容量。
-
-它维护三个单调计数：
+每个 pipe endpoint维护：
 
 ~~~text
 _msgs_written
@@ -196,216 +225,365 @@ _msgs_read
 _peers_msgs_read
 ~~~
 
-writer 估计的 outstanding：
+语义：
 
 ~~~text
-_msgs_written - _peers_msgs_read
+_msgs_written
+= 本端成功提交了多少个完整 outbound message
+
+_msgs_read
+= 本端已经消费了多少个完整 inbound message
+
+_peers_msgs_read
+= 最近一次从 peer 收到的：
+  peer 已经消费多少 outbound message
 ~~~
 
-HWM 判断：
+---
+
+## 6. Writer 估计 Outstanding
+
+writer 不直接看 queue size。
+
+而是：
+
+\[
+Q_{\text{estimated}}
+=
+\texttt{\_msgs\_written}
+-
+\texttt{\_peers\_msgs\_read}
+\]
+
+源码：
 
 ~~~cpp
 const bool full =
   _hwm > 0
-  && _msgs_written - _peers_msgs_read >= uint64_t (_hwm);
+  && _msgs_written
+       - _peers_msgs_read
+     >= uint64_t(_hwm);
 ~~~
 
-这里 `_peers_msgs_read` 只是 peer 最近一次上报的进度，可能落后于 reader 的真实 `_msgs_read`。
+---
 
-因此 writer 使用的是一个保守视图：
+## 7. 这不是精确 Queue Occupancy
+
+因为：
 
 ~~~text
-peer may have consumed more
-but writer only trusts last reported progress
+_peers_msgs_read
 ~~~
 
-这种设计避免 writer 为了拿到精确 queue size 而不断读取 reader 热状态。
+只是最近一次收到的 consumer progress。
 
-## 为什么计数按完整 message，而不是每个 frame
-
-ZeroMQ 支持 multipart message：
+真实 peer 可能已经：
 
 ~~~text
+读了更多
+~~~
+
+但还没有发送下一条 `activate_write`。
+
+所以：
+
+\[
+Q_{\text{estimated}}
+\ge
+Q_{\text{actual}}
+\]
+
+通常是一个保守上界或至少不比已知进度更乐观。
+
+---
+
+## 8. 为什么 Conservative View 很合理
+
+容量控制最危险的是：
+
+~~~text
+低估 backlog
+~~~
+
+因为会继续放量。
+
+高估 backlog 的后果只是：
+
+~~~text
+writer 多停一会儿
+~~~
+
+所以跨线程背压宁愿：
+
+~~~text
+slightly conservative
+~~~
+
+也不必追求：
+
+~~~text
+every-message exact shared counter
+~~~
+
+---
+
+# 三、为什么 HWM 按“完整 Message”计数
+
+## 9. ZeroMQ 的 Data Unit 不是单个 Frame
+
+multipart：
+
+~~~text
+frame 0 [more]
 frame 1 [more]
-frame 2 [more]
-frame 3 [last]
+frame 2 [last]
 ~~~
 
-`write()`：
+逻辑上是一条 message。
+
+如果 HWM 按 frame：
+
+~~~text
+一个 20-frame multipart
+≈ 20 个普通 message
+~~~
+
+会改变 socket pattern 的业务容量语义。
+
+---
+
+## 10. write() 只在完整 Message 末尾增加 `_msgs_written`
+
+源码：
 
 ~~~cpp
-const bool more = (msg_->flags () & msg_t::more) != 0;
-const bool is_routing_id = msg_->is_routing_id ();
+const bool more =
+  (msg_->flags() & msg_t::more) != 0;
 
-_out_pipe->write (*msg_, more);
+const bool is_routing_id =
+  msg_->is_routing_id();
+
+_out_pipe->write(*msg_, more);
 
 if (!more && !is_routing_id)
     _msgs_written++;
 ~~~
 
-只有最后一帧才把 `_msgs_written` 加一。
+所以中间帧：
 
-read side 同样：
+~~~text
+不计数
+~~~
+
+最后一帧：
+
+~~~text
++1 message
+~~~
+
+---
+
+## 11. read() 同样只在最后一帧增加 `_msgs_read`
 
 ~~~cpp
-if (!(msg_->flags () & msg_t::more) && !msg_->is_routing_id ())
+if (!(msg_->flags() & msg_t::more)
+    && !msg_->is_routing_id())
+{
     _msgs_read++;
+}
 ~~~
 
-所以 HWM 的业务单位是“完整 message”，而不是底层 frame 数。
+因此两端计数单位一致。
 
-如果一条 multipart message 有 20 frame，不能因为写到第 10 frame 就把它当成 10 条独立业务消息参与 backpressure。
+---
 
-## write(false) 为什么必须保留消息 ownership
+## 12. Routing ID 也不进入普通消息计数
 
-`pipe.hpp` 的契约写得很明确：
+routing metadata：
 
 ~~~text
-write() returns false
--> message object retains ownership of its message buffer
+不是业务 message
 ~~~
 
-这让上层可以继续决定：
+所以被排除。
 
-~~~text
-try pipe A
-if full:
-    try pipe B
+否则 ROUTER/DEALER 等内部 routing frame 会污染 backpressure accounting。
+
+---
+
+# 四、HWM 的第一步不是“拒绝 write”，而是改变 Pipe State
+
+## 13. check_write()
+
+~~~cpp
+if (!_out_active
+    || _state != active)
+    return false;
+
+if (!check_hwm())
+{
+    _out_active = false;
+    return false;
+}
+
+return true;
 ~~~
 
-或者：
-
-~~~text
-return EAGAIN
-drop according to policy
-retry later
-~~~
-
-失败并不意味着底层偷偷接管了 payload。
-
-容量契约如果不同时定义 ownership，调用者就无法知道失败后还能不能安全重试或销毁消息。
-
-## HWM 为什么会让 writer 停下来
-
-假设：
-
-~~~text
-HWM = 1000
-_msgs_written = 5000
-_peers_msgs_read = 4000
-~~~
-
-那么：
-
-~~~text
-outstanding = 1000
-~~~
-
-达到 HWM，`check_write()` 失败，并设置：
+当 HWM 命中：
 
 ~~~text
 _out_active = false
 ~~~
 
-后续 selector / scheduler 可以把这条 pipe 从 writable candidate 中排除，而不是让它不断：
+这是关键。
+
+---
+
+## 14. 为什么必须把 Full 变成状态
+
+如果每次上层 scheduler 都继续尝试：
 
 ~~~text
-check
-fail
-check
-fail
-check
-fail
-~~~
+pipe.write()
+→ HWM full
+→ false
 
-backpressure 不只存在于计数器里，而是进入上层调度状态。
-
-## LWM 为什么不是 HWM - 1
-
-read side 每消费一定数量才上报：
-
-~~~cpp
-if (_lwm > 0 && _msgs_read % _lwm == 0)
-    send_activate_write (_peer, _msgs_read);
-~~~
-
-`compute_lwm()` 中的源码注释明确解释为什么不能选极端值。
-
-### LWM 太低
-
-如果恢复阈值要求几乎把队列清空：
-
-~~~text
-writer fills queue
-reader drains almost all
-writer restarts very late
-~~~
-
-吞吐会形成明显空洞。
-
-### LWM 太高
-
-例如：
-
-~~~text
-LWM = HWM - 1
-~~~
-
-会出现 lock-step：
-
-~~~text
-queue full
-reader consumes 1
-wake writer
-writer writes 1
-queue full
-sleep writer
-reader consumes 1
-wake writer
+pipe.write()
+→ HWM full
+→ false
 ...
 ~~~
 
-跨线程 command 与调度切换会暴涨。
+就变成：
 
-固定源码采用：
+~~~text
+busy retry
+~~~
+
+浪费 CPU。
+
+---
+
+## 15. Backpressure 要进入 Scheduler Eligibility
+
+`_out_active=false` 以后，
+
+上层 load balancer / distributor 会把这条 pipe 从 active set 移出。
+
+所以真正传播链是：
+
+~~~text
+capacity full
+    ↓
+pipe out_active = false
+    ↓
+socket scheduler sees write failure
+    ↓
+pipe leaves active candidate set
+~~~
+
+不是只返回一个局部 `false`。
+
+---
+
+# 五、Load Balancer 怎样消费 `_out_active`
+
+## 16. lb_t::has_out()
 
 ~~~cpp
-const int result = (hwm_ + 1) / 2;
+while (_active > 0)
+{
+    if (_pipes[_current]
+          ->check_write())
+        return true;
+
+    _active--;
+
+    _pipes.swap(
+      _current,
+      _active);
+
+    ...
+}
 ~~~
 
-即大致半个 HWM。
-
-## HWM/LWM 实际上形成 hysteresis
-
-容量状态不是：
+如果某 pipe 已 full：
 
 ~~~text
-full -> consume one -> writable
+check_write() → false
 ~~~
 
-而更像：
+它被移动到 inactive segment。
+
+---
+
+## 17. Active Set 是 O(1) Partition
+
+`lb_t` 不需要：
 
 ~~~text
-writer active
-   |
-   | outstanding reaches HWM
-   v
-writer inactive
-   |
-   | reader consumes a batch
-   | progress reaches LWM reporting boundary
-   v
-activate_write
-   |
-   v
-writer active
+std::set<writable_pipe>
 ~~~
 
-暂停和恢复不是同一个瞬时边界，避免系统在“刚满/刚不满”附近高频抖动。
+它维护：
 
-## activate_write 为什么传 msgs_read
+~~~text
+_pipes[0 .. _active-1]
+= active
 
-peer 不只是发一个“可以写了”布尔通知。
+_pipes[_active .. end)
+= inactive
+~~~
+
+通过 swap 调整 membership。
+
+---
+
+## 18. Backpressure 因此直接改变数据结构分区
+
+这很重要：
+
+> **容量状态最终必须影响调度数据结构，而不是只存在于一个 counter 里。**
+
+---
+
+# 六、Reader Progress 怎样反馈给 Writer
+
+## 19. Consumer 每读一条完整 Message
+
+~~~text
+_msgs_read++
+~~~
+
+但不是每次都 command peer。
+
+---
+
+## 20. 只有达到 LWM Reporting Boundary 才回授
+
+源码：
+
+~~~cpp
+if (_lwm > 0
+    && _msgs_read % _lwm == 0)
+{
+    send_activate_write(
+      _peer,
+      _msgs_read);
+}
+~~~
+
+所以：
+
+~~~text
+consumer progress
+~~~
+
+是批量发送的。
+
+---
+
+## 21. `activate_write` 不只是一个 Bool Wakeup
 
 command 携带：
 
@@ -413,81 +591,449 @@ command 携带：
 msgs_read
 ~~~
 
-接收端：
+也就是容量事实。
+
+peer 收到：
 
 ~~~cpp
-void pipe_t::process_activate_write (uint64_t msgs_read_)
+void pipe_t::process_activate_write(
+  uint64_t msgs_read)
 {
-    _peers_msgs_read = msgs_read_;
+    _peers_msgs_read =
+      msgs_read;
 
-    if (!_out_active && _state == active) {
+    if (!_out_active
+        && _state == active)
+    {
         _out_active = true;
-        _sink->write_activated (this);
+        _sink->write_activated(this);
     }
 }
 ~~~
 
-先更新 capacity truth，再通知上层 sink：
+顺序很关键：
 
 ~~~text
-peer progress becomes visible
-        ↓
-out_active = true
-        ↓
-sink->write_activated(this)
+1. update peer progress truth
+2. mark output active
+3. notify scheduler
 ~~~
 
-notification 不是容量事实本身；`_peers_msgs_read` 才是后续 `check_hwm()` 所使用的事实。
+---
 
-这与 mailbox 的“data != wakeup”原则一致。
+## 22. 为什么不能只发 `writable=true`
 
-## activate_read 怎样从 ypipe passive 状态向上传播
+因为 writer 后续 `check_hwm()` 仍然需要知道：
 
-`pipe_t::flush()`：
+~~~text
+到底消费到了哪里
+~~~
+
+如果只发：
+
+~~~text
+wake
+~~~
+
+却不更新：
+
+~~~text
+_peers_msgs_read
+~~~
+
+下一次 `check_hwm()` 仍然会认为 full。
+
+---
+
+# 七、LWM 本质上是 Progress Feedback Batch Size
+
+## 23. compute_lwm()
 
 ~~~cpp
-if (_out_pipe && !_out_pipe->flush ())
-    send_activate_read (_peer);
+const int result =
+  (hwm + 1) / 2;
 ~~~
 
-底层 ypipe 返回 `false`：
+大致：
+
+\[
+LWM \approx \frac{HWM}{2}
+\]
+
+---
+
+## 24. 为什么不是 1
+
+如果：
 
 ~~~text
-reader sleeping/passive
+每读 1 条
+→ activate_write
 ~~~
 
-pipe 将这个低层状态翻译成跨线程 command：
+那 consumer progress 反馈会变成：
 
 ~~~text
-ypipe publication
-  |
-  | reader passive
-  v
+1 message
+≈
+1 cross-thread command
+~~~
+
+控制面开销过大。
+
+---
+
+## 25. 为什么不是 HWM
+
+如果 reader 必须：
+
+~~~text
+整批清空
+~~~
+
+才通知 writer：
+
+~~~text
+producer idle 时间太长
+~~~
+
+吞吐形成明显空洞。
+
+---
+
+## 26. 为什么不是 HWM - 1
+
+源码注释直接描述了 lock-step：
+
+~~~text
+full
+→ reader consumes one
+→ wake writer
+→ writer writes one
+→ full
+→ sleep
+→ reader consumes one
+→ wake
+...
+~~~
+
+结果：
+
+~~~text
+one message
+≈
+one thread handoff
+~~~
+
+同样很差。
+
+---
+
+# 八、HWM/LWM 形成的是 Hysteresis，而不是单阈值
+
+## 27. 状态机
+
+~~~text
+WRITABLE
+   |
+   | estimated backlog reaches HWM
+   v
+BLOCKED
+   |
+   | reader reports batch progress
+   v
+REACTIVATED
+~~~
+
+暂停和恢复不是在同一个瞬时边界反复切换。
+
+---
+
+## 28. 为什么 Hysteresis 对 Runtime 很重要
+
+没有滞回：
+
+~~~text
+99
+100 full
+99 writable
+100 full
+99 writable
+~~~
+
+会导致：
+
+- command storm；
+- scheduler membership churn；
+- cache line churn；
+- thread handoff；
+- latency jitter。
+
+---
+
+## 29. 与控制系统里的滞回完全同构
+
+例如温控：
+
+~~~text
+> 30°C 开
+< 28°C 关
+~~~
+
+而不是：
+
+~~~text
+29.999 / 30.001
+不停抖
+~~~
+
+背压也是一种离散控制系统。
+
+---
+
+# 九、为什么 `_peers_msgs_read` 是 Owner-local 普通字段
+
+## 30. Peer 不跨线程直接写它
+
+peer：
+
+~~~text
+send_activate_write(...)
+~~~
+
+目标 owner thread：
+
+~~~text
+process_activate_write(...)
+→ _peers_msgs_read = msgs_read
+~~~
+
+所以：
+
+~~~text
+_peers_msgs_read
+~~~
+
+只在本 endpoint owner thread 中更新和读取。
+
+---
+
+## 31. 不需要 Atomic Shared Counter
+
+这是 owner-thread 架构的直接收益：
+
+~~~text
+peer progress transfer
+→ command message
+
+local state
+→ ordinary uint64_t
+~~~
+
+而不是：
+
+~~~text
+shared atomic<size_t> queue_size
+~~~
+
+---
+
+# 十、容量 Truth 与 Wakeup Hint 再次被分开
+
+## 32. `msgs_read` 是 Truth
+
+~~~text
+peer consumed N messages
+~~~
+
+这是后续 HWM 判断的输入。
+
+---
+
+## 33. `write_activated()` 是 Scheduling Hint
+
+~~~text
+这条 pipe 值得重新放回 scheduler active set
+~~~
+
+不是容量事实本身。
+
+---
+
+## 34. 顺序必须是 Truth-first
+
+~~~text
+update _peers_msgs_read
+        ↓
+_out_active = true
+        ↓
+sink->write_activated()
+~~~
+
+否则上层一收到 activation，立刻尝试 write，
+
+但容量状态还没更新：
+
+~~~text
+又被判 full
+~~~
+
+---
+
+# 十一、read-side Active 与 write-side Active 是两种不同状态
+
+## 35. `_in_active`
+
+表示：
+
+~~~text
+当前继续尝试 read 是否可能有进展
+~~~
+
+---
+
+## 36. `_out_active`
+
+表示：
+
+~~~text
+当前继续尝试 write 是否可能有进展
+~~~
+
+---
+
+## 37. 它们不是“连接 alive”
+
+即使：
+
+~~~text
+_in_active=false
+~~~
+
+pipe 仍然存在。
+
+只是：
+
+~~~text
+当前 queue empty
+等 peer 下一次 publish
+~~~
+
+---
+
+# 十二、Read Empty 怎样变成跨线程 Activation
+
+## 38. check_read()
+
+~~~cpp
+if (!_in_pipe->check_read())
+{
+    _in_active = false;
+    return false;
+}
+~~~
+
+`ypipe::check_read()` 在空时：
+
+~~~text
+reader enters passive protocol
+~~~
+
+---
+
+## 39. Writer flush()
+
+~~~cpp
+if (_out_pipe
+    && !_out_pipe->flush())
+{
+    send_activate_read(_peer);
+}
+~~~
+
+`flush()==false` 表示：
+
+~~~text
+reader passive
+~~~
+
+于是发送 control command。
+
+---
+
+## 40. Peer Owner Thread
+
+~~~cpp
+void pipe_t::process_activate_read()
+{
+    if (!_in_active
+        && valid_state)
+    {
+        _in_active = true;
+        _sink->read_activated(this);
+    }
+}
+~~~
+
+---
+
+## 41. 完整 Read Wake Chain
+
+~~~text
+writer publishes message
+        ↓
+ypipe detects reader passive
+        ↓
 send_activate_read(peer)
-  |
-  v
+        ↓
+peer mailbox
+        ↓
 peer owner thread
-  |
-  v
+        ↓
 process_activate_read()
-  |
-  v
-_sink->read_activated(this)
+        ↓
+_in_active = true
+        ↓
+socket/session scheduler
 ~~~
 
-所以 wakeup 是逐层传播的：
+这是把底层 SPSC wakeup 提升成高层 scheduler activation。
+
+---
+
+# 十三、Pipe 是低层 Queue 与高层 Scheduler 的桥
+
+## 42. ypipe 只知道
 
 ~~~text
-atomic SPSC state
--> object command
--> socket/session scheduler event
+data / no data
+reader active / passive
 ~~~
 
-## i_pipe_events 把 pipe 与上层策略解耦
+---
 
-`pipe_t` 不直接知道 ROUTER、DEALER、PUB、SUB 应该怎样重新调度。
+## 43. socket pattern scheduler 只想知道
 
-它只向 `i_pipe_events` 报告：
+~~~text
+这个 pipe 是否可调度
+~~~
+
+---
+
+## 44. pipe_t 负责翻译
+
+~~~text
+low-level queue condition
+→ high-level runtime event
+~~~
+
+这就是 control object 的价值。
+
+---
+
+# 十四、i_pipe_events 把 Mechanism 与 Policy 分开
+
+## 45. Pipe 只发四类事件
 
 ~~~cpp
 read_activated(pipe_t*)
@@ -496,70 +1042,941 @@ hiccuped(pipe_t*)
 pipe_terminated(pipe_t*)
 ~~~
 
-具体 socket pattern 再决定：
+---
 
-~~~text
-readable pipe 放回哪种 scheduler
-writable pipe 放回哪种 load balancer
-terminated pipe 从哪些 containers 移除
-~~~
+## 46. Pipe 不知道 DEALER 怎样调度
 
-底层 pipe 管机制，上层 socket pattern 管策略。
-
-## rollback() 为什么只撤销 unfinished multipart
-
-writer 可能已经写入：
-
-~~~text
-frame A [more]
-frame B [more]
-~~~
-
-但完整消息还没有最后一帧。
-
-`rollback()`：
+`dealer_t`：
 
 ~~~cpp
-while (_out_pipe->unwrite (&msg)) {
-    zmq_assert (msg.flags () & msg_t::more);
-    const int rc = msg.close ();
-    errno_assert (rc == 0);
+xread_activated(pipe)
+{
+    _fq.activated(pipe);
+}
+
+xwrite_activated(pipe)
+{
+    _lb.activated(pipe);
 }
 ~~~
 
-只删除尚未形成 completed publication boundary 的 multipart 尾部。
-
-已经完成、可被 peer 读取的消息不能靠 rollback 撤回。
-
-因此 message atomicity 与 ypipe 的 `incomplete` publication boundary 是一致的。
-
-## termination 为什么不能直接 delete pipe
-
-pipe 两端可能位于不同线程，且底层 ypipe 中仍有 pending message。
-
-如果某一侧直接：
+所以：
 
 ~~~text
-delete peer
-free ypipe
+pipe
+→ mechanism
+
+fq / lb / dist
+→ scheduling policy
 ~~~
 
-另一侧可能正在：
+---
+
+# 十五、Fair Queue 怎样消费 Read Activation
+
+## 47. fq_t 也维护 Active Prefix
 
 ~~~text
-read
-write
-flush
-process command
+_pipes[0 .. _active)
+= active readable candidates
 ~~~
 
-这会直接进入 use-after-free。
+读空：
 
-因此 `pipe_t` 关闭是异步协议，而不是析构函数调用。
+~~~text
+pipe->read() false
+~~~
 
-## 六个 termination state 分别表示什么
+该 pipe 被移出 active prefix。
 
-固定源码状态：
+---
+
+## 48. 新数据到来
+
+~~~text
+pipe::process_activate_read
+→ sink->read_activated
+→ fq_t::activated
+~~~
+
+pipe 重新进入 active prefix。
+
+---
+
+## 49. 所以 Backpressure 与 Availability 都是 Membership Transition
+
+写侧：
+
+~~~text
+full
+→ leave LB active set
+
+peer progress
+→ re-enter LB active set
+~~~
+
+读侧：
+
+~~~text
+empty
+→ leave FQ active set
+
+new publication
+→ re-enter FQ active set
+~~~
+
+非常对称。
+
+---
+
+# 十六、Distributor 的背压语义又不一样
+
+## 50. dist_t 有三段区间
+
+~~~text
+[matching)
+[active)
+[eligible)
+[all pipes)
+~~~
+
+代表：
+
+- 当前订阅/目标匹配；
+- 当前 active；
+- 当前 eligible；
+- inactive。
+
+---
+
+## 51. Pipe 写失败时 Distributor 会降级 Membership
+
+~~~cpp
+if (!pipe->write(msg))
+{
+    matching--;
+    active--;
+    eligible--;
+    ...
+}
+~~~
+
+也就是说 HWM 直接影响 fan-out eligibility。
+
+---
+
+## 52. `activated()` 再把 Pipe 提升回来
+
+writer progress recovery：
+
+~~~text
+activate_write
+→ sink write_activated
+→ dist.activated(pipe)
+~~~
+
+然后 pipe 重新变 eligible / active。
+
+---
+
+# 十七、Backpressure 是“调度资格”而不仅是容量
+
+## 53. 这条原则非常重要
+
+很多系统把 backpressure 理解成：
+
+~~~text
+send() returns false
+~~~
+
+但成熟 runtime 会进一步做到：
+
+~~~text
+future scheduling excludes blocked resource
+~~~
+
+否则上层仍不断撞墙。
+
+---
+
+## 54. 机器人 Runtime 同样适用
+
+例如 CAN TX queue：
+
+~~~text
+queue high
+→ channel not eligible for normal producer scheduling
+
+driver drains
+→ progress event
+→ channel re-enters eligible set
+~~~
+
+比每个控制模块不断 retry 更稳定。
+
+---
+
+# 十八、为什么 HWM 不能在 Multipart 中间破坏原子性
+
+## 55. lb_t 的 `_more`
+
+一旦第一帧已经选定某条 pipe：
+
+~~~text
+multipart remaining frames
+~~~
+
+必须继续走同一 pipe。
+
+否则：
+
+~~~text
+frame 0 → peer A
+frame 1 → peer B
+~~~
+
+消息就损坏了。
+
+---
+
+## 56. `_more` 期间 `has_out()` 直接 true
+
+~~~cpp
+if (_more)
+    return true;
+~~~
+
+原因不是说容量无限。
+
+而是：
+
+> 已经开始一条 multipart 后，runtime 必须维护 message atomicity contract。
+
+---
+
+## 57. 如果中途 write 失败
+
+`lb_t::sendpipe()`：
+
+~~~text
+rollback already-written unfinished frames
+~~~
+
+并返回 `EAGAIN` / special failure path。
+
+---
+
+## 58. rollback() 只撤销尚未 Flush 的 Incomplete Tail
+
+~~~cpp
+while (_out_pipe->unwrite(&msg))
+{
+    assert(msg.more);
+    msg.close();
+}
+~~~
+
+已经完成 publication 的完整 message：
+
+~~~text
+不能撤回
+~~~
+
+---
+
+# 十九、ypipe 的 Incomplete Boundary 正好支撑 Multipart Atomicity
+
+## 59. ypipe write(value, incomplete)
+
+中间帧：
+
+~~~text
+incomplete=true
+→ do not advance _f
+~~~
+
+最后一帧：
+
+~~~text
+incomplete=false
+→ advance flush boundary
+~~~
+
+---
+
+## 60. 所以 peer 看不到半条 multipart
+
+即使 writer 已经写了：
+
+~~~text
+frame A
+frame B
+~~~
+
+只要还没最后 frame：
+
+~~~text
+reader-side publication boundary未推进
+~~~
+
+---
+
+## 61. HWM 又按完整 Message 计数
+
+于是两个层次一致：
+
+~~~text
+publication atomicity
+= complete multipart
+
+capacity accounting unit
+= complete multipart
+~~~
+
+这是很干净的抽象对齐。
+
+---
+
+# 二十、write(false) 的 Ownership Contract
+
+## 62. Pipe API 明确说明
+
+如果：
+
+~~~text
+write() returns false
+~~~
+
+则：
+
+~~~text
+message object retains buffer ownership
+~~~
+
+---
+
+## 63. 为什么这非常重要
+
+上层可能：
+
+~~~text
+try pipe A
+A full
+try pipe B
+~~~
+
+或者：
+
+~~~text
+return EAGAIN
+~~~
+
+或者：
+
+~~~text
+drop according to policy
+~~~
+
+如果失败后 ownership 不明确：
+
+~~~text
+retry / free / forward
+~~~
+
+都会有 double-free 或 leak 风险。
+
+---
+
+# 二十一、容量 API 必须同时定义 Ownership Transfer
+
+## 64. 一个 Send API 至少要回答两个问题
+
+第一：
+
+~~~text
+能不能接收？
+~~~
+
+第二：
+
+~~~text
+失败后谁拥有 payload？
+~~~
+
+只回答第一个是不完整接口。
+
+---
+
+# 二十二、Conflate 是完全不同的 Queue 语义
+
+## 65. ZMQ_CONFLATE
+
+options 注释明确：
+
+~~~text
+discard all incoming messages but the last one
+cannot receive multipart
+ignores HWM
+~~~
+
+所以它不是普通 HWM queue 的一个“小优化”。
+
+---
+
+## 66. Pipepair 会改用 ypipe_conflate_t
+
+~~~text
+normal:
+ypipe_t<msg_t>
+
+conflate:
+ypipe_conflate_t<msg_t>
+~~~
+
+底层是：
+
+~~~text
+dbuffer
+~~~
+
+而不是普通 queue。
+
+---
+
+## 67. Conflate 的容量模型是 Latest-value
+
+~~~text
+old message
+→ overwritten / discarded
+
+latest message
+→ retained
+~~~
+
+所以 backlog 不再是：
+
+~~~text
+0..HWM
+~~~
+
+而是接近：
+
+~~~text
+one latest state
+~~~
+
+---
+
+## 68. 这非常适合状态型数据
+
+例如：
+
+- 最新机器人位姿；
+- 最新 teleop command；
+- 最新 UI state；
+- 最新传感器摘要。
+
+如果业务只关心 latest：
+
+~~~text
+queueing every intermediate value
+~~~
+
+反而没有意义。
+
+---
+
+## 69. 但不适合事件型数据
+
+例如：
+
+- motor fault event；
+- financial transaction；
+- discrete task command；
+- safety transition。
+
+这些不能：
+
+~~~text
+只保留最后一条
+~~~
+
+---
+
+# 二十三、Conflate 仍然需要 Reader Wake Protocol
+
+## 70. ypipe_conflate_t 有 `reader_awake`
+
+因为即使不保留完整 backlog，
+
+仍然必须解决：
+
+~~~text
+reader sleeping
++
+new latest value arrived
+~~~
+
+---
+
+## 71. flush()
+
+~~~cpp
+bool flush()
+{
+    return reader_awake;
+}
+~~~
+
+如果 reader asleep：
+
+~~~text
+false
+→ pipe sends activate_read
+~~~
+
+所以：
+
+> 队列容量语义可以变，但 wakeup correctness 仍然必须保留。
+
+---
+
+# 二十四、inproc HWM 为什么还要 Boost
+
+## 72. inproc 与 Network Transport 不同
+
+inproc 两端都直接是 libzmq socket-side runtime。
+
+创建 pipe 后，双方的：
+
+~~~text
+SNDHWM
+RCVHWM
+~~~
+
+需要共同决定有效容量。
+
+---
+
+## 73. Context 会设置 HWM Boost
+
+例如：
+
+~~~cpp
+connect_pipe->set_hwms_boost(
+    bind_options.sndhwm,
+    bind_options.rcvhwm);
+
+bind_pipe->set_hwms_boost(
+    connect_options.sndhwm,
+    connect_options.rcvhwm);
+~~~
+
+再调用：
+
+~~~text
+set_hwms(...)
+~~~
+
+---
+
+## 74. 有效 HWM 可以组合两端配置
+
+设计意图：
+
+~~~text
+inproc total buffering
+~~~
+
+来自：
+
+~~~text
+sender-side allowance
++
+receiver-side allowance
+~~~
+
+而不是只看一端配置。
+
+---
+
+## 75. 任一侧“无限”会改变组合语义
+
+`set_hwms()`：
+
+~~~text
+if base hwm <= 0
+or corresponding boost == 0
+→ effective hwm = 0
+~~~
+
+在 libzmq 中：
+
+~~~text
+HWM <= 0
+→ infinite
+~~~
+
+因此组合逻辑会保留“无限容量”语义。
+
+---
+
+# 二十五、HWM 更新本身也是 Control Command
+
+## 76. send_hwms_to_peer()
+
+~~~cpp
+if (_state == active)
+    send_pipe_hwm(
+      _peer,
+      inhwm,
+      outhwm);
+~~~
+
+peer owner thread：
+
+~~~text
+process_pipe_hwm
+→ set_hwms
+~~~
+
+同样不跨线程直接写 peer threshold。
+
+---
+
+# 二十六、Backpressure 不应该让 Producer 忙等
+
+## 77. 错误设计
+
+~~~cpp
+while (!pipe.write(msg))
+{
+}
+~~~
+
+如果 peer 很慢：
+
+~~~text
+100% CPU
+~~~
+
+---
+
+## 78. libzmq 的设计
+
+~~~text
+full
+→ out_active=false
+→ remove from scheduler active set
+
+peer consumes batch
+→ activate_write command
+→ restore active set
+~~~
+
+本质是：
+
+~~~text
+event-driven backpressure
+~~~
+
+---
+
+# 二十七、这和“Credit-based Flow Control”有什么关系
+
+## 79. 可以把 HWM 看成初始 Credit
+
+若：
+
+~~~text
+HWM = 100
+~~~
+
+writer 最多领先 consumer：
+
+~~~text
+100 complete messages
+~~~
+
+---
+
+## 80. Reader Progress 相当于归还 Credit
+
+consumer：
+
+~~~text
+msgs_read += Δ
+~~~
+
+通过 command 告诉 writer：
+
+~~~text
+新的已消费总数
+~~~
+
+等价于释放容量。
+
+---
+
+## 81. 但 libzmq 传的是 Absolute Progress，不是 Δ
+
+它发送：
+
+~~~text
+msgs_read total
+~~~
+
+而不是：
+
+~~~text
+consumed 37
+~~~
+
+---
+
+## 82. 为什么 Absolute Counter 更 Robust
+
+如果用 delta：
+
+~~~text
+duplicate command
+lost update
+reordering
+~~~
+
+更难处理。
+
+单调累计值：
+
+~~~text
+peer has consumed up to N
+~~~
+
+更容易建立 idempotent-ish progress view。
+
+这里 command ordering 本身也由 owner/mailbox路径约束。
+
+---
+
+# 二十八、Progress Counter 与 Business Sequence Number 不同
+
+## 83. `_msgs_read` 只是容量 accounting
+
+它不是：
+
+- message ID；
+- reliability sequence；
+- network sequence；
+- application sequence。
+
+它只回答：
+
+~~~text
+累计完成了多少个容量单位
+~~~
+
+---
+
+# 二十九、为什么不每次读取都触发 `write_activated`
+
+## 84. 因为 Activation 是昂贵 Control Transition
+
+可能涉及：
+
+~~~text
+command enqueue
+mailbox wake
+owner thread dispatch
+scheduler array mutation
+~~~
+
+所以要批量化。
+
+---
+
+## 85. 正确目标不是“最实时”
+
+而是：
+
+~~~text
+足够及时恢复吞吐
++
+不要产生过量调度开销
+~~~
+
+这正是 LWM 的意义。
+
+---
+
+# 三十、HWM 会把慢 Consumer 的压力向上传播
+
+## 86. 完整链
+
+~~~text
+consumer slow
+    ↓
+_msgs_read grows slowly
+    ↓
+activate_write feedback sparse
+    ↓
+writer estimate backlog rises
+    ↓
+HWM reached
+    ↓
+_out_active=false
+    ↓
+LB/Dist excludes pipe
+    ↓
+socket send path sees EAGAIN/drop/policy
+~~~
+
+---
+
+## 87. Backpressure 是 End-to-End Propagation
+
+如果只在最底层 queue full：
+
+~~~text
+上层继续无限生产
+~~~
+
+系统仍然会在别处积压。
+
+真正有效的 backpressure 必须：
+
+~~~text
+向上改变 producer scheduling / admission
+~~~
+
+---
+
+# 三十一、Pipe 只提供机制，上层决定 Policy
+
+## 88. HWM 命中后不同 Socket Pattern 行为不同
+
+可能：
+
+- EAGAIN；
+- block；
+- skip该 peer；
+- drop；
+- fan-out剔除；
+- wait重新激活。
+
+pipe 不应该决定全部策略。
+
+---
+
+## 89. Mechanism / Policy Separation
+
+~~~text
+pipe
+→ capacity truth
+→ activation events
+
+lb/fq/dist/socket
+→ selection / fairness / drop semantics
+~~~
+
+这样相同 pipe 可以服务不同 socket pattern。
+
+---
+
+# 三十二、Why Read Side Needs `_in_active`
+
+## 90. Empty Queue 之后继续读没有意义
+
+~~~text
+check_read
+→ no item
+→ _in_active=false
+~~~
+
+上层 FQ 可以移除该 pipe。
+
+---
+
+## 91. 新数据时才重新激活
+
+~~~text
+peer flush detects passive
+→ activate_read
+~~~
+
+所以读侧也避免 busy polling。
+
+---
+
+# 三十三、Backpressure 与 Wakeup 其实是镜像问题
+
+写侧：
+
+~~~text
+capacity unavailable
+→ deactivate writer
+→ reader progress wakes writer
+~~~
+
+读侧：
+
+~~~text
+data unavailable
+→ deactivate reader
+→ writer publication wakes reader
+~~~
+
+两者都是：
+
+> **资源不可进展时退出 active set；条件变化时通过事件重新加入。**
+
+---
+
+# 三十四、这就是 Event-driven Runtime 的基本形态
+
+不是：
+
+~~~text
+不断尝试直到成功
+~~~
+
+而是：
+
+~~~text
+try
+→ cannot progress
+→ deactivate
+→ await condition change
+→ reactivate
+~~~
+
+---
+
+# 三十五、Termination 为什么也必须进入 Pipe State Machine
+
+## 92. 跨线程双端 Pipe 不能直接 delete
+
+因为另一端可能仍在：
+
+- read；
+- write；
+- flush；
+- mailbox command；
+- scheduler active set；
+- in-flight multipart。
+
+所以：
+
+~~~text
+close
+~~~
+
+必须是协议。
+
+---
+
+# 三十六、六个 Termination State
+
+源码：
 
 ~~~text
 active
@@ -570,326 +1987,1548 @@ term_req_sent1
 term_req_sent2
 ~~~
 
-可以按两个维度理解：
+---
+
+## 93. active
+
+普通数据传输。
+
+---
+
+## 94. delimiter_received
+
+数据面 delimiter 先到，
+
+control-plane `pipe_term` 还没到。
+
+---
+
+## 95. waiting_for_delimiter
+
+control-plane `pipe_term` 已到，
+
+但 `_delay=true`，
+
+还要 drain data plane。
+
+---
+
+## 96. term_req_sent1
+
+本端主动 terminate，
+
+已经发送 term request，
+
+等待 ack。
+
+---
+
+## 97. term_req_sent2
+
+双方并发 terminate：
 
 ~~~text
-A. 谁先发起 terminate
-B. pending inbound data 是否还要 drain
+我已经发 request
+又收到你的 request
 ~~~
 
-### active
+---
 
-普通数据传输状态。
+## 98. term_ack_sent
 
-### term_req_sent1
+本端已经完成自己的关闭应答，
 
-本端显式调用 `terminate()`，已经向 peer 发送 `pipe_term`，等待 ack。
+等待最终 peer ack / reclaim path。
 
-### waiting_for_delimiter
+---
 
-peer 已要求关闭，但当前策略 `_delay=true`，所以本端还要把已经在途的数据消费完。
+# 三十七、为什么同时要 Data Delimiter 和 Control Term Command
 
-### delimiter_received
+## 99. 它们走不同 channel
 
-数据流中的 delimiter 已经先到，但 peer 的 `pipe_term` command 还没到。
-
-### term_req_sent2
-
-双方几乎同时发起 terminate。本端已经发过请求，又收到 peer 的请求；需要回复对方，同时仍等待自己的 ack。
-
-### term_ack_sent
-
-本端已经完成可见数据处理并向 peer 发 ack，进入最终销毁阶段。
-
-## 为什么同时需要 delimiter 和 pipe_term command
-
-它们走两条不同路径：
+delimiter：
 
 ~~~text
-delimiter
-  -> data ypipe
-
-pipe_term
-  -> command/mailbox control plane
+data ypipe
 ~~~
 
-两条路径跨线程、跨队列传播，先后顺序不一定相同。
+term command：
 
-所以状态机必须处理：
+~~~text
+mailbox command
+~~~
+
+---
+
+## 100. 不同 Channel 就没有全局天然顺序
+
+可能：
 
 ~~~text
 delimiter first
+~~~
+
+也可能：
+
+~~~text
 term command first
-both sides terminate simultaneously
 ~~~
 
-如果假设“控制命令一定比数据先到”或反过来，就会留下竞态。
-
-这也是为什么状态里同时存在：
+还可能：
 
 ~~~text
-delimiter_received
-waiting_for_delimiter
+two ends terminate concurrently
 ~~~
 
-## delay=true 的语义
+---
 
-peer 请求关闭时：
+## 101. 状态机就是为“不同通道到达顺序”准备的
 
-~~~cpp
-if (_state == active) {
-    if (_delay)
-        _state = waiting_for_delimiter;
-    else {
-        _state = term_ack_sent;
-        _out_pipe = NULL;
-        send_pipe_term_ack (_peer);
-    }
-}
-~~~
+这是系统设计非常常见的问题。
 
-`_delay=true`：
+一旦：
 
 ~~~text
-先 drain pending inbound message
-再完成关闭
+data path
+control path
 ~~~
 
-`_delay=false`：
+分离，
+
+就必须显式处理：
 
 ~~~text
-允许直接丢弃 pending path
-尽快进入 ack
+cross-channel ordering
 ~~~
 
-所以 linger/drain 语义最终会落实到 pipe 生命周期状态，而不是停留在 socket API 参数。
+不能假设某一路总是先到。
 
-## 为什么 delimiter 可以无视 HWM
+---
 
-`terminate()` 中写 delimiter 时，源码明确说明不检查 watermarks。
+# 三十八、Delay=true 的真实语义
 
-原因可以直接用死锁序列看出来：
+## 102. Peer 请求 terminate
+
+若：
+
+~~~text
+_delay=true
+~~~
+
+本端：
+
+~~~text
+state = waiting_for_delimiter
+~~~
+
+继续允许 read。
+
+---
+
+## 103. 等到 Delimiter 被读到
+
+~~~text
+process_delimiter()
+→ rollback outbound incomplete tail
+→ send term ack
+→ term_ack_sent
+~~~
+
+说明：
+
+~~~text
+已发布在途数据先被处理
+~~~
+
+---
+
+## 104. Delay=false
+
+可以直接：
+
+~~~text
+drop pending path
+→ send ack
+~~~
+
+更接近：
+
+~~~text
+abortive close
+~~~
+
+---
+
+# 三十九、为什么 Delimiter 不受 HWM 限制
+
+## 105. terminate()
+
+源码明确：
+
+~~~text
+watermarks are not checked
+~~~
+
+因为 delimiter 是：
+
+~~~text
+protocol progress token
+~~~
+
+不是普通业务流量。
+
+---
+
+## 106. 如果 Delimiter 也被 Backpressure 阻塞
+
+可能：
 
 ~~~text
 queue full
--> delimiter 被 HWM 拒绝
--> peer 等 delimiter 才完成 drain
--> sender 等 peer ack
--> 双方都无法继续
+→ delimiter cannot enter
+→ peer waits delimiter to drain-close
+→ sender waits peer ack
+→ deadlock
 ~~~
 
-终止协议中的控制标记不能被普通业务 backpressure 永久阻塞。
+---
 
-## process_pipe_term_ack() 为什么由每一侧回收自己的 inbound pipe
+## 107. 一般原则
 
-最终 ack 后：
+> **终止、取消、释放 credit 等控制性进度消息，不能被普通业务背压永久阻塞。**
+
+---
+
+# 四十、为什么 Stop/Close Control 需要独立 Priority Plane
+
+如果一个系统让：
+
+~~~text
+normal data queue full
+~~~
+
+同时也阻止：
+
+~~~text
+STOP
+CANCEL
+CREDIT_RETURN
+SHUTDOWN
+~~~
+
+它就可能失去自我恢复能力。
+
+---
+
+# 四十一、process_pipe_term_ack() 中的 Ownership 非常明确
+
+## 108. 每一侧删除自己的 Inbound Queue
+
+~~~text
+my _in_pipe
+=
+peer's _out_pipe
+~~~
+
+最终：
+
+~~~text
+我删除我的 inbound queue object
+
+peer 删除它自己的 inbound queue object
+~~~
+
+避免两边争夺同一 queue 的 delete ownership。
+
+---
+
+## 109. Ordinary ypipe 中未读 msg_t 需要显式 close
+
+因为 `msg_t`：
+
+~~~text
+不是依赖普通 C++ destructor 自动回收全部语义
+~~~
+
+所以：
 
 ~~~cpp
-upipe_t *in_pipe = _in_pipe;
-_in_pipe = NULL;
+while (in_pipe->read(&msg))
+    msg.close();
+~~~
 
-if (!_conflate && in_pipe) {
-    msg_t msg;
-    while (in_pipe->read (&msg))
-        msg.close ();
+再 delete queue。
+
+---
+
+# 四十二、为什么 Conflate Cleanup 又不同
+
+源码：
+
+~~~cpp
+if (!_conflate && in_pipe)
+{
+    ...
 }
-
-delete in_pipe;
-delete this;
 ~~~
 
-源码注释明确说明：
+因为 `ypipe_conflate_t` / `dbuffer` 有不同的 storage ownership / destruction语义。
+
+所以 cleanup 不能简单把所有 queue backend 当同一种。
+
+---
+
+# 四十三、Hiccup 是“替换通道”而不是普通 Wakeup
+
+## 110. hiccup()
+
+本端创建：
 
 ~~~text
-this endpoint deallocates its inbound pipe
-peer deallocates its own inbound pipe
+new inbound pipe
 ~~~
 
-每条单向 ypipe 的最终销毁责任归属于它的 reader endpoint。
-
-这再次体现 ownership topology：
+然后 command peer：
 
 ~~~text
-reader owns final reclamation of its inbound channel
+send_hiccup(peer, new_pipe)
 ~~~
 
-## hiccup 为什么要替换整条 inbound ypipe
+---
 
-`hiccup()` 不只是“发一个通知”。
+## 111. Peer process_hiccup()
 
-它会创建新的 inbound pipe：
+它先：
+
+~~~text
+flush old outpipe
+drain unread output-side storage
+adjust _msgs_written downward
+delete old outpipe
+install new outpipe
+_out_active=true
+~~~
+
+---
+
+## 112. 为什么 `_msgs_written--`
+
+因为旧 outpipe 里仍残留、随后被丢弃的完整消息：
+
+~~~text
+不能继续算作 outstanding
+~~~
+
+否则 HWM accounting 会永久偏高。
+
+---
+
+# 四十四、Channel Replacement 必须修正 Capacity Accounting
+
+任何：
+
+~~~text
+drop queued data
+replace queue
+reconnect
+reset transport
+~~~
+
+操作都必须问：
+
+~~~text
+旧 backlog counter 怎么修正？
+~~~
+
+否则下一代 channel 会继承幽灵 debt。
+
+---
+
+# 四十五、Pipe Stats 也复用同一组 Counter
+
+## 113. send_stats_to_peer()
+
+~~~text
+outbound queue estimate
+=
+_msgs_written - _peers_msgs_read
+~~~
+
+---
+
+## 114. 为什么监控应该复用控制状态
+
+如果 metrics 再单独维护一套：
+
+~~~text
+queue_depth_metric
+~~~
+
+很容易与真正 admission control 状态漂移。
+
+更好的方式：
+
+~~~text
+observability reads same accounting model
+~~~
+
+---
+
+# 四十六、Counter Overflow 为什么通常不成为实际问题
+
+`uint64_t`：
+
+~~~text
+wraparound horizon
+~~~
+
+极大。
+
+但设计上仍依赖：
+
+~~~text
+monotonic difference within practical lifetime
+~~~
+
+如果把类似模型做在 32-bit counter 上，高吞吐长期运行就必须专门处理 wrap。
+
+---
+
+# 四十七、为什么不用“剩余 Credit”字段
+
+另一种设计：
+
+~~~text
+credits--
+on write
+
+credits += delta
+on peer consume
+~~~
+
+也可以。
+
+libzmq 选择：
+
+~~~text
+monotonic sent/read counters
+~~~
+
+优势：
+
+~~~text
+容易做差
+容易报告绝对 progress
+调试更直观
+~~~
+
+---
+
+# 四十八、这和 TCP Window 有什么相似
+
+概念上都在限制：
+
+~~~text
+sender can be ahead of receiver by how much
+~~~
+
+但 libzmq HWM 是：
+
+~~~text
+user-space message runtime capacity
+~~~
+
+不是：
+
+~~~text
+transport byte window
+~~~
+
+不要混为一层。
+
+---
+
+# 四十九、多层 Backpressure 可以同时存在
+
+完整网络发送链可能有：
+
+~~~text
+application queue limit
+↓
+ZeroMQ pipe HWM
+↓
+engine output buffer
+↓
+kernel socket sndbuf
+↓
+TCP congestion / receive window
+~~~
+
+任何一层都可能成为瓶颈。
+
+---
+
+# 五十、只看 Kernel Socket Buffer 不够
+
+即使 kernel 还能写，
+
+ZeroMQ 也可能：
+
+~~~text
+pipe HWM full
+~~~
+
+因为它限制的是：
+
+~~~text
+message-runtime backlog
+~~~
+
+而不是 kernel bytes。
+
+---
+
+# 五十一、只看 Pipe HWM 也不等于“对端应用跟上了”
+
+peer `_msgs_read` 表示：
+
+~~~text
+peer pipe consumer 已经读取
+~~~
+
+并不自动等于：
+
+~~~text
+最终远程业务逻辑已经处理
+~~~
+
+尤其跨 network engine 时还有更多层。
+
+---
+
+# 五十二、Backpressure 语义必须标明是哪一层
+
+例如：
+
+~~~text
+queue accepted
+transport accepted
+remote received
+remote application processed
+~~~
+
+是四种不同 guarantee。
+
+---
+
+# 五十三、HWM 不是 Reliability ACK
+
+`activate_write(msgs_read)`：
+
+~~~text
+peer local runtime consumed queue items
+~~~
+
+不是：
+
+~~~text
+network delivery ACK
+~~~
+
+也不是：
+
+~~~text
+application semantic ACK
+~~~
+
+---
+
+# 五十四、这对机器人控制命令尤其重要
+
+一个 motor command：
+
+~~~text
+进入 middleware queue
+~~~
+
+不等于：
+
+~~~text
+motor controller executed it
+~~~
+
+如果需要动作确认，
+
+必须另有：
+
+~~~text
+sequence
+ack
+deadline
+state feedback
+~~~
+
+---
+
+# 五十五、为什么 Backpressure 对控制命令不能一概照搬
+
+高频 setpoint：
+
+~~~text
+latest value often matters more
+~~~
+
+可能适合：
+
+~~~text
+conflate/latest-value
+~~~
+
+离散安全命令：
+
+~~~text
+every event matters
+~~~
+
+可能需要：
+
+~~~text
+bounded FIFO + ACK
+~~~
+
+---
+
+# 五十六、Pipe 其实提供了三类流控范式
+
+普通 HWM：
+
+~~~text
+bounded backlog
+~~~
+
+conflate：
+
+~~~text
+latest value
+~~~
+
+termination delimiter：
+
+~~~text
+control progress bypass
+~~~
+
+这三种不是同一种数据。
+
+---
+
+# 五十七、把所有消息塞同一个 Queue Policy 是危险的
+
+如果：
+
+~~~text
+sensor state
+safety stop
+trajectory chunk
+heartbeat
+~~~
+
+全部共享：
+
+~~~text
+one FIFO + one HWM
+~~~
+
+很容易让安全消息被普通 backlog 阻塞。
+
+---
+
+# 五十八、Runtime 设计应按 Semantics 拆 Channel
+
+例如：
+
+~~~text
+latest-state lane
+bounded-command lane
+priority-control lane
+~~~
+
+这比一味增加 HWM 更可靠。
+
+---
+
+# 五十九、一个写侧状态机
+
+~~~text
+               +----------------------+
+               |                      |
+               v                      |
+           OUT_ACTIVE                 |
+               |                      |
+        check_hwm false               |
+               |                      |
+               v                      |
+         OUT_INACTIVE                 |
+               |                      |
+               | activate_write(N)    |
+               | update peer progress |
+               +----------------------+
+~~~
+
+---
+
+# 六十、一个读侧状态机
+
+~~~text
+               +----------------------+
+               |                      |
+               v                      |
+            IN_ACTIVE                 |
+               |                      |
+           queue empty                |
+               |                      |
+               v                      |
+          IN_INACTIVE                 |
+               |                      |
+               | activate_read        |
+               +----------------------+
+~~~
+
+---
+
+# 六十一、两个状态机是互补的
+
+写侧等待：
+
+~~~text
+space
+~~~
+
+读侧等待：
+
+~~~text
+data
+~~~
+
+两种 condition change 都通过：
+
+~~~text
+cross-thread command
+~~~
+
+恢复。
+
+---
+
+# 六十二、为什么不使用 Condition Variable
+
+因为 pipe peer 可能属于：
+
+~~~text
+socket event loop
+I/O thread
+~~~
+
+它已经有 mailbox + poller execution model。
+
+直接 condition_variable：
+
+~~~text
+会创建第二套 wait domain
+~~~
+
+不利于统一事件循环。
+
+---
+
+# 六十三、Activation Command 就是 Pipe-level Event Notification
+
+它把：
+
+~~~text
+resource condition changed
+~~~
+
+送回：
+
+~~~text
+owner-thread scheduler
+~~~
+
+非常接近 Reactor 中：
+
+~~~text
+readiness event
+~~~
+
+只是来源是 peer progress。
+
+---
+
+# 六十四、Data-plane 与 Control-plane 的顺序为什么重要
+
+例如 reader：
+
+~~~text
+先更新 _msgs_read
+再发送 activate_write
+~~~
+
+writer收到后：
+
+~~~text
+先更新 _peers_msgs_read
+再 scheduler activation
+~~~
+
+形成完整：
+
+~~~text
+truth-before-notify
+~~~
+
+协议。
+
+---
+
+# 六十五、与 Mailbox 的 Publish-before-Wake 是同一原则
+
+Mailbox：
+
+~~~text
+publish command
+→ signal
+~~~
+
+Pipe：
+
+~~~text
+publish progress state in command
+→ owner processes
+→ activation
+~~~
+
+共同原则：
+
+> **通知只是“请重新检查”的触发器；权威状态必须先建立。**
+
+---
+
+# 六十六、为什么 `_out_active=true` 后不立即再次检查 HWM
+
+`process_activate_write()`：
+
+~~~text
+update progress
+_out_active=true
+notify scheduler
+~~~
+
+真正是否还能写：
+
+~~~text
+下一次 check_write()
+~~~
+
+再次验证。
+
+---
+
+# 六十七、Activation 是 Opportunity，不是 Guarantee
+
+这和 epoll readiness 一样：
+
+~~~text
+“值得尝试”
+~~~
+
+而不是：
+
+~~~text
+“保证一定成功”
+~~~
+
+因为从通知到真正执行之间，
+
+状态可能继续变化。
+
+---
+
+# 六十八、Runtime Event 通常应该被理解成 Re-evaluation Hint
+
+这个原则贯穿：
+
+- Asio epoll readiness；
+- libzmq mailbox wake；
+- pipe activate_write；
+- pipe activate_read；
+- Cyber wake；
+- Holoscan scheduling event。
+
+---
+
+# 六十九、为什么 `check_hwm()` 公开存在
+
+`dist_t` 可以：
+
+~~~text
+预先检查所有 matching pipes
+~~~
+
+而不一定真正 write。
+
+这用于：
+
+~~~text
+policy-level admission
+~~~
+
+---
+
+# 七十、但 `check_hwm()` 与 `write()` 之间也不是原子 Transaction
+
+它们都在 owner-thread execution model 下使用，
+
+避免多个线程对同一 pipe 直接并发写。
+
+否则：
+
+~~~text
+check passes
+another writer consumes capacity
+write exceeds
+~~~
+
+就需要更复杂同步。
+
+---
+
+# 七十一、Owner-thread 模型再次降低并发复杂度
+
+因为：
+
+~~~text
+one pipe endpoint mutable state
+~~~
+
+由一个 owner执行，
+
+`_msgs_written` 等字段不需要 atomic。
+
+---
+
+# 七十二、SPSC Queue + Owner Thread + Command Control 是整套设计
+
+不能只摘其中一个。
+
+真正的架构是：
+
+~~~text
+single-owner mutable endpoint
++
+SPSC data path
++
+cross-thread command control path
++
+event-driven scheduler membership
+~~~
+
+---
+
+# 七十三、如果从零设计类似 Channel
+
+可以抽象：
 
 ~~~cpp
-_in_pipe =
-  _conflate
-    ? static_cast<upipe_t *> (
-        new ypipe_conflate_t<msg_t> ())
-    : new ypipe_t<msg_t, message_pipe_granularity> ();
+struct Channel
+{
+    Queue* in;
+    Queue* out;
+
+    bool in_active;
+    bool out_active;
+
+    uint64_t read_total;
+    uint64_t write_total;
+    uint64_t peer_read_total;
+
+    size_t high_watermark;
+    size_t low_watermark;
+
+    LifecycleState state;
+    EventSink* sink;
+};
 ~~~
 
-再通过 `send_hiccup()` 告诉 peer 替换对应 outbound pipe。
+---
 
-所以 hiccup 的语义是：
+# 七十四、但字段本身不是最难的
+
+最难的是定义：
 
 ~~~text
-disconnect old inbound stream
-drop in-flight messages on old stream
-install a fresh channel
-notify peer to redirect its writer
+谁能改这些字段？
+谁能看这些字段？
+什么时候跨线程传进度？
+通知是否会丢？
+关闭时谁负责 queue lifetime？
 ~~~
 
-它比“清空 queue”更彻底，因为底层 channel identity 本身发生变化。
+---
 
-## conflate 为什么是另一种容量语义
-
-`pipepair()` 可以根据 `conflate` 选择：
+# 七十五、对机器人 CAN Runtime 的直接映射
 
 ~~~text
-normal ypipe
-or
-ypipe_conflate
+control producers
+      |
+      v
+TxChannel
+  |
+  +-- tx_written
+  +-- peer/drain progress
+  +-- HWM
+  +-- active flag
+      |
+      v
+CAN owner thread
 ~~~
 
-conflate 不再要求保留所有历史消息，而是只保留最新值。
-
-这和 HWM 的“有界积压”是两种不同语义：
+当 SocketCAN / driver backlog 高：
 
 ~~~text
-HWM queue:
-  preserve sequence until capacity boundary
-
-conflate:
-  newest value replaces older unread value
+deactivate normal producer eligibility
 ~~~
 
-机器人状态流里，位姿、速度估计、最新诊断值经常更接近 conflate/latest-state；命令序列、事件、事务日志则不能这样处理。
-
-## Backpressure 是分层策略，不等于 drop policy
-
-`pipe_t::check_write()` 最终只回答：
+driver drain 到阈值：
 
 ~~~text
-this pipe can accept another complete message?
+reactivate
 ~~~
 
-至于返回 false 后怎么办，由上层 socket pattern 决定。
+---
 
-可能是：
+# 七十六、高频 Motor Setpoint 可以考虑 Latest-value Lane
+
+如果 1 kHz 控制 loop产生：
 
 ~~~text
-block
-EAGAIN
-drop
-route to another pipe
-temporarily remove pipe from scheduler
+setpoint t
+setpoint t+1
+setpoint t+2
+~~~
+
+下游只能处理较慢，
+
+旧 setpoint 的业务价值可能迅速下降。
+
+这时：
+
+~~~text
+latest-state/conflate
+~~~
+
+往往比：
+
+~~~text
+huge FIFO
+~~~
+
+更合理。
+
+---
+
+# 七十七、但 E-stop 不应与 Setpoint 共用 Conflate 语义
+
+安全事件：
+
+~~~text
+需要独立可靠控制路径
+~~~
+
+避免被：
+
+- 覆盖；
+- HWM；
+- 普通数据 backlog；
+
+阻塞。
+
+---
+
+# 七十八、对视觉 Pipeline 的迁移
+
+Camera detector 30 Hz，
+
+控制 loop 可能 1 kHz。
+
+视觉检测结果通常更像：
+
+~~~text
+latest estimate
+~~~
+
+不是：
+
+~~~text
+必须逐帧排队执行
 ~~~
 
 所以：
 
 ~~~text
-pipe_t
-  -> capacity mechanism
+conflate/latest-value
+~~~
 
+常比无界 backlog 更适合闭环控制。
+
+---
+
+# 七十九、对地图/日志又不一样
+
+日志：
+
+~~~text
+允许 batch
+但可能要求不丢
+~~~
+
+地图增量：
+
+~~~text
+可能需要顺序
+~~~
+
+所以 HWM policy 必须按数据语义选。
+
+---
+
+# 八十、为什么 HWM 不是“越大越好”
+
+更大 HWM：
+
+~~~text
+less producer blocking
+~~~
+
+但代价：
+
+- 更高内存；
+- 更旧数据；
+- 更长排队延迟；
+- shutdown drain 更慢；
+- fault recovery 更难。
+
+---
+
+# 八十一、实时系统更关心 Age，而不只是 Throughput
+
+一个 10 秒前的控制 command：
+
+~~~text
+即使可靠送达
+~~~
+
+也可能已经没有价值。
+
+所以容量策略最好结合：
+
+~~~text
+deadline
+age
+priority
+latest-value
+~~~
+
+而不是只调大 HWM。
+
+---
+
+# 八十二、HWM 是 Admission Control，不是 Latency Guarantee
+
+它只限制：
+
+~~~text
+最多领先多少 message
+~~~
+
+不会保证：
+
+~~~text
+每条 message 在 X ms 内处理
+~~~
+
+---
+
+# 八十三、Backpressure 需要和 Deadline 一起设计
+
+机器人 runtime 常见：
+
+~~~text
+if backlog age > deadline
+→ drop / supersede / fail-safe
+~~~
+
+而不是：
+
+~~~text
+永远等队列慢慢清
+~~~
+
+---
+
+# 八十四、为什么 LWM 大致选一半是工程折中
+
+这不是数学最优常数。
+
+它是在：
+
+~~~text
+wake frequency
+vs
+buffer utilization
+~~~
+
+之间取简单、稳定的折中。
+
+---
+
+# 八十五、最佳 LWM 取决于成本模型
+
+如果：
+
+~~~text
+thread wake extremely expensive
+~~~
+
+可以更偏向大批量。
+
+如果：
+
+~~~text
+latency更关键
+~~~
+
+可能更早反馈。
+
+libzmq 选择通用 runtime 的中间点。
+
+---
+
+# 八十六、HWM 也不必永久固定
+
+源码支持：
+
+~~~text
+set_hwms
+send_hwms_to_peer
+~~~
+
+说明 runtime 可以更新阈值。
+
+---
+
+# 八十七、动态阈值更新也必须遵循 Owner-thread Protocol
+
+不能 foreign thread：
+
+~~~text
+peer->_hwm = x
+~~~
+
+而要 command。
+
+否则会重新引入共享 mutable state。
+
+---
+
+# 八十八、Pipe 的 Runtime Invariants
+
+第一：
+
+> **同一 endpoint 的 mutable flow-control state 只在 owner thread 中修改。**
+
+第二：
+
+> **outstanding capacity 用 complete-message counters 表达，不直接读取跨线程 queue size。**
+
+第三：
+
+> **writer 只相信最近收到的 peer progress，因此容量判断可以保守但不能乐观越界。**
+
+第四：
+
+> **HWM 命中必须让 pipe 离开上层 active scheduling set。**
+
+第五：
+
+> **reader progress 必须先更新容量 truth，再重新激活 writer。**
+
+第六：
+
+> **LWM 用于批量 progress feedback，避免一条 message 一次跨线程 wake。**
+
+第七：
+
+> **multipart publication、capacity accounting 和 scheduler routing 都必须保持 message atomicity。**
+
+第八：
+
+> **control-progress tokens（delimiter / term / credit return）不能被普通业务 backpressure 永久阻塞。**
+
+第九：
+
+> **data queue lifetime 与 pipe endpoint lifetime必须通过终止协议协调。**
+
+第十：
+
+> **queue mode（FIFO vs conflate）改变的是业务语义，不只是性能参数。**
+
+---
+
+# 八十九、完整 Write Path
+
+~~~text
 socket pattern
-  -> overload policy
+    |
+    | choose active pipe
+    v
+pipe.check_write()
+    |
+    +-- state != active
+    |      → reject
+    |
+    +-- out_active == false
+    |      → reject
+    |
+    +-- estimated backlog >= HWM
+    |      ↓
+    |   out_active = false
+    |      ↓
+    |   scheduler removes pipe
+    |      ↓
+    |   reject
+    |
+    v
+pipe.write(msg)
+    |
+    | ypipe.write(frame, more)
+    |
+    +-- intermediate multipart
+    |      → no message count increment
+    |
+    +-- final frame
+           ↓
+       msgs_written++
+           ↓
+       later flush
+           ↓
+       peer activation if reader passive
 ~~~
 
-不能把 HWM 误解成“ZeroMQ 一到 HWM 就统一丢消息”。
+---
 
-## 三条状态线要分开看
-
-`pipe_t` 内同时存在三类状态：
+# 九十、完整 Read / Credit-return Path
 
 ~~~text
-Data availability
-  _in_active
-
-Capacity availability
-  _out_active
-  _msgs_written
-  _peers_msgs_read
-  _hwm / _lwm
-
-Lifecycle
-  _state
-  _delay
-  delimiter / term / ack
+peer owner scheduler
+    |
+    | picks readable pipe
+    v
+pipe.read(msg)
+    |
+    | ypipe.read
+    v
+complete message?
+    |
+   yes
+    |
+    v
+msgs_read++
+    |
+msgs_read % LWM == 0 ?
+    |
+   yes
+    |
+    v
+send_activate_write(
+  peer,
+  msgs_read)
+    |
+    v
+peer mailbox
+    |
+    v
+peer owner thread
+    |
+    v
+process_activate_write(N)
+    |
+    +-- peers_msgs_read = N
+    +-- out_active = true
+    +-- sink->write_activated
+    |
+    v
+LB / Dist active set
 ~~~
 
-它们相互影响，但不是同一个状态机。
+---
 
-例如：
+# 九十一、完整 Read Empty Path
 
 ~~~text
-_out_active = false
+scheduler tries pipe
+    |
+    v
+pipe.check_read()
+    |
+    v
+ypipe.check_read()
+    |
+ no data
+    |
+    v
+in_active = false
+    |
+    v
+FQ removes pipe
+    |
+    | later peer writes + flush
+    v
+ypipe reports passive reader
+    |
+    v
+send_activate_read(peer)
+    |
+    v
+peer owner thread
+    |
+    v
+process_activate_read()
+    |
+    v
+sink->read_activated
+    |
+    v
+FQ re-adds pipe
 ~~~
 
-可能只是 HWM 满了，并不意味着 pipe 正在 terminate。
+---
 
-而：
+# 九十二、完整 Termination Path
 
 ~~~text
-_state != active
+Side A terminate()
+    |
+    +-- out_active=false
+    +-- rollback incomplete multipart
+    +-- send PIPE_TERM command
+    +-- write delimiter bypassing HWM
+    +-- flush
+    |
+    v
+Side B may see:
+    |
+    +-- delimiter first
+    |     → delimiter_received
+    |
+    +-- term command first
+          → waiting_for_delimiter
+             if delay=true
+    |
+    v
+both conditions satisfied
+    |
+    v
+send PIPE_TERM_ACK
+    |
+    v
+each side receives ack
+    |
+    v
+sink->pipe_terminated
+    |
+    v
+drain/close inbound storage
+    |
+    v
+delete own inbound queue
+    |
+    v
+delete endpoint
 ~~~
 
-即使 HWM 还有空间，也可能禁止新业务消息写入。
+---
 
-把“容量暂停”和“生命周期关闭”混在一个 bool 里，会很难正确处理恢复和销毁。
+# 九十三、为什么这套设计值得学
 
-## 对机器人系统的映射
-
-三个业务通道：
+因为它把一个看起来简单的：
 
 ~~~text
-control command
-camera frame
-debug log
+bounded queue
 ~~~
 
-不能只共享：
+展开成了完整 runtime 问题：
 
 ~~~text
-std::queue<Message> global_queue
+capacity
+ownership
+cross-thread progress
+scheduler eligibility
+wakeup batching
+multipart atomicity
+shutdown progress
+queue backend semantics
 ~~~
 
-因为三者过载语义完全不同。
+HWM 只是最外层那个数字。
 
-更合理的约束可能是：
+---
+
+# 九十四、最终心智模型
 
 ~~~text
-control:
-  bounded
-  stale command must not accumulate
-  sequence semantics explicit
-
-camera:
-  small bounded queue
-  old frame can be dropped
-  data age more important than completeness
-
-log:
-  larger buffer
-  batch-friendly
-  lower scheduling priority
+               producer owner
+                    |
+                    | complete message
+                    v
+             _msgs_written++
+                    |
+                    | estimate backlog
+                    v
+       _msgs_written - _peers_msgs_read
+                    |
+              reaches HWM?
+             /            \
+           no              yes
+           |                |
+           v                v
+         write        _out_active=false
+                           |
+                           v
+                   leave scheduler set
+                           |
+                           |
+                    consumer progresses
+                           |
+                    _msgs_read += N
+                           |
+                     reaches LWM
+                           |
+                           v
+                 activate_write(N)
+                           |
+                           v
+                   producer mailbox
+                           |
+                           v
+                 _peers_msgs_read=N
+                           |
+                    _out_active=true
+                           |
+                           v
+                   re-enter scheduler
 ~~~
 
-真正要设计的不只是 capacity 数字，而是：
+如果只记一个结论：
 
-~~~text
-HWM:
-  什么时候停止生产
-
-LWM:
-  什么时候恢复
-
-ownership:
-  满时 payload 属于谁
-
-wake policy:
-  恢复时通知谁
-
-shutdown:
-  pending data 是 drain 还是 drop
-~~~
-
-这五项合起来，才是一套完整 backpressure contract。
+> **libzmq 的 HWM 不是“队列满了就 return false”，而是一套跨线程 progress-feedback 控制协议：producer 用单调计数估计 backlog，HWM 把资源移出调度集合，consumer 按 LWM 批量归还容量，`activate_write` 把容量事实送回 owner thread，再把资源重新加入调度集合。真正的 backpressure，是“容量状态改变调度资格”。**

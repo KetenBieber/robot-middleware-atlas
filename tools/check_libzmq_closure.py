@@ -53,7 +53,23 @@ REQUIRED = {
     ),
     "ypipe-yqueue-spsc": ("ypipe", "yqueue", "_c", "flush"),
     "pipe-hwm-backpressure": (
-        "HWM", "_out_active", "_msgs_written", "activate_write"
+        "HWM",
+        "_out_active",
+        "_in_active",
+        "_msgs_written",
+        "_msgs_read",
+        "_peers_msgs_read",
+        "_lwm",
+        "compute_lwm",
+        "activate_write",
+        "activate_read",
+        "write_activated",
+        "read_activated",
+        "set_hwms_boost",
+        "ypipe_conflate_t",
+        "rollback",
+        "delimiter",
+        "term_req_sent2",
     ),
     "socket-command-owner": (
         "socket_base_t", "command_t", "process_commands", "owner"

@@ -22,6 +22,8 @@ target object state transition
 
 这使大量 mutable state 可以维持单 owner，而不是每个字段都被多个线程直接锁着修改。
 
+这种 owner-thread 边界不仅服务对象生命周期，也直接服务数据面 flow control：`pipe_t` 的 `_msgs_written/_msgs_read/_peers_msgs_read`、`_in_active/_out_active` 和 termination state 都由各自 endpoint owner 修改；peer progress 只通过 command 传递。完整背压链见 [Pipe 与 HWM：Backpressure、Progress Feedback 与异步关闭状态机](pipe-hwm-backpressure.md)。
+
 ## object_t 为什么有 tid
 
 `object_t` 保存：
