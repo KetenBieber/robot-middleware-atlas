@@ -2457,6 +2457,8 @@ read/write handler complete
 
 `descriptor_state` 本身也是一个 operation-like task。
 
+它并不只是“fd 的一些元数据”：同一个对象还负责聚合 epoll readiness bit、持有 READ/WRITE/EXCEPT 三类 pending operation queue，并以 Scheduler operation 的身份把 kernel readiness 推进成用户 completion。完整状态机见 [epoll Reactor 与 descriptor_state](epoll-reactor-descriptor-state.md)。
+
 后面 Scheduler再调用它的 perform I/O logic，把真正 ready operation 推出来。
 
 这进一步维持：

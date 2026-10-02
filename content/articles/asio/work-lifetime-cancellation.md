@@ -360,6 +360,8 @@ tracked executor object alive
 
 operation 无法立即完成时，会进入 per-descriptor queue：
 
+这里的 per-descriptor queue 并不是一个孤立容器。它属于长期存在的 `descriptor_state` control block；后者本身还能作为 Scheduler operation 被调度，并通过 `perform_io_cleanup_on_block_exit` 把 descriptor readiness 与用户 operation 的 work debt 精确对齐。详见 [epoll Reactor 与 descriptor_state](epoll-reactor-descriptor-state.md)。
+
 ~~~cpp
 descriptor_data
   -> op_queue_[op_type]
