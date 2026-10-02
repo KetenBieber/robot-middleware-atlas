@@ -62,6 +62,8 @@ runtime control sentinel
 
 这和 libuv threadpool 的 slow-work sentinel 属于同一种设计。
 
+`task_operation_` 更深的一层意义，是把“谁现在负责进入 Reactor、线程究竟睡在 Scheduler event 还是 `epoll_wait()`、外部 post 到来时该唤醒哪一层”都收束成一个统一协议。完整调用链见 [Scheduler 与 Reactor 唤醒协议](scheduler-reactor-wakeup.md)。
+
 ## do_run_one() 为什么先 Pop、再 Unlock、最后 Complete
 
 顺序是：

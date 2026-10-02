@@ -36,6 +36,8 @@ scheduler shutdown
 
 这条链一旦看清，`run()` 为什么会退出、`cancel()` 为什么不是强杀、`close()` 为什么还会产生 callback、`stop()` 为什么不是 cancel，以及为什么捕获了 handler 仍不能自动延长 buffer 生命周期，都会自然得到答案。
 
+当 `outstanding_work_` 仍然大于零、但当前没有 ready completion 时，线程并不是“什么都不做”：它可能睡在 Scheduler 的 `wakeup_event_`，也可能通过唯一 `task_operation_` 进入 Reactor 并阻塞在 `epoll_wait()`。这两个 wait domain 的唤醒与 stop 退出协议见 [Scheduler 与 Reactor 唤醒协议](scheduler-reactor-wakeup.md)。
+
 ## 1. 先建立五种完全不同的 lifetime
 
 讨论 Asio 时至少要分开五层。

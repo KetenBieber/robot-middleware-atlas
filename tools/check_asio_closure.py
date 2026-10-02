@@ -12,6 +12,7 @@ PINNED = "8806a6803cde7054c3049d3666d3ec36786568c5"
 ARTICLE_NAMES = (
     "overview",
     "scheduler-operation-queue",
+    "scheduler-reactor-wakeup",
     "epoll-reactor-descriptor-state",
     "strand-serialization",
     "work-lifetime-cancellation",
@@ -29,6 +30,18 @@ REQUIRED = {
         "Intrusive",
         "outstanding_work_",
         "Cancellation",
+    ),
+    "scheduler-reactor-wakeup": (
+        "wakeup_event_",
+        "task_operation_",
+        "task_interrupted_",
+        "wake_one_thread_and_unlock",
+        "epoll_wait",
+        "EPOLL_CTL_MOD",
+        "interrupter_",
+        "task_cleanup",
+        "signal_all",
+        "one_thread_",
     ),
     "epoll-reactor-descriptor-state": (
         "descriptor_state",

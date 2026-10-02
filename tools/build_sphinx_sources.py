@@ -99,6 +99,7 @@ ARTICLE_ORDER = {
     "asio": [
         "overview",
         "scheduler-operation-queue",
+        "scheduler-reactor-wakeup",
         "epoll-reactor-descriptor-state",
         "strand-serialization",
         "work-lifetime-cancellation",

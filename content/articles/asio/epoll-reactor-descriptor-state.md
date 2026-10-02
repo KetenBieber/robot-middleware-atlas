@@ -82,6 +82,8 @@ one epoll wait set
 
 这展示了 Linux waitable-fd 模型如何影响 runtime 架构。
 
+其中 interrupter 不是普通“每次写 eventfd 唤醒”的实现：Asio 在 epoll 路径里让 interrupter fd 保持 readable，并通过 `EPOLL_CTL_MOD` 重新触发 ET 通知，以打断阻塞的 `epoll_wait()`。Scheduler 的 condition-variable wait 与这条 Reactor wait 属于两个不同阻塞域，完整 wake routing 见 [Scheduler 与 Reactor 唤醒协议](scheduler-reactor-wakeup.md)。
+
 ## Per-descriptor Mutex 为什么优于一把 Global Mutex
 
 如果所有 socket start/cancel 都抢同一 reactor lock，高连接数下会形成共享热点。
