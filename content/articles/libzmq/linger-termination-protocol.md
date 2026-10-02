@@ -333,6 +333,8 @@ sent == processed
 
 这是一种很轻量的 quiescence 条件。
 
+更精确地说，`sent_seqnum` 统计的是已经取得“未来执行资格”的生命周期敏感 command，而不只是已经进入 mailbox 的 command；inproc lookup 甚至会在 registry lock 内先 `inc_seqnum()`，再把目标裸指针交给调用者。这个 pre-reservation 协议、`inc_seqnum=false` 的配对关系以及 Reaper 外层屏障见 [Command Seqnum 与对象销毁屏障](command-seqnum-quiescence.md)。
+
 ## 9. 最后一步才是真正 delete
 
 ~~~cpp

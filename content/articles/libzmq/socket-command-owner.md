@@ -673,6 +673,8 @@ owner thinks no outstanding work
 
 command passing 体系里，lifetime accounting 和 mailbox 同样重要。
 
+真正的关键不是“计数器加一再减一”，而是 **什么时候建立 reservation、什么时候允许 raw pointer 离开 registry lock、为什么某些 `send_bind(..., false)` 反而是正确写法**。完整生命周期协议见 [Command Seqnum 与对象销毁屏障](command-seqnum-quiescence.md)。
+
 ## process_command() 为什么用 type + args，而不是通用 callback queue
 
 `command_t` 采用：

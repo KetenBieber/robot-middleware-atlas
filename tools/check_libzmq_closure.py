@@ -16,6 +16,7 @@ ARTICLE_NAMES = (
     "ypipe-yqueue-spsc",
     "pipe-hwm-backpressure",
     "socket-command-owner",
+    "command-seqnum-quiescence",
     "inproc-endpoint-registry",
     "io-thread-poller",
     "session-stream-engine",
@@ -42,6 +43,10 @@ REQUIRED = {
     ),
     "socket-command-owner": (
         "socket_base_t", "command_t", "process_commands", "owner"
+    ),
+    "command-seqnum-quiescence": (
+        "_sent_seqnum", "_processed_seqnum", "inc_seqnum",
+        "process_seqnum", "find_endpoint", "TERM_ACK", "Reaper"
     ),
     "inproc-endpoint-registry": (
         "endpoint_t", "_pending_connections", "multimap",
