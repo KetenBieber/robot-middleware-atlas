@@ -142,6 +142,7 @@ ARTICLE_ORDER = {
         "multi-input-fusion",
         "registry-publication-quiescence",
         "croutine-wakeup",
+        "croutine-state-event-latch",
         "processor-context-switch",
         "message-to-proc",
         "class-loader-abi",
@@ -405,7 +406,7 @@ CYBER_ARTICLE_SECTIONS = [
      ['pending-queue-ring', 'dispatcher-notifier', 'multi-input-fusion',
       'registry-publication-quiescence']),
     ('执行面：从数据通知到真正获得 CPU',
-     ['croutine-wakeup', 'processor-context-switch']),
+     ['croutine-wakeup', 'croutine-state-event-latch', 'processor-context-switch']),
     ('把整条消息链重新跑一遍', ['message-to-proc']),
     ('生命周期、ABI 与 C++ 机制',
      ['class-loader-abi', 'cpp-type-runtime']),
@@ -498,7 +499,7 @@ PROJECT_STORIES = {
     "folly": """当程序从“一个队列、一个线程池”成长到高并发 Runtime 后，真正需要设计的是 topology、cache-line ownership、等待策略、buffer lifetime、Timer workload 和 shutdown protocol。Folly 把这些问题压到一组可组合的数据结构中：SPSC 先利用单 producer/consumer 约束，MPMC 再用 ticket/turn 管 slot 复用，AtomicNotificationQueue 把 payload 与 wakeup handshake 分开，IOBuf 把 data view 与 storage ownership 分开，Timer/Executor 再分别承担时间与 CPU 调度。""",
     "seastar": """如果 hot mutable state 可以按 Core 拆开，那么最有效的并发优化可能不是更复杂的锁，而是消除共享。Seastar 让每个 shard 独占 Reactor、任务队列、服务实例与 allocator，跨核用 SPSC request/completion queue 传递 work；future continuation 又直接成为 Reactor task，连跨核 free 也先回到 owner 的 freelist，再由 owner 批量回收。""",
     "nginx": """大量连接并不要求大量线程。nginx 先把连接按 worker process 分片，再让每个 worker 的单线程 event loop 独占大部分 mutable connection state；连接对象来自固定 free list，空闲 keepalive 可进入 reusable queue，Timer 用 rbtree，ready event 可以先进入 posted queue，request-scoped 小对象则由 arena-style pool 整体回收。资源容量、事件执行顺序与 shutdown 因而都能在有限状态机中表达。""",
-    "cyber": """从 :doc:`总览 <overview>` 中的一帧消息开始，先分清 Node、Reader/Writer、Component 和 Processor 分别属于通信、业务与执行哪一层。随后沿 :doc:`DAG 装配 <dag-to-component>`、:doc:`通信端点 <node-reader-writer>`、:doc:`数据分发 <dispatcher-notifier>` 和 :doc:`多输入融合 <multi-input-fusion>` 建立数据面，再用 :doc:`动态注册、发布与 Quiescence <registry-publication-quiescence>` 把 registry、callback lifetime、hot-plug 与 teardown 的并发边界单独拆开。执行面继续沿 :doc:`调度唤醒 <croutine-wakeup>` 和 :doc:`Processor 上下文切换 <processor-context-switch>` 追踪消息怎样真正获得 CPU，最后用 :doc:`消息到 Proc <message-to-proc>` 把整条链重新闭合。
+    "cyber": """从 :doc:`总览 <overview>` 中的一帧消息开始，先分清 Node、Reader/Writer、Component 和 Processor 分别属于通信、业务与执行哪一层。随后沿 :doc:`DAG 装配 <dag-to-component>`、:doc:`通信端点 <node-reader-writer>`、:doc:`数据分发 <dispatcher-notifier>` 和 :doc:`多输入融合 <multi-input-fusion>` 建立数据面，再用 :doc:`动态注册、发布与 Quiescence <registry-publication-quiescence>` 把 registry、callback lifetime、hot-plug 与 teardown 的并发边界单独拆开。执行面先读 :doc:`调度唤醒 <croutine-wakeup>`，再进入 :doc:`CRoutine 状态机与 Event Latch <croutine-state-event-latch>`，把 DATA_WAIT/IO_WAIT、lost wakeup、pending event 与 memory order 拆成可证明的等待协议；随后沿 :doc:`Processor 上下文切换 <processor-context-switch>` 追踪 READY task 怎样真正获得 CPU，最后用 :doc:`消息到 Proc <message-to-proc>` 把整条链重新闭合。
 
 读完基础机制后进入 :doc:`端到端闭环工程 <closed-loop-project>`：把 Proto、Bazel、Publisher、DAG Component、输出 Writer 与严格 Observer 放在同一条链里，再回到 :doc:`最小 C++ Runtime <cpp-implementation-lab>` 亲自编译 Node/Reader/Writer 的缩小版。最后用 :doc:`Apollo Planning 案例 <case-study-apollo-planning>` 检查这些机制如何进入真实规划流水线。""",
     "ecal": """把问题收敛到一次相机消息：先在 :doc:`入门 <foundations>` 中分清发布端与订阅端，再读 :doc:`注册和软状态 <registration-soft-state>`，理解它们如何发现彼此。只有端点已经匹配，:doc:`Publisher 发送 <publisher-discovery-send>` 中的 SHM、UDP 和 TCP 选择才有实际意义。

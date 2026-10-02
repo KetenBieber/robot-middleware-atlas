@@ -486,3 +486,5 @@ void ClassicContext::Shutdown() {
 到这里，消息已落入缓存，通知线程已经要求 Scheduler 重新检查任务，ClassicContext 的组通知计数也让正在休眠的 Processor 有机会重新扫描。但 `notify_one()` 本身不运行 `Proc()`：Linux 先调度 OS worker，随后 `NextRoutine()` 才更新并选择一只可运行的 CRoutine。
 
 完整执行链还需要经过 [Processor 与上下文切换](processor-context-switch.md) 中的优先级槽、`Processor::Run()`、`Resume/Yield` 与协作式上下文切换；这些机制决定“已被唤醒”的 CRoutine 何时真正占用 CPU。
+
+如果要继续追问 `DATA_WAIT / IO_WAIT` 为什么可能发生 lost wakeup、`updated_` 与 `notify_grp_` 分别记住什么，以及 `TaskManager`、`PollHandler` 的等待握手怎样与 C++ memory order 相互约束，继续看 [CRoutine 状态机与 Event Latch](croutine-state-event-latch.md)。
