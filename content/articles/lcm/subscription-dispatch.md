@@ -700,13 +700,15 @@ class SubscriptionIndex {
 
 ## 最后一道边界：C 层延迟删除并不等于 C++ 用户对象自动安全
 
-上一节的 `callback_scheduled` 与 `marked_for_deletion` 解决了一个非常具体的问题：当本轮分发已经保存了一组 subscription 指针时，不能在某只 callback 里立即删除其中一只，令下一次循环访问悬空地址。但这套协议保护的是 **LCM 自己的 subscription 节点**，不是用户自己分配的全部对象。
+上一节的 `callback_scheduled` 与 `marked_for_deletion` 解决了一个非常具体的问题：当当前分发已经保存了一组 subscription 指针时，不能在某只 callback 里立即删除其中一只，令下一次循环访问悬空地址。但这套协议保护的是 **LCM 自己的 subscription 节点**，不是用户自己分配的全部对象。
 
 假设 A 的 callback 调用 `unsubscribe(B)`，同时另一条应用线程认为 B 已经注销，于是马上 `delete b_handler`。如果正在执行中的 B callback 或另一次尚未完成的用户工作仍持有该对象地址，LCM 对 subscription 指针的延迟释放并不能让那根裸指针恢复安全。固定 C++ wrapper 的适配对象中仍然存放用户 `Handler*`；它不是自动管理 Handler 生命周期的共享所有权句柄。
 
 因此需要把应用的两层协议明确分开：第一层是 LCM 在一次 `lcm_dispatch_handlers()` 内冻结当前迭代范围、锁外执行 callback、最后回收标记的节点；第二层由应用负责停止其他 `handle` 调用、退出所有在途 Handler、管理异步队列及最终销毁业务对象。不能把 `unsubscribe()` 返回视为另一条线程上的所有用户操作都已结束，更不能从“持有 `handle_mutex`”推导出整个进程不存在其他并发访问。
 
-一个完整的订阅语义测试应同时记录：A 与 B 的注册顺序、回调内 A 取消 B、B 是否在本轮仍被跳过、回调中新加入 C 是否延迟到下一条消息、A/B/C 不同容量下哪条消息得到准入，以及正常和异常退出时有没有仍在使用 `userdata` 的业务代码。这些都是源码里的状态字段实际维护的因果关系，不是简单的“正则匹配成功”。
+对于 C++ binding，还必须再追一层：固定 wrapper 在 `lcm_unsubscribe()` 返回后会立即从 `subscriptions` vector 擦除并 `delete` adapter，而 C core 的 grace period 只保护 `lcm_subscription_t`。self-unsubscribe 时，当前 callback 的 `channel` 引用又直接别名到 adapter 的 `channel_buf`。这条跨语言回收链在 [C/C++ 订阅生命周期](cpp-binding-lifetime-quiescence.md) 中单独展开。
+
+判断订阅语义时应同时考虑：A 与 B 的注册顺序、回调内 A 取消 B、B 是否在当前分发中被跳过、回调中新加入 C 是否延迟到下一条消息、A/B/C 不同容量下哪条消息得到准入，以及正常和异常退出时有没有仍在使用 `userdata` 的业务代码。这些都是源码里的状态字段实际维护的因果关系，不是简单的“正则匹配成功”。
 
 ## 分发层的设计结论
 

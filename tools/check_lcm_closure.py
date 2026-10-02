@@ -18,7 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 ARTICLE_NAMES = (
     "overview", "foundations", "architecture-map", "provider-vtable",
     "udpm-publish-protocol", "receive-reassembly", "subscription-dispatch",
-    "types-and-eventlog", "c-abi-cpp-design-lab", "design-recap",
+    "cpp-binding-lifetime-quiescence", "types-and-eventlog",
+    "c-abi-cpp-design-lab", "design-recap",
 )
 GUIDE_NAMES = (
     "use-environment", "use-pubsub-types", "closed-loop-project",
@@ -49,6 +50,7 @@ REQUIRED = {
     "udpm-publish-protocol": ("LC02", "LC03", "transmit_lock"),
     "receive-reassembly": ("inbufs_filled", "ringbuf", "notify_pipe"),
     "subscription-dispatch": ("callback_scheduled", "marked_for_deletion"),
+    "cpp-binding-lifetime-quiescence": ("userdata", "channel_buf", "grace period", "pre-entry", "subscriptions", "quiescence"),
     "types-and-eventlog": ("fingerprint", "timestamp", "event"),
     "c-abi-cpp-design-lab": ("RAII", "trampoline", "callback"),
     "design-recap": ("Provider", "EventLog", "shutdown"),

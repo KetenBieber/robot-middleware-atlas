@@ -393,7 +393,7 @@ cb_func():
 
 每组模板参数让编译器生成正确的解码与成员函数调用。适配对象由 C++ LCM 的 `subscriptions` 指针数组管理，用户 Handler 则由调用者管理。数组扩容只移动适配器的**指针槽位**，不会移动单独在堆上 `new` 的适配对象，因此 C 核心持有的 userdata 地址仍稳定。
 
-尤其注意两个看似相近却完全不同的生命周期：C 核心的 `callback_scheduled` 延迟删除保护的是 `lcm_subscription_t`，不是 C++ 适配对象和用户 Handler。上游 `LCM::unsubscribe()` 在 C 层取消订阅后，立即从 C++ vector 擦除并 `delete` 适配对象；不要在另一个线程正调用其 trampoline 时并发执行这条释放路径。应用应先结束接收/分发线程，串行协调订阅生命周期，再释放 Handler 与 LCM。回调需要异步处理时还必须在返回前复制 `rbuf->data`，而不能保存借用指针。
+尤其注意两个看似相近却完全不同的生命周期：C 核心的 `callback_scheduled` 延迟删除保护的是 `lcm_subscription_t`，不是 C++ 适配对象和用户 Handler。上游 `LCM::unsubscribe()` 在 C 层取消订阅后，立即从 C++ vector 擦除并 `delete` 适配对象；这会让 self-unsubscribe、跨线程 unsubscribe、`channel_buf` 借用引用和 lambda `std::function` owner 进入同一个回收问题族。完整时序与 pre-entry race 见 [C/C++ 订阅生命周期](cpp-binding-lifetime-quiescence.md)。应用若维持固定 wrapper，应先结束接收/分发线程，串行协调订阅生命周期，再释放 Handler 与 LCM。回调需要异步处理时还必须在返回前复制 `rbuf->data`，而不能保存借用指针。
 
 ## 回调桥接需要上下文指针
 
