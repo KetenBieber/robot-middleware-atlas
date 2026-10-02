@@ -88,6 +88,8 @@ Scheduler global mutex 绝不能覆盖用户 handler。
 
 但这只解决 worker 并行，并不保证同一业务对象串行，因此还需要 strand。
 
+Strand 不是再给每个 handler 套一把 mutex，而是在调度层建立 logical owner：首个 submitter 设置 `locked_`，外部并发提交进入 `waiting_queue_`，当前 owner 无锁 drain `ready_queue_`，再通过 RAII invoker 完成批次交接。详见 [Strand：逻辑执行权、双队列交接与无锁用户回调](strand-serialization.md)。
+
 ## outstanding_work_ 为什么不是 Queue Size
 
 异步 read 进入 reactor 后，scheduler ready queue 可以为空，但系统仍有未来 completion。

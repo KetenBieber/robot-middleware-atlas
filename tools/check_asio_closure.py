@@ -42,6 +42,13 @@ REQUIRED = {
         "ready_queue_",
         "locked_",
         "logical owner",
+        "invoker",
+        "push_waiting_to_ready",
+        "running_in_this_thread",
+        "call_stack",
+        "shutdown_",
+        "dispatch",
+        "post",
     ),
     "work-lifetime-cancellation": (
         "work_started",

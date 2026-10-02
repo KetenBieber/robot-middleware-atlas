@@ -97,6 +97,8 @@ never overlap in execution
 
 这是一种 logical execution ownership，而不是 thread affinity。
 
+固定实现真正有价值的地方，是用 `locked_`、`waiting_queue_`、`ready_queue_` 和 `invoker` 把“并发提交”转换成“单逻辑 owner 批次执行”，并且让用户 handler 始终运行在 Strand 内部 mutex 之外。完整状态机见 [Strand：逻辑执行权、双队列交接与无锁用户回调](strand-serialization.md)。
+
 ## Work Count 是 Runtime Liveness
 
 Scheduler 用 `work_started()` / `work_finished()` 维护 outstanding work。
