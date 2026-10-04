@@ -83,6 +83,8 @@ reactor executes it
 
 ## 跨 Shard 调用为什么必须走 SMP Queue
 
+`smp::submit_to()` 的远端路径不是“把 lambda 丢进一个共享队列”这么简单：它先受 SMP service-group credit 限制，再经过 origin-local batch、pair-wise SPSC request queue、target Reactor task scheduling、reverse completion queue，最后回 origin shard resolve promise、归还 credit 并回收 work item。完整链见 [SMP Message Queue：Owner-Shard、双向 SPSC 与跨核 Round-trip Backpressure](smp-message-queue.md)。
+
 如果 Shard 0 直接访问 Shard 1 的 mutable object：
 
 - ownership 被破坏；

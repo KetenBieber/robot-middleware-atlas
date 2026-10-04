@@ -141,6 +141,8 @@ memory pressure
 
 `foreign_ptr` 解决的是“复杂对象 destructor 必须回 owner shard执行”。
 
+SMP request queue 与 cross-CPU free list 恰好展示了 topology 如何决定并发数据结构：固定 A→B 请求只有一个 producer 和一个 consumer，因此使用 pair-wise SPSC；而任意 foreign core 都可能归还 B-owned memory，所以 allocator ingress 是 MPSC。SMP 的完整 request/completion 协议见 [SMP Message Queue：Owner-Shard、双向 SPSC 与跨核 Round-trip Backpressure](smp-message-queue.md)。
+
 `xcpu_freelist` 解决的是“allocator-owned raw memory 最终必须回 owner allocator”。
 
 二者本质相同，但协议层级不同：

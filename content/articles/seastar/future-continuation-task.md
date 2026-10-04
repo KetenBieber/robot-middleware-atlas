@@ -20,6 +20,8 @@ Seastar 要在一个 shard 上用一个 Reactor thread 承载大量并发，因�
 
 ## continuation_base 直接继承 task
 
+跨 shard 的 `work_item` 也直接继承 `task`：SMP queue 只负责把 work item 送到 owner shard，真正的用户函数不会在 queue poller 内直接执行，而是先 `schedule(this)`，重新进入目标 Reactor 的 scheduling-group 语义。见 [SMP Message Queue：Owner-Shard、双向 SPSC 与跨核 Round-trip Backpressure](smp-message-queue.md)。
+
 源码：
 
 ~~~cpp

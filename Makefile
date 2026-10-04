@@ -96,6 +96,10 @@ check-folly:
 	$(PYTHON) tools/build_sphinx_sources.py
 	$(PYTHON) tools/check_folly_closure.py
 
+check-seastar:
+	$(PYTHON) tools/build_sphinx_sources.py
+	$(PYTHON) tools/check_seastar_closure.py
+
 check-nginx:
 	$(PYTHON) tools/build_sphinx_sources.py
 	$(PYTHON) tools/check_nginx_closure.py

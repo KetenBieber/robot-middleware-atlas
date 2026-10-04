@@ -38,6 +38,8 @@ local()
 
 ## invoke_on 为什么不是直接拿远端指针
 
+`invoke_on` 最终依赖 `smp::submit_to` 的 owner-shard RPC：request 与 completion 分别走一条 SPSC，service-group semaphore 一直占用到 completion 回到 origin，work item 也最终回 origin 删除。也就是说，“把 computation 移到 owner”本身有一套完整 transport/backpressure/lifetime 协议，见 [SMP Message Queue：Owner-Shard、双向 SPSC 与跨核 Round-trip Backpressure](smp-message-queue.md)。
+
 跨 shard：
 
 ~~~text
