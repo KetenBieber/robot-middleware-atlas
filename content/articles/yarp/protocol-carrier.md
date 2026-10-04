@@ -56,6 +56,28 @@ Protocol::~Protocol()
 
 源码身份：固定提交中的 `Protocol::Protocol(TwoWayStream*)` 与 `Protocol::~Protocol()`。成员 `writer` 和 `ref` 是当前消息相关指针，不拥有应用 Writer/Portable；相反，stream 经 `shift.takeStream()` 转交，Protocol 的构造声明也明确 Protocol 成为 stream owner。每条连接需要自己的 Protocol，避免并发修改这些连接状态。
 
+这里还有一个容易被类名遮住的边界：外层 Unit 并不直接依赖具体的 `Protocol`，而是依赖读侧或写侧接口。固定版本里的具体 `Protocol` 同时实现 `InputProtocol`、`OutputProtocol` 与 `ConnectionState`：
+
+```cpp
+class YARP_os_impl_API Protocol :
+        public yarp::os::OutputProtocol,
+        public yarp::os::InputProtocol,
+        public yarp::os::ConnectionState
+{
+public:
+    bool open(const std::string& name) override;
+    void interrupt() override;
+    ConnectionReader& beginRead() override;
+    void endRead() override;
+
+    bool open(const Route& route) override;
+    bool write(SizedWriter& writer) override;
+    InputProtocol& getInput() override;
+};
+```
+
+因此 `InputProtocol` 不是另一套网络栈，而是“输入连接 Unit 允许看到的协议能力面”：握手、`beginRead/endRead`、`interrupt`、底层输入流，以及必要时取得同一双向连接的输出侧接口。具体 `Protocol` 才保存 Carrier、Route、Reader 与 stream 状态。这样 `PortCoreInputUnit` 可以只持有 `InputProtocol*`，不需要知道当前究竟是 TCP、local 还是插件 Carrier；Carrier 的变化被压在 Protocol 以下。相反，若让 InputUnit 直接操作 socket 与 Carrier，它会同时承担连接生命周期、frame 解析和业务 Reader 调度，关闭路径也无法通过统一的 `interrupt()` 唤醒阻塞读。
+
 ## 核心接口的 C++ 形状
 
 Carrier 是有虚函数的基类：主动端需要从名称选出 Carrier，被动端需要先读固定长度的 header，再让各 Carrier 判别它。`create()` 为每条连接产生独立的运行实例。真实实现使用原始指针，因此还必须追查谁 delete；下面先看提交中的接口，而不是用智能指针示例代替它：

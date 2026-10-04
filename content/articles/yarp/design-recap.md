@@ -10,8 +10,10 @@ YARP 将名字解析、连接管理和传输协议分层：Name Server 维护 na
 Name Server <--- NameClient ---> Contact / Route
                                   |
 Application -> Port -> PortCore --+
-                       ├─ Face listener -> InputUnit -> PortReader
-                       └─ OutputUnit -> Protocol -> Carrier -> Stream
+                       ├─ Face listener -> PortCoreInputUnit -> InputProtocol
+                       │                                      └-> Protocol -> Carrier -> Stream -> PortReader
+                       └─ PortCoreOutputUnit -> OutputProtocol
+                                                └-> Protocol -> Carrier -> Stream
 ```
 
 ## 设计模式
@@ -56,7 +58,7 @@ Application -> Port -> PortCore --+
 1. `Contact`、`Route` 和 URI/名字解析；
 2. `PortReader`、`PortWriter`、内存 ConnectionReader/Writer 与 golden tests；
 3. 单 TCP Carrier、Protocol 握手、frame、ack 和 timeout；
-4. 一个 InputUnit、一个 OutputUnit 与可 interrupt/join 的线程；
+4. 一个 `PortCoreInputUnit`、一个 `PortCoreOutputUnit` 与可 interrupt/join 的线程；
 5. PortCore 连接 registry、fan-out 与部分失败结果；
 6. 后台 write、有限 buffer pool、completion tracker；
 7. NameClient 注册/查询/注销；
@@ -104,13 +106,13 @@ Carrier 实例必须每连接独立，Protocol 的状态转换必须拒绝半握
 ```text
 应用请求 connect("/camera", "/viewer")
   -> NameClient 查询两个名字对应的 Contact
-  -> 输出 PortCore 创建 OutputUnit
-  -> OutputUnit 建立 Stream，并为该连接 clone Carrier
+  -> 输出 PortCore 创建 PortCoreOutputUnit
+  -> PortCoreOutputUnit 持有 OutputProtocol，并为该连接建立 Stream / Carrier 实例
   -> Protocol 用 Route + Carrier 完成握手
   -> PortCore 把 Unit 提交到活动连接表
   -> write(writer) 对活动 Unit 扇出
   -> Carrier 定义帧；PortWriter 定义内容
-  -> 对端 InputUnit 校验帧并调用 PortReader
+  -> 对端 PortCoreInputUnit 通过 InputProtocol 读帧并调用 PortReader
 ```
 
 控制面的查询只负责找到端点；握手完成后，已有连接的 payload 不再经过 Name Server。`Route` 描述“从谁到谁、使用什么 carrier”，`Protocol` 保存这一次会话的阶段，`Carrier` 则提供某一传输规则。三者若合并成一个全局 socket 管理器，就会让协议插件共享状态，并使半握手连接污染其他连接。
@@ -121,7 +123,7 @@ Carrier 实例必须每连接独立，Protocol 的状态转换必须拒绝半握
 |---|---|---|---|
 | Port | 应用 | 应用线程 | 只作为门面，不直接持有裸工作线程 |
 | PortCore | Port | 管理线程、读写调用者、Unit 回调 | 连接表遍历期间 Unit 使用 lease 保活 |
-| InputUnit/OutputUnit | PortCore | 各自 worker 与管理线程 | close 后不再回调 PortCore 业务对象 |
+| PortCoreInputUnit / PortCoreOutputUnit | PortCore | 各自 worker 与管理线程 | close 后不再回调 PortCore 业务对象 |
 | Protocol | 单个 Unit | 单连接线程 | 状态只能沿握手、数据、关闭方向前进 |
 | Carrier | 单个 Protocol | 单连接线程 | 从原型 clone；实例不得跨连接共享可变状态 |
 | PortWriter | 调用方或后台写任务 | 编码线程 | 生命周期覆盖全部异步发送 |

@@ -157,6 +157,43 @@ void PortCore::closeUnits()
 
 这里的 raw pointer 由 PortCore 明确关闭、join 并 `delete`。不会因为 `vector` 清空自动析构 Unit。代码注释给出的安全前提是 server thread 已 finished 且此阶段无人再访问 Unit 表，所以线程汇合是裸指针回收前的关键边界。
 
+输入侧还需要再向下一层看一步，因为 `PortCore::closeUnits()` 只调用统一的 `PortCoreUnit::close()`，真正负责把阻塞读取唤醒的是 `PortCoreInputUnit`。固定源码中，输入 Unit 持有一个 `InputProtocol*`；关闭时先通过协议接口中断底层 stream，再等待输入 worker 退出，最后才关闭并销毁 Protocol：
+
+```cpp
+bool PortCoreInputUnit::interrupt()
+{
+    access.wait();
+    if (!closing) {
+        if (ip != nullptr) {
+            ip->interrupt();
+        }
+        closing = true;
+    }
+    access.post();
+    return true;
+}
+
+void PortCoreInputUnit::closeMain()
+{
+    if (running) {
+        interrupt();
+        join();
+    }
+
+    if (ip != nullptr) {
+        ip->close();
+        delete ip;
+        ip = nullptr;
+    }
+    running = false;
+    closing = false;
+}
+```
+
+这段代码给出了输入连接最重要的生命周期顺序：`PortCoreInputUnit` 是 worker 与 `InputProtocol` 的 owner 边界；`InputProtocol::interrupt()` 负责让卡在 `beginRead()` 或底层 stream 的执行流有机会返回，`join()` 建立“该 worker 已不再访问 `ip`”的静默点，之后才能 `close/delete`。如果把顺序改成先 `delete ip` 再 join，输入线程可能仍在 `beginRead/endRead` 上运行，直接变成 use-after-free；如果只设置 `closing=true` 而不 interrupt，阻塞 read 又可能永远看不到这个标志。
+
+输出侧的 `PortCoreOutputUnit` 解决的是另一类阻塞：后台发送线程可能睡在 `activate.wait()`，所以它的 `closeMain()` 会中断 `OutputProtocol`、置 closing、`activate.post()`，再 join。两种 Unit 都遵守“先让阻塞点可返回，再等待执行上下文静默，最后释放协议对象”，但唤醒源不同：输入侧主要靠 stream interrupt，输出侧还要显式唤醒后台发送 semaphore。
+
 接着看 `PortCore::closeMain` 的真实实现：
 
 ```cpp
