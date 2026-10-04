@@ -237,6 +237,8 @@ close fd
 
 关闭就是从所有索引里解除 membership。
 
+其中 posted queue 不是普通“callback list”：同一个 event只有一个 intrusive queue hook，`posted` bit会 coalesce 重复投递，executor 在 callback 前先 unlink，而 close 路径必须在 slot reuse 前取消 pending posted membership。完整 phase/lifetime 协议见 [Posted Event Queue：Readiness、Phase Scheduling、Coalescing 与 Next-tick Barrier](posted-event-queue.md)。
+
 ## 这是一种 Multi-index Object 设计
 
 同一个 connection/event 可能同时存在于：

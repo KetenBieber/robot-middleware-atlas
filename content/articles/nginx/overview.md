@@ -115,6 +115,8 @@ posted 模式让 nginx 先完成 accept mutex、timer 等 runtime bookkeeping，
 
 这和 libuv pending queue 属于同一类 deferred execution。
 
+这层并不只是“稍后调用”：`posted` bit把重复 readiness 合并成一个 pending obligation，handler 执行前先解除 intrusive membership 以允许安全 close/repost，而 `ngx_posted_next_events` 又通过“下一次 loop 开头搬运 + timeout=0”建立真正的 next-tick barrier。三条 phase queue 的完整调度语义见 [Posted Event Queue：Readiness、Phase Scheduling、Coalescing 与 Next-tick Barrier](posted-event-queue.md)。
+
 ## Connection 为什么来自 Free List
 
 nginx 不为每个新 socket 动态 malloc 一整套 connection/event object。

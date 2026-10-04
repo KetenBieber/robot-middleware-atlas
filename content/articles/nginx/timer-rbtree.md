@@ -2234,6 +2234,8 @@ worker-local scheduler
 
 但数据结构和语义不同。
 
+Posted queue 这一侧还有一个与 Timer 对称的生命周期协议：`posted` 是 intrusive queue membership bit，executor 会先 delete membership 再进入 handler，而 connection close也会在 slot 回池前删除 read/write posted event。next queue则提供 Timer 所不表达的“下一轮再执行”语义。见 [Posted Event Queue：Readiness、Phase Scheduling、Coalescing 与 Next-tick Barrier](posted-event-queue.md)。
+
 ## 九十三、为什么 Timer 使用 Rbtree，而 Posted 使用 Intrusive Queue
 
 Timer需要：

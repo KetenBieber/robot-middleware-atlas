@@ -1864,6 +1864,8 @@ Runtime 很难插入：
 
 > **OS readiness 只是输入；用户 callback 何时执行仍由 Runtime 自己调度。**
 
+nginx 这里还区分了三种 temporal membership：accept queue 绑定 accept-ownership phase，normal queue负责当前 iteration 的 deferred handler，next queue则保证至少跨过一个 event-loop boundary。重复 post如何 coalesce、self-repost为什么可能同 phase再次执行，以及 connection close为什么必须显式 unlink，见 [Posted Event Queue：Readiness、Phase Scheduling、Coalescing 与 Next-tick Barrier](posted-event-queue.md)。
+
 ---
 
 ## 九十八、EPOLLERR / EPOLLHUP 为什么被 OR 成 IN / OUT
