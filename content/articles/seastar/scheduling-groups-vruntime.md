@@ -109,6 +109,8 @@ cooperative preemption points
 
 缺一不可。
 
+需要把这一点和 Future 的 ready fast path 分开：当前固定源码的 release `future::then_impl()` 在 dependency 已经 available 时会直接 inline invoke callback，并不会在这条分支里调用 `need_preempt()`；只有 pending Future 物化成 continuation task 后，才重新进入 Reactor task scheduler。完整对象与状态迁移见 [Future / Continuation：状态迁移、Task 化 Continuation 与异步控制流](future-continuation-task.md)。
+
 ## Shares 不是 Real-time Deadline
 
 `shares=1000` 比 `shares=100` 获得更多长期 CPU 比例，不表示任务有：

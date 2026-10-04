@@ -1483,6 +1483,7 @@ delete wi
 
 回 origin 更符合 ownership。
 
+completion 回到 origin 后，真正唤醒后续控制流的仍然是 Promise/Future 子系统：Promise 的结果存储怎样在 promise、future 与 continuation 之间迁移，以及 pending dependency 为什么最终物化成 Reactor task，见 [Future / Continuation：状态迁移、Task 化 Continuation 与异步控制流](future-continuation-task.md)。
 ---
 
 # 七十三、这与 `foreign_ptr` 是同一个大原则
