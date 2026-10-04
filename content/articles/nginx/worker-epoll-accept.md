@@ -193,6 +193,8 @@ event loop 先计算：
 nearest timer deadline
 ~~~
 
+这个 deadline 并不是简单从一个 min-heap 读取。nginx 的 `ngx_event_t` 自己内嵌 rbtree node，Timer key 使用 wrap-aware signed-delta 排序，高频 refresh 还允许 300 ms lazy update；Timer 到期与 graceful-exit liveness 的完整机制见 [Timer Rbtree：Deadline Ordering、Lazy Update、Wrap-around 与 Shutdown Liveness](timer-rbtree.md)。
+
 再把：
 
 ~~~text

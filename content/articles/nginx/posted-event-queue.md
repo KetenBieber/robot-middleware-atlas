@@ -75,6 +75,8 @@ expire timers
 posted_events
 ~~~
 
+Timer 与 posted queue 是两个独立的 worker-local execution source：Timer tree回答“什么时候到期”，posted queue回答“已经 runnable 的 handler 在哪个 phase 执行”。Timer expire 会先解除 tree membership再调用 handler，而 handler随后又可以 post event；Timer 这一侧的完整状态转移见 [Timer Rbtree：Deadline Ordering、Lazy Update、Wrap-around 与 Shutdown Liveness](timer-rbtree.md)。
+
 当 accept mutex 生效时，持锁 worker 先把 accept readiness post 起来，再在统一阶段处理。
 
 这样可以控制 accept 与普通 connection event 的执行边界。

@@ -220,6 +220,8 @@ c->read->handler(c->read);
 
 `ngx_close_connection()` 会：
 
+其中“delete read/write timer”是 storage-reuse correctness 的前置条件：Timer tree 保存的是嵌在 `ngx_event_t` 里的 node，只要 membership 仍在，未来 expire 就能重新得到这个 event 地址。connection slot 回池前必须先切断这条 future reachability。Timer 的 intrusive membership、lazy update 与 shutdown liveness 见 [Timer Rbtree：Deadline Ordering、Lazy Update、Wrap-around 与 Shutdown Liveness](timer-rbtree.md)。
+
 ~~~text
 delete read timer
 delete write timer

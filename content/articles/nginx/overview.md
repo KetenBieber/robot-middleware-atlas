@@ -99,6 +99,8 @@ libuv 用 min-heap；nginx 用 rbtree。
 
 这说明容器选择还会和“允许多大时间近似”结合。
 
+Timer 这层还有两个容易被忽略的 correctness 边界：millisecond key 的排序用 signed difference 处理约 49 天回绕；Timer 到期时必须先从 intrusive tree 摘除、清 `timer_set`、设 `timedout`，再进入任意 handler。graceful worker 退出又会遍历 Timer tree，只有 non-cancelable Timer 才继续阻止退出。完整链见 [Timer Rbtree：Deadline Ordering、Lazy Update、Wrap-around 与 Shutdown Liveness](timer-rbtree.md)。
+
 ## Posted Event 为什么不是直接 Callback
 
 底层 epoll 发现 event ready 后，可以：
