@@ -20,7 +20,28 @@ ARTICLE_NAMES = (
 )
 
 REQUIRED = {
-    "overview": ("shard-per-core", "SMP", "Future", "cross-CPU"),
+    "overview": (
+        "shard-per-core",
+        "allocate_reactor",
+        "local_engine",
+        "Reactor",
+        "Future",
+        "Scheduling Group",
+        "vruntime",
+        "smp::submit_to",
+        "SMP message queue",
+        "round-trip",
+        "backpressure",
+        "_sleeping",
+        "eventfd",
+        "sharded<Service>",
+        "foreign_ptr",
+        "xcpu_freelist",
+        "cross-CPU",
+        "owner",
+        "cooperative",
+        "shutdown",
+    ),
     "reactor-shard-per-core": (
         "allocate_reactor",
         "local_engine",
