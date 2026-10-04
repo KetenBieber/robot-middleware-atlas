@@ -136,6 +136,8 @@ write_events[]
 
 这里还有一个与固定对象池强相关的正确性问题：slot 地址会高频复用，而内核 epoll ready list 可能残留上一代 fd 的事件。nginx 每次重新分配 slot 都翻转 `ngx_event_t::instance`，并把这一位编码进 `epoll_event.data.ptr`；事件返回时先比较 generation 再执行 handler。
 
+connection pool 还承担一层 overload policy：当 free slot 低于总容量的 1/16 时，core 会从 reusable queue 尾部按有限 batch 选择旧连接，设置 `c->close=1` 并调用其协议 read handler，而不是直接回收 slot。只有 Timer、backend、posted、reusable、fd index 等 future-reachability 全部退出后，storage 才重新发布到 free list。完整链见 [Connection Pool Lifecycle：Stable Slot、Reusable Queue 与 Generation-safe Reuse](connection-pool-lifecycle.md)。
+
 ## Connection 紧张时为什么会主动回收 Reusable Connection
 
 当 free connection 数太低时：

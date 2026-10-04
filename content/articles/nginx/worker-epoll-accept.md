@@ -1560,6 +1560,8 @@ no free slot
 
 这是一种 Runtime Admission Boundary。
 
+这个边界后面还有一套“先回收低价值连接、再拒绝 admission”的策略：`ngx_get_connection()` 在真正 pop free slot 前会检查 slot pressure，必要时从 reusable queue 触发 protocol-aware close；slot 从 ACTIVE/REUSABLE 到 FREE 又必须完成所有 secondary-index retirement。见 [Connection Pool Lifecycle：Stable Slot、Reusable Queue 与 Generation-safe Reuse](connection-pool-lifecycle.md)。
+
 ---
 
 ## 七十九、`ngx_get_connection()` Slot 不足时怎么办
