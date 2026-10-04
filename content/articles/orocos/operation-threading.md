@@ -150,6 +150,106 @@ result_type call_impl()
 
 send() 立即返回 SendHandle；collectIfDone() 可不阻塞地检查是否完成，collect() 则可能等待 caller Engine 的谓词。目标 Engine 忙、消息积压或业务函数阻塞时，collect() 会等。这个版本没有 send 超时与取消接口。销毁 handle 只释放 handle 自己的强引用；排队 invocation 的 self 仍维持其生命，目标方法继续执行。放弃结果不等于取消命令。
 
+## 同步 OwnThread 调用其实是一条双 Engine 往返链
+
+跨 Engine 的同步 `call()` 不能只画成“caller 等 target 返回”。固定实现实际走的是：
+
+~~~text
+caller Engine thread
+    │
+    │ send invocation
+    ▼
+target Engine mqueue
+    │
+    │ executeAndDispose(): 执行业务函数
+    ▼
+caller Engine mqueue
+    │
+    │ 同一个 invocation 回投
+    ▼
+collect() 观察 retv.isExecuted()
+~~~
+
+因此 caller Engine 不是一个可有可无的元数据字段。它既决定结果 completion 回到哪里，也决定阻塞 `collect()` 怎样等待。固定源码甚至在 `checkCaller()` 中明确把“OwnThread call/collect 没有 caller Engine”标成经常导致死锁的错误配置。
+
+外部普通线程等待 caller Engine 时，`waitForMessagesInternal()` 使用了经典的 predicate + condition-variable 握手：等待者持有 `msg_lock` 复查谓词；`processMessages()` 在处理完 invocation 后也会至少取得一次同一把锁，再 broadcast。这样 producer/consumer 不能在“谓词刚检查完、线程还没进入 wait”这个窗口无约束地擦肩而过。
+
+Engine **自己的线程**同步调用另一个 Engine 时却走另一条路径：
+
+~~~cpp
+// 固定提交源码摘录：ExecutionEngine::waitAndProcessMessages()
+void ExecutionEngine::waitAndProcessMessages(
+    boost::function<bool(void)> const& pred)
+{
+    if (pred())
+        return;
+
+    while (true) {
+        this->processMessages();
+        {
+            os::MutexLock lock(msg_lock);
+            if (!pred()) {
+                msg_cond.wait(msg_lock);
+            } else {
+                return;
+            }
+        }
+    }
+}
+~~~
+
+completion 的 producer 则通过：
+
+~~~cpp
+// 固定提交源码摘录：ExecutionEngine::process(DisposableInterface*)
+bool result = mqueue->enqueue(c);
+this->getActivity()->trigger();
+msg_cond.broadcast();
+return result;
+~~~
+
+把 invocation 放回 caller。这里的 `broadcast()` 没有与 caller 的 `msg_lock` 建立同一临界区。generic GNU/Linux backend 又直接把 RTT condition 落到 `pthread_cond_wait()` / `pthread_cond_broadcast()`；条件变量通知本身没有“未消费通知计数”。
+
+因此固定源码存在一个需要单独审计的 **self-wait lost-wakeup 窗口**：
+
+~~~text
+caller Engine: processMessages() 已排空
+caller Engine: 持 msg_lock，检查 pred == false
+
+target Engine: 业务函数完成
+target Engine: caller->process(invocation)
+target Engine: completion 入 caller mqueue
+target Engine: broadcast()        ← caller 尚未真正进入 wait
+
+caller Engine: pthread_cond_wait()
+               释放 msg_lock 并睡眠
+
+结果：
+completion 已经在 caller mqueue 中，
+但唯一能消费它的 caller Engine 自己睡着了，
+而那次 broadcast 不会被条件变量保存。
+~~~
+
+这不是说每一次 OwnThread 同步调用都会挂住；它是固定提交在特定交错下暴露的静态并发风险。关键也不是“condition variable 不可靠”，而是 **谓词状态变化、入队与通知没有和 waiter 的 check→wait 边界使用同一同步协议**。
+
+如果从零设计这种 owner-thread RPC，至少有三种更容易证明的做法：
+
+~~~text
+方案 A：mutex + predicate
+  producer 在同一 mutex 下改变完成状态
+  waiter while (!done) cond.wait(lock)
+
+方案 B：有记忆的 completion primitive
+  semaphore / counting event / generation counter
+  完成先发生也不会丢失
+
+方案 C：owner 不阻塞等待自己的 queue
+  把同步 call 改成显式状态机/future continuation
+  completion 下一轮由 owner 正常 dequeue
+~~~
+
+对机器人控制 runtime，第三种往往更值得优先考虑：负责周期推进的唯一 owner 不应为了等待另一个执行域的返回，把自己变成“既是唯一消费者、又在等待有人唤醒它”的阻塞点。
+
 ## 有界队列仍然没有周期预算
 
 100 个 invocation 堆在 Engine 队列时，后续 send 会失败而不是无界分配队列节点。但 processMessages() 会一直 drain 到空；若生产者持续补入消息，控制周期仍会被大量工作挤压。容量限制瞬时空间，不保证周期执行时间；该提交没有可配置的 per-cycle batch budget。

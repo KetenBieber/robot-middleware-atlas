@@ -3,7 +3,7 @@ SPHINXBUILD ?= $(PYTHON) -m sphinx
 SOURCEDIR = docs
 BUILDDIR = site
 
-.PHONY: html html-full package-site check-editorial check-baselines check-examples check-libuv check-asio check-folly check-seastar check-nginx check-libzmq check-ros1 check-ros2 check-rmwzenoh check-zenoh check-lcm check-cyber check-ecal check-ethercat check-soem check-cyclonedds check-fastdds check-iceoryx2 check-ucx check-rosidlbuffer check-holoscan check-communication-foundations check-document-hygiene check-links clean
+.PHONY: html html-full package-site check-editorial check-baselines check-examples check-libuv check-asio check-folly check-seastar check-nginx check-libzmq check-orocos check-ros1 check-ros2 check-rmwzenoh check-zenoh check-lcm check-cyber check-ecal check-ethercat check-soem check-cyclonedds check-fastdds check-iceoryx2 check-ucx check-rosidlbuffer check-holoscan check-communication-foundations check-document-hygiene check-links clean
 
 html:
 	$(PYTHON) tools/build_sphinx_sources.py
@@ -14,6 +14,7 @@ html:
 	$(PYTHON) tools/check_seastar_closure.py
 	$(PYTHON) tools/check_nginx_closure.py
 	$(PYTHON) tools/check_libzmq_closure.py
+	$(PYTHON) tools/check_orocos_closure.py
 	$(PYTHON) tools/check_ros1_closure.py
 	$(PYTHON) tools/check_ros2_closure.py
 	$(PYTHON) tools/check_rmwzenoh_closure.py
@@ -45,6 +46,7 @@ html-full:
 	$(PYTHON) tools/check_seastar_closure.py
 	$(PYTHON) tools/check_nginx_closure.py
 	$(PYTHON) tools/check_libzmq_closure.py
+	$(PYTHON) tools/check_orocos_closure.py
 	$(PYTHON) tools/check_ros1_closure.py
 	$(PYTHON) tools/check_ros2_closure.py
 	$(PYTHON) tools/check_rmwzenoh_closure.py
@@ -107,6 +109,10 @@ check-nginx:
 check-libzmq:
 	$(PYTHON) tools/build_sphinx_sources.py
 	$(PYTHON) tools/check_libzmq_closure.py
+
+check-orocos:
+	$(PYTHON) tools/build_sphinx_sources.py
+	$(PYTHON) tools/check_orocos_closure.py
 
 check-ros1:
 	$(PYTHON) tools/build_sphinx_sources.py

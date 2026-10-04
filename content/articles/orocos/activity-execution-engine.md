@@ -152,7 +152,7 @@ bool mstopRequested;
 int mwaitpolicy;
 ~~~
 
-在这个固定提交里，`mtimeout` 的读写没有共同 mutex，也没有 atomic 操作。若 ClientThread 上的 `trigger()` 与 Activity 线程同时读写它，通知调用本身不能代替对该字段的同步；在 C++ 并发模型中这属于应当修正的未同步访问。它还是一个 pending 位而非计数器：两个 trigger 在消费前都只留下 `true`，不会记住“两次必须执行两轮”。缩小版若要求无丢失的事件次数，可在队列中保存事件；若只需合并成“至少有一次工作”，则用 mutex+谓词或 atomic exchange 明确这个语义，并让承载数据的队列单独建立发布/消费同步。
+在这个固定提交里，`mtimeout` 的读写没有共同 mutex，也没有 atomic 操作。非周期 Activity 的 `timeout()` 可以由别的线程写入 `mtimeout=true`，Activity 线程则在 `loop()` 中读取并清零；条件变量通知本身不能代替对这个普通 `bool` 的同步。在 C++ 并发模型中，这属于应当修正的未同步访问。它还是一个 pending 位而非计数器：两次 `timeout()` 在消费前都只留下 `true`，不会记住“两次必须执行两轮”。缩小版若要求无丢失的事件次数，可在队列中保存事件；若只需合并成“至少有一次工作”，则用 mutex+谓词或 atomic exchange 明确这个语义，并让承载数据的队列单独建立发布/消费同步。
 
 runnable 只是内核可选择该线程的状态，不表示线程已经执行。线程在条件变量上等待时，pthread 接口会进入内核阻塞路径；调度器保存当前线程的寄存器和栈指针等执行现场，再让另一条 runnable 线程占用 CPU，这种交接称为上下文切换。通知到来只会让等待线程有资格重新竞争；它可能仍要等更高优先级工作先运行。RTT Linux 适配通过 pthread_cond_wait / pthread_cond_timedwait / pthread_cond_broadcast 实现 os::Condition；pthread 可能借助 futex，但 RTT 没有直接调用 futex，实际系统调用路径由 libc 与内核决定。
 
