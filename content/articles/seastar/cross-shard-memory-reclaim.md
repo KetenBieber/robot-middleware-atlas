@@ -141,6 +141,8 @@ memory pressure
 
 `foreign_ptr` 解决的是“复杂对象 destructor 必须回 owner shard执行”。
 
+它不是一个自动远程代理：wrapper 可以跨 shard 移动，但 mutable pointee 的直接访问仍应遵守 owner-computes；真正特殊的是最后一次 release/refcount/destructor 必须回 owner。完整的 `sharded<Service>` 构造/调用/stop 与 `foreign_ptr` copy/reset/destroy 协议见 [Sharded 与 foreign_ptr：Owner-Shard、跨核调用与析构执行域](sharded-foreign-ptr.md)。
+
 SMP request queue 与 cross-CPU free list 恰好展示了 topology 如何决定并发数据结构：固定 A→B 请求只有一个 producer 和一个 consumer，因此使用 pair-wise SPSC；而任意 foreign core 都可能归还 B-owned memory，所以 allocator ingress 是 MPSC。SMP 的完整 request/completion 协议见 [SMP Message Queue：Owner-Shard、双向 SPSC 与跨核 Round-trip Backpressure](smp-message-queue.md)。
 
 `xcpu_freelist` 解决的是“allocator-owned raw memory 最终必须回 owner allocator”。

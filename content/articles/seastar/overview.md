@@ -98,6 +98,8 @@ reactor executes it
 
 > move computation to data owner，而不是让所有 core 共享 data。
 
+这个原则在对象层进一步分成两条：`sharded<Service>` 把 computation 发到目标 shard 的本地 Service，而 `foreign_ptr<Ptr>` 允许 ownership handle 跨 shard 移动、却把最终 release/destructor 送回资源 owner。完整对象与析构执行域见 [Sharded 与 foreign_ptr：Owner-Shard、跨核调用与析构执行域](sharded-foreign-ptr.md)。
+
 ## 这条原则甚至延伸到内存释放
 
 Seastar 的 allocator 是 per-shard 的。

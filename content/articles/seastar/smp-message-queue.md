@@ -32,6 +32,8 @@ origin promise
 
 > **一个 pair-wise cross-shard RPC transport：origin shard 负责创建和最终销毁 work item，target shard 负责执行 computation，request/completion 各走一条单向 SPSC channel，service-group semaphore 则限制完整 round-trip outstanding。**
 
+这条 transport 不只服务业务 RPC，也承载 Runtime 自己的 ownership 操作：`sharded<Service>::invoke_on()` 用它把 computation 发给 Service owner，`foreign_ptr::copy()/destroy_on()` 用它把 refcount 或最终 release 发回 pointer owner。见 [Sharded 与 foreign_ptr：Owner-Shard、跨核调用与析构执行域](sharded-foreign-ptr.md)。
+
 ---
 
 # 一、先从 Shard-per-core 的真正约束出发

@@ -60,6 +60,8 @@ delete continuation
 - lifecycle error reporting；
 - background-work liveness discipline。
 
+跨 shard ownership 也依赖同一套 Future completion：`sharded<Service>::invoke_on()` 的远端结果通过 Promise 回 origin，而 `foreign_ptr::copy()/destroy()` 把跨核 refcount/reclaim 也表示成 Future。对象 owner 与析构执行域的完整模型见 [Sharded 与 foreign_ptr：Owner-Shard、跨核调用与析构执行域](sharded-foreign-ptr.md)。
+
 ---
 
 # 一、同步调用栈为什么不适合 Reactor
