@@ -2541,6 +2541,8 @@ XPUB
   + DIST output
 ~~~
 
+PUB/SUB 进一步把 DIST 的 matching prefix 与 prefix trie 结合：XSUB/SUB 保存本地可重放的订阅状态，XPUB/PUB 保存 `prefix → set<pipe_t*>`，第一帧匹配后直接把 Pipe materialize 到 DIST 当前 matching 集合。完整链见 [PUB / SUB：订阅 Trie、反向控制面与 Distributor](pubsub-trie-distributor.md)。
+
 很多 ZeroMQ pattern 的差异，
 
 并不是完全不同的 transport engine，

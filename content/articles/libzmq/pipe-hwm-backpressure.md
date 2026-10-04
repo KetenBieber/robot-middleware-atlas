@@ -1007,6 +1007,8 @@ socket/session scheduler
 
 当 socket pattern 不是“任选一个可写 peer”，而是应用用 routing-id 指定目标时，HWM 就只是第二层判断：先从 routing registry 找到目标 Pipe，再判断该 Pipe 是否有容量。完整的显式路由、mandatory 错误语义与 handover 生命周期见 [DEALER / ROUTER：显式路由、Routing-ID 生命周期与 Multipart 粘性](dealer-router-routing.md)。
 
+PUB/SUB 又是第三种组合：MTrie 先决定语义上哪些 Pipe 应接收，DIST 再把这些 Pipe 与当前 HWM/eligible 状态相交。慢订阅者只是暂时退出调度资格，并不会因此丢失订阅语义；见 [PUB / SUB：订阅 Trie、反向控制面与 Distributor](pubsub-trie-distributor.md)。
+
 ## 42. ypipe 只知道
 
 ~~~text

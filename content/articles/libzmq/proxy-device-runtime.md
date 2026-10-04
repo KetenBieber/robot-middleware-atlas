@@ -38,6 +38,8 @@ while (true) {
 
 libzmq 的 proxy.cpp 很适合用来理解：**一个“业务层转发循环”怎样复用底层 socket 的 backpressure，却仍然需要自己设计 poller 状态机。**
 
+在 XSUB/XPUB 组合中，Proxy 还会承接一条反向控制链：业务数据向订阅者方向流，而 subscribe/cancel interest 反向传播。为什么 XSUB 必须保存可重放的本地 Trie、XPUB 为什么维护 `prefix → Pipe set`，以及 forwarding device 为什么不能简单吞掉 duplicate subscriptions，见 [PUB / SUB：订阅 Trie、反向控制面与 Distributor](pubsub-trie-distributor.md)。
+
 ## 1. Proxy 不是新的 Transport
 
 Proxy 没有自己实现：
