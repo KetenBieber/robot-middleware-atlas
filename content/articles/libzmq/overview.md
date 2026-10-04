@@ -107,3 +107,5 @@ control: object_t -> command_t -> mailbox -> poller -> owner thread
 ~~~
 
 Mailbox、yqueue/ypipe、Pipe/HWM、socket owner、I/O Reactor、Session/Engine 与 socket pattern 共同组成这套消息 Runtime：底层负责所有权、发布、唤醒和容量，上层再叠加公平调度、显式路由与订阅匹配语义。
+
+其中 DEALER 可以直接理解成 `FQ + LB`；ROUTER 则把输出选择改成 `routing-id → pipe_t*` 的精确索引，并用 `_current_in/_current_out` 把已经开始的 multipart 与后来发生的 disconnect/handover 隔离。见 [DEALER / ROUTER：显式路由、Routing-ID 生命周期与 Multipart 粘性](dealer-router-routing.md)。

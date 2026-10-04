@@ -1005,6 +1005,8 @@ socket/session scheduler
 
 单条 `pipe_t` 只回答“这条连接当前能不能继续进展”；多条 Pipe 如何被放进 active prefix、如何 O(1) 失活/恢复、multipart 如何冻结 destination / participant set，则由 [FQ / LB / DIST：Active Prefix、Multipart 原子性与消息调度器](fq-lb-dist-schedulers.md) 负责。
 
+当 socket pattern 不是“任选一个可写 peer”，而是应用用 routing-id 指定目标时，HWM 就只是第二层判断：先从 routing registry 找到目标 Pipe，再判断该 Pipe 是否有容量。完整的显式路由、mandatory 错误语义与 handover 生命周期见 [DEALER / ROUTER：显式路由、Routing-ID 生命周期与 Multipart 粘性](dealer-router-routing.md)。
+
 ## 42. ypipe 只知道
 
 ~~~text

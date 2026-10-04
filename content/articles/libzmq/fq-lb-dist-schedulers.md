@@ -2413,6 +2413,8 @@ DEALER
   +-- _lb
 ~~~
 
+DEALER 的 outbound 是“任选一个 writable peer”；ROUTER 则完全不同，它先用 routing-id 做精确索引，再把解析到的 Pipe 冻结为整条 multipart 的 current target。duplicate identity、mandatory 与 handover 如何让 routing registry 变成生命周期状态机，见 [DEALER / ROUTER：显式路由、Routing-ID 生命周期与 Multipart 粘性](dealer-router-routing.md)。
+
 attach pipe：
 
 ~~~cpp
