@@ -17,6 +17,8 @@ inproc:// 很容易被误解成“更快的 TCP”。实际上它根本没有 TC
 - 为什么 endpoint lookup 必须参与 seqnum 生命周期屏障；
 - Context 退出时为什么还要处理尚未匹配的 pending connection。
 
+最后一点不是清理细节：pending inproc connect 已经可能持有 Pipe 和 seqnum 生命周期债务，Context shutdown 不能把 registry 直接清空，而要把这些半完成关系推进到可终止状态，再等待 Reaper 的全局 socket barrier。见 [Context 与 Reaper：Slot 地址空间、Ownership Handoff 与最终销毁屏障](context-reaper-lifecycle.md)。
+
 这套逻辑非常值得读，因为它把“服务发现 + 本地 IPC 建链 + 并发生命周期”压缩到了几百行代码里。
 
 ## 1. 最朴素的 inproc 实现为什么不够

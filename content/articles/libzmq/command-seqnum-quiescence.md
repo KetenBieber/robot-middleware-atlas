@@ -52,6 +52,8 @@ Reaper
 
 > **它是一笔“目标对象尚欠多少个已获准、但还没有完成处理的生命周期敏感 command”的债务。**
 
+这笔债务最终还决定 socket 的 logical tid 什么时候可以安全回收到 Context free-slot 列表：如果 slot 在旧 command quiescent 之前复用，晚到 command 就可能命中新 socket，形成典型 ABA/lifecycle alias。完整的 slot/reaper/DONE 链见 [Context 与 Reaper：Slot 地址空间、Ownership Handoff 与最终销毁屏障](context-reaper-lifecycle.md)。
+
 理解这套机制，对任何 actor runtime、event loop、设备驱动、机器人通信线程和异步资源管理器都很有价值。
 
 ---

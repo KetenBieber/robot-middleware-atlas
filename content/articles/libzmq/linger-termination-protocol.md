@@ -70,6 +70,8 @@ libzmq 把这些问题拆成多层协议。
 
 前面的 [Pipe 与 HWM](pipe-hwm-backpressure.md) 解释数据面怎样流动，[Command Seqnum 与对象销毁屏障](command-seqnum-quiescence.md) 解释跨线程 command 的 lifetime reservation；这里把它们汇合到完整 shutdown 协议。
 
+而 socket 自身在这些内部 barrier 全部满足后仍不能立刻 `delete`：Reaper 还要摘掉 poller registration、释放 Context slot、回收全局 socket registry，并最终向 Context 发布 DONE。最外层的地址复用与 Runtime join 见 [Context 与 Reaper：Slot 地址空间、Ownership Handoff 与最终销毁屏障](context-reaper-lifecycle.md)。
+
 ---
 
 # 一、先把四个时间点彻底分开

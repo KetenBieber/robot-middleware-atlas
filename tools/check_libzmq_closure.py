@@ -202,8 +202,26 @@ REQUIRED = {
         "process_destroy",
     ),
     "context-reaper-lifecycle": (
-        "Reaper", "_slots", "_empty_slots", "send_reap",
-        "start_reaping", "send_done"
+        "Reaper",
+        "_slots",
+        "_empty_slots",
+        "_sockets",
+        "_slot_sync",
+        "_term_mailbox",
+        "send_reap",
+        "start_reaping",
+        "send_reaped",
+        "send_done",
+        "check_destroy",
+        "_destroyed",
+        "logical tid",
+        "ABA",
+        "quiescence-before-reuse",
+        "REAPED",
+        "DONE",
+        "request_stop",
+        "Completion Debt Counter",
+        "Quiescence Vector",
     ),
 }
 
