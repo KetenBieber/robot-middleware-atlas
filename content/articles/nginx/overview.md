@@ -69,6 +69,8 @@ process posted normal events
 
 这是一套明确 phase order。
 
+需要注意当前固定源码版本的实际默认：`accept_mutex` 配置默认是关闭的；Linux epoll + 多 worker 时会优先给共享 listening event 加 `EPOLLEXCLUSIVE`，而 `SO_REUSEPORT` 则进一步把 listening socket 克隆成 per-worker 资源。三种入口 ownership、accept admission、connection slot 分配和 epoll stale-event generation 的完整链见 [Worker / epoll / Accept：多进程 Reactor、Accept Ownership 与 Stale Event Generation](worker-epoll-accept.md)。
+
 ## 为什么 nginx 倾向单线程 Worker
 
 一个 connection 的 read/write event、request state、buffer chain、timer 大多由同一 worker 修改。
@@ -127,6 +129,8 @@ write_events[]
 `ngx_get_connection()` 从 free_connections 单链表取一项；close 后再归还。
 
 这把最大连接数直接变成显式资源边界。
+
+这里还有一个与固定对象池强相关的正确性问题：slot 地址会高频复用，而内核 epoll ready list 可能残留上一代 fd 的事件。nginx 每次重新分配 slot 都翻转 `ngx_event_t::instance`，并把这一位编码进 `epoll_event.data.ptr`；事件返回时先比较 generation 再执行 handler。
 
 ## Connection 紧张时为什么会主动回收 Reusable Connection
 

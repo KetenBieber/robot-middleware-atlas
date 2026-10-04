@@ -100,6 +100,8 @@ wev->instance = !instance;
 
 每次 connection slot 被重新分配，instance bit 翻转。
 
+这不是 connection pool 自己孤立的技巧。epoll 注册时真正写入内核的是 `connection pointer | instance`；ready event 返回后先拆出 instance，并验证 `c->fd != -1` 且当前 read event generation 仍匹配。也就是说，slot pool 与 event backend 共同组成 stale-event 防线。完整 accept/epoll 执行链见 [Worker / epoll / Accept：多进程 Reactor、Accept Ownership 与 Stale Event Generation](worker-epoll-accept.md)。
+
 ## 为什么只要 1 Bit 就有用
 
 epoll ready list 里可能已经存在旧 socket generation 的事件。
