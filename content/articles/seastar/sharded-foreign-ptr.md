@@ -3805,6 +3805,8 @@ raw allocation-level
 bulk cross-CPU free handoff
 ~~~
 
+allocator 这一层会进一步把协议做得更轻：owner 直接编码在 virtual-address region 中，foreign free 只做 intrusive release-CAS，owner Reactor 用 acquire-exchange 整批接管，且普通 reclaim 不要求 reverse completion。完整链见 [Per-shard Allocator 与 Cross-CPU Free：地址编码、MPSC Ingress 与 Owner-side Reclaim](cross-shard-memory-reclaim.md)。
+
 ---
 
 # 二百一十三、两者解决同一根问题的不同层级

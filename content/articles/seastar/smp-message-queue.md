@@ -34,6 +34,8 @@ origin promise
 
 这条 transport 不只服务业务 RPC，也承载 Runtime 自己的 ownership 操作：`sharded<Service>::invoke_on()` 用它把 computation 发给 Service owner，`foreign_ptr::copy()/destroy_on()` 用它把 refcount 或最终 release 发回 pointer owner。见 [Sharded 与 foreign_ptr：Owner-Shard、跨核调用与析构执行域](sharded-foreign-ptr.md)。
 
+但 raw allocator storage 的归还没有必要支付完整 RPC/Future 成本：任意 foreign core 都可能把 owner-owned memory 归还给同一 allocator，因此 Seastar 使用 many-producer / one-owner-consumer 的 intrusive atomic free-list，而不是 pair-wise SPSC。两种拓扑的对照见 [Per-shard Allocator 与 Cross-CPU Free：地址编码、MPSC Ingress 与 Owner-side Reclaim](cross-shard-memory-reclaim.md)。
+
 ---
 
 # 一、先从 Shard-per-core 的真正约束出发

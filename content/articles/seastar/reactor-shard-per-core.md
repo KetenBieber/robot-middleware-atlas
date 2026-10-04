@@ -131,6 +131,8 @@ Seastar 会先 poll，空闲超过 `max_poll_time` 后才真正关闭 quota time
 
 Reactor 不把所有子系统写死成一个巨型 switch，而是维护 `std::vector<pollfn*> _pollers`。
 
+其中 cross-CPU freelist poller 很能体现 Reactor 的“完整 CPU runtime”角色：foreign CPU 只把 dead storage 发布到 owner 的 atomic ingress，不主动 wake；owner Reactor 在正常 poll 中批量接管，内存压力时 allocator 又会主动 drain。这个 allocator-side progress protocol 见 [Per-shard Allocator 与 Cross-CPU Free：地址编码、MPSC Ingress 与 Owner-side Reclaim](cross-shard-memory-reclaim.md)。
+
 每个 subsystem 通过 poll interface 提供：
 
 ~~~text

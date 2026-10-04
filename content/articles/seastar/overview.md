@@ -120,6 +120,8 @@ A local allocator performs real free
 
 也就是说连 free 都遵守 owner-computes。
 
+这一层不是用完整 `smp::submit_to()` 做每次 free，而是利用虚拟地址直接恢复 allocation owner，把已经死亡的 storage 作为 intrusive node 用 release-CAS 推入 owner 的 MPSC ingress，再由 owner Reactor 以 acquire-exchange 整批摘链；正常负载可以延迟 drain，内存压力时再主动回收。完整协议见 [Per-shard Allocator 与 Cross-CPU Free：地址编码、MPSC Ingress 与 Owner-side Reclaim](cross-shard-memory-reclaim.md)。
+
 ## 与 Folly 的关系
 
 两者不是互斥的。
