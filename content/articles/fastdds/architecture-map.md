@@ -160,28 +160,115 @@ RTPS endpoint
 
 这个抽象和 YARP Carrier、eCAL transport gate、Cyclone DDS ddsi_tran 有同一个设计动机：协议层表达“我要把一组字节送到 locator”，系统层决定具体 I/O 实现。
 
-## 一张 ownership 图
+## 一张更准确的 ownership 图
+
+DDS 对象树和 RTPS 运行时树不是一棵树。Publisher/Subscriber 属于
+DomainParticipantImpl；RTPSParticipantImpl 是协议运行时根。二者通过
+DataWriterImpl/DataReaderImpl 里的 low-level endpoint 指针连接：
 
 ~~~text
 DomainParticipantFactory
 └─ DomainParticipantImpl
-   └─ RTPSParticipantImpl
-      ├─ BuiltinProtocols
-      │  ├─ PDP
-      │  └─ EDP
-      ├─ PublisherImpl
-      │  └─ DataWriterImpl
-      │     ├─ WriterHistory
-      │     └─ StatefulWriter
-      │        └─ ReaderProxy[]
-      ├─ SubscriberImpl
-      │  └─ DataReaderImpl
-      │     ├─ ReaderHistory
-      │     └─ StatefulReader
-      │        └─ WriterProxy[]
-      ├─ FlowController
-      ├─ Event resources
-      └─ NetworkFactory / transports
+   ├─ PublisherImpl
+   │  └─ DataWriterImpl
+   │     ├─ WriterHistory
+   │     └─ writer_ ─────────────┐
+   ├─ SubscriberImpl             │
+   │  └─ DataReaderImpl          │
+   │     ├─ ReaderHistory        │
+   │     └─ reader_ ────────┐    │
+   └─ RTPSParticipant ──────┼────┼─> RTPSParticipantImpl
+                            │    │   ├─ BuiltinProtocols
+                            │    │   │  ├─ PDP / EDP / WLP
+                            │    │   ├─ StatefulReader / Writer
+                            │    │   ├─ ReaderProxy / WriterProxy
+                            │    │   ├─ FlowController
+                            │    │   ├─ ResourceEvent
+                            │    │   └─ NetworkFactory / ReceiverResource
+                            │    │
+                            └────┴── protocol endpoint handles
 ~~~
 
-后续文章就沿这张图逐层展开。
+这个区分很重要：删除 Publisher 并不等于立刻销毁整个 RTPS Participant；
+删除一个 RTPS Writer 也不应越权销毁 DDS Topic。理解两棵对象树之间的桥，
+才能分析真正的 shutdown 顺序。
+
+## 同一份样本如何穿过四层
+
+发送端从 API 到字节流：
+
+~~~text
+DataWriter
+  ↓
+DataWriterImpl
+  ↓
+CacheChange_t + WriterHistory
+  ↓
+StatefulWriter / StatelessWriter
+  ↓
+RTPSMessageGroup
+  ↓
+NetworkFactory
+  ↓
+UDP / TCP / SharedMemTransport
+~~~
+
+接收端则反向补回协议与 DDS 语义：
+
+~~~text
+ReceiverResource
+  ↓
+MessageReceiver
+  ↓
+StatefulReader / StatelessReader
+  ↓
+WriterProxy + fragment/reorder state
+  ↓
+ReaderHistory
+  ↓
+DataReaderImpl
+  ↓
+Listener / Condition / take
+~~~
+
+因此 Fast DDS 的关键不是“有很多类”，而是每一层只负责一种约束：
+
+| 层 | 主要问题 | 典型状态 |
+| --- | --- | --- |
+| DDS façade | 用户语义 | Topic、QoS、Status |
+| Impl | DDS 与 RTPS 适配 | TypeSupport、payload pool、timer |
+| RTPS endpoint | 协议状态机 | sequence、ReaderProxy、WriterProxy |
+| History | 样本生命周期 | CacheChange、resource limits |
+| Transport | 字节传输 | locator、receiver、socket/shared memory |
+
+## 控制面和数据面在哪里汇合
+
+PDP/EDP 先建立远端 endpoint 的代理对象；匹配完成以后，代理对象直接进入
+StatefulWriter/StatefulReader 的可靠性状态机。也就是说 Discovery 的最终产物
+不是一条“发现成功”的布尔值，而是数据面可使用的 ReaderProxy/WriterProxy。
+
+~~~text
+PDP / EDP
+  ↓
+remote endpoint metadata
+  ↓
+QoS compatibility
+  ↓
+ReaderProxy / WriterProxy
+  ↓
+DATA / HEARTBEAT / ACKNACK
+~~~
+
+## 为什么这一套对象分解适合机器人系统
+
+机器人中间件同时面对小而急的控制消息和大而连续的感知数据。如果把它们都
+压成“socket + callback”，无法分别回答延迟、内存和可靠性问题。Fast DDS 的
+对象边界使这些问题可以分别定位：
+
+- 控制命令尾延迟：先看 write、History、FlowController 与 publish mode；
+- 点云内存：看 payload pool、fragment、History depth、Data Sharing；
+- 启动抖动：看 PDP/EDP 与 endpoint matching；
+- callback 延迟：看 receiver、ReaderHistory、WaitSet/Listener；
+- 关闭卡顿：看 transport shutdown、TimedEvent 与 endpoint quiescence。
+
+后续文章沿这张运行时地图逐层展开，而不是按源码目录顺序阅读。

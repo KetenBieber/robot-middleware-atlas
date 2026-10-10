@@ -169,3 +169,60 @@ increment
 - callback 执行时间。
 
 只测一个 publisher + 一个 subscriber + 64 字节 localhost，并不能验证真实感知数据链。
+
+## 接收端与控制面的完整闭环
+
+接收路径最终必须和 Writer 端 reliability 对齐：
+
+~~~text
+DATA / DATAFRAG
+      |
+      v
+StatefulReader
+      |
+      v
+WriterProxy 更新 sequence state
+      |
+      v
+ReaderHistory 保存完整 CacheChange
+      |
+      v
+ACKNACK 反馈缺失状态
+      |
+      v
+WriterProxy 请求 WriterHistory 修复
+~~~
+
+因此 ReaderHistory 不是终点，而是可靠传输状态机中的一个节点。
+
+## 机器人大数据类型为什么更容易暴露 Reader 设计
+
+小消息：
+
+~~~text
+cmd_vel
+pose
+status
+~~~
+
+通常只涉及单个 DATA。
+
+但是：
+
+~~~text
+camera image
+point cloud
+map update
+~~~
+
+会进入：
+
+~~~text
+DATAFRAG
+fragment buffer
+reassembly
+resource limit
+retransmission
+~~~
+
+这也是为什么机器人中大带宽 topic 的 QoS 设计不能只看 reliability 字段，而必须同时看 history depth、resource limits 与 memory policy。

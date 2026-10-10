@@ -154,3 +154,96 @@ m_network_Factory.Shutdown();
 > 先阻止 Transport 产生新 callback，再释放 callback 会访问的 Reader/Writer 对象。
 
 和所有高并发中间件一样，关闭顺序本身就是并发正确性。
+
+## Locator 是协议层与 I/O 层之间的地址合同
+
+RTPS endpoint 处理的是 Locator，而不是裸 socket fd。Locator 描述 transport kind、
+address、port 等寻址信息；NetworkFactory 再决定哪个 TransportInterface 能处理它。
+
+~~~text
+ReaderProxy / WriterProxy locator
+        ↓
+NetworkFactory
+        ↓
+matching TransportInterface
+        ↓
+send / create receiver resource
+~~~
+
+这样可靠性状态机不需要为 UDP、TCP、SHM 各写一套 ReaderProxy。
+
+## ReceiverResource 为什么是长期对象
+
+接收端不能每来一个 packet 就临时创建 socket、parser 和 endpoint lookup。Participant
+初始化时建立 ReceiverResource，并把 MessageReceiver 注册进去，运行期由 transport
+持续把字节交给同一个协议解析入口。
+
+~~~text
+transport receive loop
+  ↓
+ReceiverResource
+  ↓
+MessageReceiver::processCDRMsg
+  ↓
+submessage dispatch
+~~~
+
+这也是 receiver thread 与 application thread 分离的根源。
+
+## 一个 UDP datagram 不是一个 DDS sample
+
+RTPS datagram 里可以包含多个 submessage，一个大 sample 又可以被拆成多个 DATAFRAG。
+因此下面两个等式都不成立：
+
+~~~text
+1 UDP packet == 1 DDS sample
+1 write()     == 1 send()
+~~~
+
+网络抓包时必须按 RTPS sequence/fragment 还原语义，不能只数 UDP 包。
+
+## Fragment size、MTU 与 socket buffer 是三个层级
+
+大消息路径可能依次受到：
+
+~~~text
+DDS serialized payload
+  ↓ RTPS fragmentation
+RTPS message size
+  ↓ transport
+UDP/TCP/SHM frame
+  ↓ OS/NIC
+MTU + socket buffers
+~~~
+
+调大 SO_SNDBUF 不能消除 RTPS fragment；调小 fragment 也不会自动改变 History 中
+CacheChange 的生命周期。每个参数要针对对应层级调。
+
+## 同步和异步 send 的线程归属
+
+同步 publish 下，应用 write 路径可能继续进入 transport send；异步 publish 下，
+CacheChange 先进入 FlowController，由异步 sender 线程择机发送。
+
+这带来两种不同的故障表象：
+
+~~~text
+sync overload  → write latency 上升
+async overload → write 看似正常，但 queue/data age 上升
+~~~
+
+所以异步模式的监控不能只看 API 返回时间。
+
+## Transport shutdown 的真正目标是 quiescence
+
+先调用 NetworkFactory::Shutdown，再 unregister/disable receiver，目的不是“按顺序好看”，
+而是建立一个时间点：从此以后不会再有 transport thread 产生新的 MessageReceiver
+callback。只有这个条件成立，后续释放 Reader/Writer target 才安全。
+
+这个模式可以迁移到任何机器人网络 runtime：
+
+~~~text
+stop ingress
+→ join/disable I/O execution
+→ detach dispatch targets
+→ free state
+~~~

@@ -175,3 +175,96 @@ network receiver
 | Executor | callback | 取决于业务 | configured |
 
 没有这张表，“Fast DDS 是实时 DDS”对系统设计没有足够信息。
+
+## 一张完整 execution graph
+
+Fast DDS 运行时更适合画成执行上下文图，而不是“DDS 有几个线程”：
+
+~~~text
+Application write thread
+   └─ serialize / History commit
+            │
+            ├─ sync publish ──> Transport send
+            │
+            └─ async publish ─> FlowController thread ─> Transport
+
+Transport receiver thread
+   └─ MessageReceiver
+        └─ StatefulReader
+             └─ ReaderHistory
+                  ├─ Listener callback
+                  └─ Condition notify
+                         └─ application WaitSet thread
+
+ResourceEvent thread
+   └─ heartbeat / nack / deadline / liveliness timers
+~~~
+
+同一个 Topic 的端到端延迟可能跨越四种线程，因此不能只给 ROS 2 Executor 提升优先级
+就宣称完成实时调度。
+
+## TimedEvent 集中化的收益与代价
+
+把很多逻辑 timer 放进一个 ResourceEvent thread，避免“一个 timer 一个线程”的巨大
+上下文切换成本，也让下一触发时间可以统一排序。代价是：某个 timer callback 如果做
+过重工作，会延迟同线程上的其他 timer。
+
+因此 heartbeat/nack/deadline callback 应保持短小，把长任务留给其他执行上下文。
+
+## shutdown 是逆向依赖图
+
+创建顺序大致是：
+
+~~~text
+Participant
+→ transports/receivers/events
+→ builtin protocols
+→ user endpoints
+→ histories/pools
+~~~
+
+关闭则必须优先停止会继续“主动执行”的来源：
+
+~~~text
+stop new application work
+→ stop/detach endpoint protocol activity
+→ shutdown network ingress
+→ disable/join receiver work
+→ cancel timed/async work
+→ release histories/pools/listeners
+→ destroy participant
+~~~
+
+真正目标不是机械反序，而是确保每一层释放前，其潜在 caller 已经 quiescent。
+
+## 一个典型 use-after-free 时序
+
+错误顺序：
+
+~~~text
+t0 destroy EDP target
+t1 receiver thread already has packet
+t2 MessageReceiver dispatches DATA to old endpoint pointer
+t3 callback enters freed object
+~~~
+
+disableReader/removeEndpoint 这类步骤正是在 t0 前切断 t2 的 dispatch route。关闭协议
+本身就是内存安全设计的一部分。
+
+## 线程优先级必须和数据年龄一起设计
+
+给 receiver thread 很高优先级，如果应用消费跟不上，只会更快地把数据堆进 History；
+给 FlowController 很高优先级，如果 WriterHistory 已经积累旧命令，也可能更快发送过时
+数据。实时系统的目标不是“线程越快越好”，而是从产生到消费的 data age 有界。
+
+建议把监控指标和线程对应起来：
+
+| 执行上下文 | 最值得监控 |
+| --- | --- |
+| write thread | publish WCET、timeout |
+| FlowController | pending age、bytes/period |
+| receiver | packet/fragment backlog |
+| ResourceEvent | timer lateness |
+| WaitSet/Executor | wake-to-callback delay |
+
+这样才能定位抖动到底来自协议、I/O 还是业务调度。

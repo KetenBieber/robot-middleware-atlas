@@ -142,3 +142,83 @@ DDS 对象“new 出来”与“网络上可见”是两回事。
 enable 完成之后，RTPS endpoint 才进入 Participant 的 builtin discovery / matching 体系。
 
 这也是为什么 QoS、Type 与 resource limits 应在 enable 之前尽可能确定。
+
+## 创建阶段本质上是在“编译配置”
+
+Writer/Reader 创建时做的工作，可以理解为把高层 QoS 与类型信息编译成几组运行时
+对象：
+
+~~~text
+Topic + TypeSupport
+       ↓
+serialization contract
+
+HistoryQos + ResourceLimits
+       ↓
+HistoryAttributes + pools
+
+Reliability + PublishMode
+       ↓
+Stateful/Stateless endpoint + FlowController relation
+
+Locator + Transport config
+       ↓
+RTPS endpoint routing capability
+~~~
+
+把这些决策前移到创建阶段的意义，是让 hot path 少做重复结构性判断；代价是某些
+QoS 在 enable 后不能随意修改。
+
+## IPayloadPool 是内存策略的插槽
+
+IPayloadPool 把“样本的协议对象”与“payload 到底存在哪里”解耦。普通序列化、
+Data Sharing、用户提供的 pool 都可以复用 CacheChange/History 这一套协议状态机。
+
+~~~text
+CacheChange_t
+  └─ SerializedPayload_t
+       └─ payload_owner -> IPayloadPool
+~~~
+
+这里最重要的不是多态本身，而是 release 的责任有明确归属。History 删除一个
+CacheChange 时，不必知道 payload 来自 heap、共享内存还是特殊 allocator。
+
+## Writer/Reader 创建时为什么要知道资源上界
+
+如果 endpoint 直到运行时才发现“最多允许多少 samples / instances / matched peers”，
+就无法对内存和锁等待做任何可靠预算。Fast DDS 把 resource limits、History depth、
+proxy 容量等信息提前进入对象配置，就是为了让容量成为协议运行时的一部分。
+
+对机器人控制链，典型目标不是“能缓存越多越好”，而是：
+
+~~~text
+small bounded History
++ predictable pool
++ explicit overwrite/drop policy
++ bounded matched endpoints
+~~~
+
+感知链则可能接受更大的 pool，以换取点云/图像突发时不立刻失败。
+
+## enable 之后，配置开始产生外部可观察状态
+
+Writer/Reader enable 后进入 EDP，远端开始看到它的 Topic、Type、QoS 和 locator，
+并可能立刻建立 ReaderProxy/WriterProxy。此后修改会牵涉：
+
+- discovery database；
+- 已匹配远端 endpoint；
+- History 与 reliability state；
+- timers；
+- Data Sharing compatibility。
+
+因此“创建完成”不是 C++ new 返回，而是对象、资源和协议状态都建立后进入一个可被
+远端观察的稳定状态。
+
+## 一个创建失败的反例
+
+假设控制模块创建 Writer 时配置 KEEP_ALL，却把资源上限设得很小；创建本身可能成功，
+但运行后可靠 Reader 暂时不 ACK，History 很快占满。此时 write() 才暴露 TIMEOUT 或
+OUT_OF_RESOURCES，问题表面像“网络不稳定”，根因其实是创建阶段的资源模型与运行负载
+不匹配。
+
+所以 Endpoint creation 不是样板代码，而是系统容量设计。

@@ -194,3 +194,91 @@ deadline/lifespan timer
 后面才进入 StatefulWriter / FlowController / Transport。
 
 这就是为什么控制环里调用 publish 之前必须测 p99/p999，而不是只看 API 平均耗时。
+
+## CacheChange 不是消息对象，而是 RTPS 状态载体
+
+很多实现分析容易把 CacheChange_t 理解成：
+
+~~~text
+CacheChange = serialized message
+~~~
+
+但在 Fast DDS 中它承担的是更高层职责：
+
+~~~text
+CacheChange_t
+    |
+    +-- sequenceNumber
+    +-- writerGUID
+    +-- kind(ALIVE / NOT_ALIVE)
+    +-- serializedPayload
+    +-- fragment information
+    +-- instance metadata
+~~~
+
+原因是 RTPS 可靠传输不是简单发送一次 payload，而需要回答：
+
+- 这个样本属于哪个 Writer？
+- 它在 Writer 序列中的编号是多少？
+- 哪些 Reader 已经确认？
+- 哪些 fragment 需要重新发送？
+- 什么时候可以从 History 回收？
+
+因此 History 保存的不是消息缓存，而是协议状态机仍需要的数据。
+
+## WriterHistory 是可靠性的物理基础
+
+可靠模式下：
+
+~~~text
+application write
+      |
+      v
+CacheChange
+      |
+      v
+WriterHistory
+      |
+      v
+send
+      |
+      v
+wait ACKNACK
+      |
+      v
+remove change
+~~~
+
+如果 WriterHistory 过浅：
+
+~~~text
+old change removed
+      |
+Reader sends NACK
+      |
+Writer cannot repair
+~~~
+
+因此 history depth 不只是内存参数，它直接决定可靠协议的恢复能力。
+
+## 对机器人控制的意义
+
+对于 1 kHz 控制状态：
+
+~~~text
+KEEP_LAST + small depth
+~~~
+
+通常更关注最新状态。
+
+对于地图、任务状态：
+
+~~~text
+larger history
++
+reliable
+~~~
+
+因为旧数据仍可能具有语义价值。
+
+所以 DataWriter::write 的延迟、History 策略和控制任务的数据新鲜度必须一起设计。

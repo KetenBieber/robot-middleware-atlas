@@ -172,3 +172,150 @@ Participant / Endpoint ownership
 ~~~
 
 专题结尾再和 Cyclone DDS 做对象与数据结构对照，而不是给两者打分。
+
+
+## Runtime 视角下的三个核心边界
+
+Fast DDS 的源码复杂度主要来自三个边界：
+
+~~~text
+Application boundary
+        |
+        v
+DDS Entity boundary
+        |
+        v
+RTPS protocol boundary
+        |
+        v
+Transport boundary
+~~~
+
+其中：
+
+- DataWriter/DataReader 负责 DDS 语义；
+- StatefulWriter/Reader 负责 RTPS 协议状态；
+- History/CacheChange 负责数据生命周期；
+- Transport 负责跨进程或跨机器传输。
+
+因此分析任何 Fast DDS 问题时，应先定位它属于哪个边界，而不是直接从 API 入口向下追所有调用。
+
+## 与机器人系统的对应关系
+
+对于机器人场景，可以把不同数据流映射到不同 QoS 与运行路径：
+
+~~~text
+control command
+    -> small payload
+    -> low latency
+    -> bounded history
+
+camera / point cloud
+    -> large payload
+    -> SHM/DataSharing preferred
+    -> freshness over retransmission
+
+state estimation
+    -> reliable when loss is unacceptable
+    -> deadline monitoring important
+~~~
+
+Fast DDS 的工程价值不只是实现 DDS 标准，而是提供了一组可以调节实时性、可靠性、带宽和内存占用之间权衡的运行时机制。
+
+## 从 ROS 2 publish 到远端 callback 的完整闭环
+
+把前面的对象拼起来，一次 ROS 2 消息可以按执行上下文重放：
+
+~~~text
+rclcpp publisher thread
+  ↓
+rmw_fastrtps
+  ↓
+DataWriterImpl
+  ↓ serialize/loan
+CacheChange + WriterHistory
+  ↓
+StatefulWriter + ReaderProxy
+  ↓
+FlowController or synchronous send
+  ↓
+NetworkFactory / Transport
+=========================== process/host boundary
+ReceiverResource
+  ↓
+MessageReceiver
+  ↓
+StatefulReader + WriterProxy
+  ↓
+ReaderHistory
+  ↓
+StatusCondition / Listener
+  ↓
+Fast DDS WaitSet
+  ↓
+rmw_wait
+  ↓
+ROS 2 Executor
+  ↓
+user callback
+~~~
+
+这条链里没有一个单独的“DDS 线程”负责所有事情。应用 write thread、异步发送线程、
+transport receiver、ResourceEvent timer thread、RMW/Executor thread 分别承担不同阶段。
+
+## 一条消息为什么可能同时占用多个状态容器
+
+同一个 sample 在不同阶段会同时被不同结构描述：
+
+~~~text
+application object
+→ SerializedPayload_t
+→ CacheChange_t
+→ WriterHistory
+→ ReaderProxy delivery state
+→ RTPS fragment
+→ WriterProxy receive state
+→ ReaderHistory
+→ DataReader sample
+~~~
+
+这不是重复设计。每个结构回答的问题不同：payload 回答“字节在哪里”，CacheChange
+回答“这是哪个序列样本”，Proxy 回答“远端知道到哪里”，History 回答“什么时候还能
+重传/读取”。
+
+## Runtime 设计时最重要的五个问题
+
+面对任何 Fast DDS 性能或正确性问题，优先回答：
+
+1. 当前样本由谁拥有，什么时候能回收？
+2. 当前代码运行在哪个线程，是否可能阻塞？
+3. 当前队列/History 的容量是多少，过载策略是什么？
+4. Reliable 状态是否仍然要求保留旧样本？
+5. 当前延迟是 processing latency 还是 data age？
+
+最后一个尤其重要。异步发送可能让 write() 很快返回，但消息在 FlowController 中已经
+变旧；Executor callback 很快，也不能挽救此前在 reassembly/History 中积压的旧数据。
+
+## 运行时机制之间的依赖关系
+
+这些机制按运行时依赖可以连成：
+
+~~~text
+architecture-map
+→ participant-endpoint-lifecycle
+→ writer-reader-creation
+→ write-cachechange
+→ writerhistory-reliability
+→ readerhistory-fragments
+→ discovery-pdp-edp / discovery-server
+→ qos-matching
+→ transport-network
+→ flowcontroller-async
+→ datasharing-vs-shm / loan-zero-copy
+→ waitset-listener
+→ threads-events-close
+→ rmw_fastrtps case
+→ Fast DDS vs Cyclone DDS
+~~~
+
+这样每出现一个新对象时，前置的 ownership、协议和线程语义都已经建立。

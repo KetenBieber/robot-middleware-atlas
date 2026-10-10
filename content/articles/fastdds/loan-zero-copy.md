@@ -168,3 +168,82 @@ ROS message type
 ~~~
 
 任何一层不支持，用户看到的 publish() 都可能回到普通 copy/serialization 路径。
+
+## Loan 是一个所有权状态机
+
+把 loan_sample 当作“返回一块指针”会忽略最重要的部分：这块内存从借出到 write 成功
+之间有明确 owner 变化。
+
+~~~text
+Writer pool owns free slot
+        ↓ loan_sample
+application owns writable loan
+        ↓ write
+temporary transfer
+   ┌────┴─────┐
+commit ok   commit fail
+   ↓            ↓
+History owns   ownership returned
+payload        to application loan
+~~~
+
+这也是 check_and_remove_loan 与失败后 add_loan 必须成对存在的原因。
+
+## 为什么 plain type 条件这么重要
+
+如果类型含有无法直接映射的动态结构，应用看到的 C++ 对象布局就不等于 wire/shared
+payload 布局。middleware 只能重新序列化，而不能安全地把一块协议存储直接解释成
+用户对象。
+
+因此 loan 的收益来自“布局可预测”，而不是 C++ API 技巧。
+
+## Writer loan 只解决发送端第一段 copy
+
+即使 Writer 侧跳过普通序列化路径，后续仍可能因为：
+
+- 远端网络 Reader；
+- transport framing；
+- 安全变换；
+- Reader API 复制；
+- 上层 RMW 类型适配；
+
+重新产生数据搬运。端到端 zero-copy 必须同时审查 Reader 侧消费方式。
+
+## Loan 与 History 容量绑定
+
+借出的 sample 来自 Writer 可管理的 pool。应用长期持有大量 loan 而不 write/return，
+本质上是在占用 middleware 的有限资源；History 又需要 slot 保存已提交 Change。
+
+所以 loan API 不等于无限制 allocator，错误使用会把内存压力从 memcpy 变成 pool
+exhaustion。
+
+## 混合本地/远端 Reader 时不要过度承诺
+
+理想本地链路：
+
+~~~text
+loan_sample
+→ application fill
+→ Data Sharing
+→ Reader view/loan
+~~~
+
+但只要同一个 Writer 还要服务远端 Reader，就必须保留跨主机传输所需的协议路径。
+能否避免额外 copy 要看具体 payload pool、representation 和发送策略，而不是只看
+Writer API 是否调用了 loan_sample。
+
+## 什么时候值得使用
+
+Loan 对大而固定布局的图像、点云、张量消息最有潜力；对于几十字节控制消息，省掉
+一次小 copy 往往不如简化生命周期更重要。优化前应先测：
+
+~~~text
+serialization time
+copy bytes
+pool contention
+History occupancy
+loan failure rate
+end-to-end latency
+~~~
+
+否则可能为了“零拷贝”引入更复杂的错误恢复与资源泄漏风险，却没有显著收益。

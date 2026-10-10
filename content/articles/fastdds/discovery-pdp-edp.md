@@ -156,3 +156,80 @@ P2 <-> P3
 几十、上百个机器人进程时，Discovery traffic、proxy object 数量、matching CPU 都会增长。
 
 这正是 Fast DDS 另外提供 Discovery Server 的根本原因。
+
+## Discovery 完成后的真实数据面变化
+
+Discovery 不是业务数据传输本身，它最终产生的是：
+
+~~~text
+Participant discovery
+        |
+        v
+Endpoint metadata
+        |
+        v
+QoS matching
+        |
+        v
+ReaderProxy / WriterProxy
+        |
+        v
+StatefulWriter / StatefulReader
+~~~
+
+因此 discovery 的最终产物不是“知道对方 IP”，而是创建后续可靠数据面的协议状态。
+
+## ROS 2 启动时的一次匹配过程
+
+典型过程：
+
+~~~text
+Node A creates Publisher
+        |
+        v
+DomainParticipant announces itself
+        |
+        v
+PDP discovers Participant B
+        |
+        v
+EDP exchanges Writer/Reader data
+        |
+        v
+QoS compatibility check
+        |
+        v
+matched endpoint pair
+        |
+        v
+DATA can flow
+~~~
+
+这解释了为什么 ROS 2 中创建 publisher 后并不会立即收到 subscriber 数据：中间存在 discovery 和 matching 阶段。
+
+## Discovery Server 的本质变化
+
+Discovery Server 并不是简单把广播改成单播，而是改变 discovery graph：
+
+Simple Discovery：
+
+~~~text
+N participants
+    |
+    v
+many participant-to-participant exchanges
+~~~
+
+Discovery Server：
+
+~~~text
+Participant
+    |
+    v
+Server
+    |
+    v
+Other participants
+~~~
+
+代价从 participant 数量平方级交互转移到服务器维护的 discovery state。

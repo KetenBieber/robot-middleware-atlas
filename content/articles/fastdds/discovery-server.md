@@ -134,3 +134,73 @@ Discovery Server availability
 分开监控。
 
 已有 endpoint 之间的数据通路是否继续工作，取决于具体 lease、locator 与实现状态，不应该用“server 掉了所以所有数据一定立刻断”这种模糊结论代替测试。
+
+## Discovery Server 保存的是控制面状态
+
+Server 维护的核心不是业务 payload，而是 Participant/Endpoint 的发现记录及其版本化
+更新。客户端提交自己的 ParticipantProxyData，Server 再依据发现关系把必要信息传播
+给其他客户端。
+
+~~~text
+Client announcement
+      ↓
+PDPServer database
+      ↓
+EDPServer endpoint state
+      ↓
+filtered propagation
+      ↓
+client local discovery database
+~~~
+
+这种结构把 discovery fan-out 从“所有节点互相广播”变成“通过少量 server 汇聚与分发”。
+
+## 为什么 lease 与重连比业务 DATA 更关键
+
+业务 Writer/Reader 匹配以后可以直接通信，但控制面必须持续回答“这个 Participant
+是否还存在”。因此 Server 仍需要 lease、dispose、reconnect 与 stale-state 清理。
+
+一个典型故障时序是：
+
+~~~text
+t0 client 已注册
+t1 client 与 server 网络分区
+t2 业务 peer 之间的数据链仍可能存在
+t3 lease 到期
+t4 discovery state 被回收
+t5 client reconnect 后重新公告并恢复匹配
+~~~
+
+如果监控只看 topic 是否还能收数据，就可能错过 discovery control plane 已经失效。
+
+## 多 Server 的意义是控制面容错，不是数据复制
+
+部署多个 Discovery Server 的目标是减少单点故障和改善拓扑可达性。它并不自动复制
+用户 Topic 数据，也不会把 Fast DDS 变成 brokered middleware。对机器人集群，应分别
+设计：
+
+~~~text
+control-plane redundancy
+data-plane redundancy
+application state replication
+~~~
+
+三者解决不同问题。
+
+## 与 ROS 2 启动行为的关系
+
+使用 rmw_fastrtps 时，ROS 2 节点和 topic endpoint 最终仍映射到 Fast DDS Participant
+与 EDP。Discovery Server 因而主要影响：
+
+- 节点启动时发现收敛时间；
+- 大量 endpoint 上线/下线时的控制面流量；
+- 广播受限网络中的可发现性；
+- 多机机器人系统的 discovery 可观测性。
+
+它不会直接降低一条已经匹配的激光点云 DATA 的序列化成本。
+
+## 什么时候不值得使用
+
+如果系统只有少量固定 Participant、单机或简单 LAN，Simple Discovery 的运维成本更低。
+引入 Server 会增加配置、可用性监控和故障恢复复杂度。是否采用应由 Participant 数量、
+网络广播条件和启动/重连压力决定，而不是把它当成“更快的 DDS 模式”。

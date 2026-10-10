@@ -220,3 +220,92 @@ history depth sensitivity
 - zero-copy 是多层条件同时成立的结果。
 
 因此它比自写 HelloWorld 更适合作为 Fast DDS 同机传输机制的真实基线。
+
+## 10. 用同一案例做 copy ledger
+
+性能实验前先记录每个模式的理论数据路径：
+
+~~~text
+UDP:
+application
+→ serialize
+→ WriterHistory
+→ RTPS packet
+→ kernel/network
+→ ReaderHistory
+→ application
+
+SHM Transport:
+application
+→ serialize
+→ WriterHistory
+→ RTPS packet
+→ shared-memory transport
+→ ReaderHistory
+→ application
+
+Data Sharing + loan:
+writer pool loan
+→ application fill
+→ shared history/payload
+→ reader view
+~~~
+
+然后用 profiler/trace 验证实际是否出现预期 copy，而不是用吞吐结果反推内部路径。
+
+## 11. 混合 Reader 实验比纯本机实验更重要
+
+真实机器人常见拓扑不是“只有一个本地订阅者”，而是：
+
+~~~text
+camera writer
+  ├─ local perception reader
+  └─ remote debugging reader
+~~~
+
+建议在 Data Sharing 实验里加入一个远端 Reader，观察：
+
+- WriterHistory 占用是否变化；
+- CPU/serialization 是否重新出现；
+- 本地 Reader latency 是否受远端 Reliable Reader 影响；
+- payload 回收时机是否变化。
+
+这样才能验证 mixed topology 下的真实 ownership，而不是只验证最佳路径。
+
+## 12. 过载实验要测 data age
+
+除了平均 latency，还应主动制造：
+
+~~~text
+producer rate > consumer/network capacity
+~~~
+
+并测量：
+
+- 最老 pending sample age；
+- History occupancy；
+- write timeout；
+- sample lost/rejected；
+- retransmission；
+- RSS / shared-memory pool 占用。
+
+对机器人控制而言，旧数据持续可靠到达通常比“偶尔丢一个最新值”更危险，因此 data age
+必须作为一等指标。
+
+## 13. 实验结论必须限定条件
+
+最终报告至少记录：
+
+~~~text
+Fast DDS commit
+delivery mechanism
+payload size
+History/ResourceLimits
+Reliability
+publish mode
+number/location of readers
+CPU affinity
+transport descriptor
+~~~
+
+缺少这些条件，“SHM 比 UDP 快多少”或“loan 实现 zero-copy”都无法迁移到其他机器人。

@@ -167,3 +167,98 @@ timed events
 ~~~
 
 这和 ROS 2 context shutdown 的结构化并发问题本质相同。
+
+## 创建与 enable 是两个阶段
+
+DDS Entity 的“对象存在”和“已经参与通信”应当分开理解。构造阶段主要建立
+本地对象与配置；enable 阶段才把配置编译成可运行的 RTPS 资源并开始发现。
+
+~~~text
+create_participant
+  ↓
+DomainParticipantImpl exists
+  ↓ enable
+RTPSDomain::createParticipant
+  ↓
+BuiltinProtocols + transports + receiver resources
+  ↓
+participant becomes discoverable
+~~~
+
+Writer/Reader 同样如此。这个两阶段模型给 QoS 校验、类型注册和资源预分配留下
+了边界，避免通信线程在对象尚未完整构造时观察到半初始化状态。
+
+## Endpoint 删除为什么不是简单 delete
+
+low-level endpoint 可能同时被几类执行上下文引用：
+
+~~~text
+application thread
+receiver thread
+ResourceEvent timer
+FlowController async sender
+discovery matching path
+~~~
+
+因此安全删除需要先把“还能产生新访问”的入口关掉，再释放数据结构。Writer 的
+典型依赖关系可以画成：
+
+~~~text
+DataWriterImpl
+  ├─ WriterHistory
+  ├─ payload pool
+  ├─ deadline/lifespan timer
+  └─ RTPSWriter
+       ├─ ReaderProxy[]
+       └─ async/heartbeat work
+~~~
+
+如果把 payload pool 先 free，再让 RTPSWriter 处理一个晚到的 ACKNACK，问题不是
+“偶尔丢包”，而是直接形成悬空访问风险。
+
+## RecursiveTimedMutex 的工程含义
+
+RecursiveTimedMutex 同时表达两件事。第一，Writer/History 的调用链允许同一线程
+在内部 helper 中再次进入一致性边界；第二，strict realtime 配置需要在锁竞争时
+有一个可返回 TIMEOUT 的上界。它并不意味着持锁区可以无限扩张。
+
+控制程序应把一次 write 的最坏路径拆开测量：
+
+~~~text
+lock wait
++ serialization
++ History resource wait
++ reliability bookkeeping
++ optional transport send
+~~~
+
+只把 max_blocking_time 当作“网络超时”会低估应用线程真正承担的阻塞。
+
+## 关闭时最危险的是 callback quiescence
+
+删除对象前必须保证 callback target 不再被 receiver、timer 或 flow thread 使用。
+Fast DDS 在不同层分别采取 remove endpoint、shutdown transport、cancel timer 等手段，
+本质上都是在建立 quiescence：从某个时刻开始，不再允许新的异步访问进入目标对象。
+
+~~~text
+stop producing callbacks
+        ↓
+wait/disable execution source
+        ↓
+detach endpoint from dispatch structures
+        ↓
+release History / payload / listener target
+~~~
+
+这套顺序比“析构函数里把指针设成 nullptr”重要得多，因为异步线程不会因为用户
+对象开始析构就自动停止。
+
+## 机器人系统里的生命周期策略
+
+对于长期运行的机器人进程，建议把 Participant 视为进程级资源，把 Writer/Reader
+视为功能模块级资源。频繁创建销毁 Participant 会重新触发 discovery、receiver
+resource 和 transport 初始化；频繁创建销毁 endpoint 则会制造 EDP churn。
+
+如果系统需要动态传感器启停，更稳妥的设计通常是保持 Participant 稳定，只在明确的
+模块生命周期边界创建/删除 endpoint，并确保业务线程先停止生产数据，再进入 DDS
+对象回收。

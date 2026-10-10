@@ -165,3 +165,74 @@ vs
 之间做明确取舍。
 
 这对机器人实时控制比“用了 reliable 所以会重传”更值得关注。
+
+## Reliable 的本质：保存状态，而不是保证发送成功
+
+容易产生的误解：
+
+~~~text
+RELIABLE = network layer retries automatically
+~~~
+
+Fast DDS 的实际模型是：
+
+~~~text
+Writer remembers state
+        |
+        v
+Reader reports state
+        |
+        v
+Writer repairs missing state
+~~~
+
+因此可靠性建立在三个状态集合之上：
+
+1. WriterHistory 中仍然存在的数据；
+2. ReaderProxy 中记录的确认进度；
+3. RTPS control message 驱动的状态同步。
+
+## GAP 为什么存在
+
+如果 Writer 已经知道某些 sequence 永远不会发送，可以发送 GAP：
+
+~~~text
+Writer:
+  I will not provide #10
+
+Reader:
+  remove #10 from missing set
+~~~
+
+GAP 的意义不是传输数据，而是推进 Reader 的协议状态。
+
+这也是为什么 RTPS reliability 不是简单 TCP over UDP：
+
+TCP 只关心字节流顺序，而 RTPS 关心 sample sequence 的语义。
+
+## Fragmentation 把可靠性扩展到大消息
+
+大 payload：
+
+~~~text
+CacheChange
+      |
+      v
+fragment 0
+fragment 1
+fragment 2
+      |
+      v
+Reader missing bitmap
+~~~
+
+Reader 不一定丢失整个 sample，而可能只缺少部分 fragment。
+
+因此 ReaderHistory 需要维护：
+
+- change sequence；
+- fragment number；
+- received bitmap；
+- reassembly state。
+
+这也是为什么 ReaderHistory 不能简单理解成消息队列。

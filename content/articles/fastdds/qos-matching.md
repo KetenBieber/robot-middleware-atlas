@@ -141,3 +141,86 @@ deadline / lifespan / liveliness
 转换成 Fast DDS DataWriterQos / DataReaderQos。
 
 所以 ROS 2 的 QoS mismatch、publisher blocking、history memory growth，最后都能沿源码落回 Fast DDS 这里。
+
+## Matching 不是“QoS 全部相等”
+
+DDS 使用 offered/requested 兼容关系。Writer 提供能力，Reader 提出需求；某些 policy
+允许提供方“更强”而仍兼容，某些则必须满足明确关系。匹配失败时，高层看到的通常是
+endpoint 不建立连接，并可通过 incompatible QoS status 观察原因。
+
+~~~text
+remote endpoint discovered
+        ↓
+Topic / Type / Partition check
+        ↓
+offered-requested QoS compatibility
+        ↓
+match
+   ┌────┴────┐
+ yes         no
+Proxy      incompatible_qos status
+created
+~~~
+
+这意味着“发现到了对方”与“能交换业务数据”是两个阶段。
+
+## QoS 同时是容量合同和时间合同
+
+把常见 policy 按运行时后果分类更容易做系统设计：
+
+| Policy | 主要影响 |
+| --- | --- |
+| Reliability | 是否维护 ACK/NACK/重传状态 |
+| History | 语义上保留多少历史 |
+| ResourceLimits | 内存与实例数量上界 |
+| Deadline | 周期违约检测 timer |
+| Lifespan | 样本过期 |
+| Liveliness | endpoint 存活合同 |
+| PublishMode | send 是否进入异步调度 |
+| DataSharing | 同机是否尝试共享 history/payload |
+
+所以 QoS 的价值不只是互操作，它直接改变对象数量、timer、队列和阻塞点。
+
+## KEEP_LAST 也不等于一定“只保留最新”
+
+KEEP_LAST depth=N 仍要和可靠性、resource limits、实例数量共同解释。一个可靠 Writer
+如果旧样本仍被远端 Reader 的协议状态引用，回收时机不是单纯对 std::deque 做 pop_front。
+
+控制链若目标是“只关心最新状态”，除了设置小 depth，还要验证慢 Reader、重传和
+publish mode 不会把旧命令积压到网络发送队列。
+
+## 三类机器人 Topic 的配置思路
+
+~~~text
+控制命令 / 高频状态
+  → 小 History
+  → 明确 data age 上界
+  → 是否 Reliable 取决于失效语义
+
+相机 / 点云
+  → 大 payload
+  → 关注 Data Sharing / SHM
+  → 防止 Reliable backlog 放大内存
+
+地图 / 任务配置
+  → 更新频率低
+  → 更强调可靠与 durability
+  → 可以接受更高单次延迟
+~~~
+
+这些不是固定模板，而是提示每个 Topic 应先回答“丢一帧”和“晚到一帧”哪个更危险。
+
+## QoS 调优必须观察状态，而不是只看平均延迟
+
+至少同时监控：
+
+- write() timeout / out-of-resource；
+- WriterHistory 占用；
+- ACK/NACK/重传；
+- ReaderHistory backlog；
+- sample lost/rejected；
+- incompatible QoS；
+- deadline/liveliness 违约；
+- FlowController queue data age。
+
+平均 RTT 很漂亮并不能证明 QoS 在过载和故障时仍满足控制系统需求。

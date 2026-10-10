@@ -163,3 +163,76 @@ Condition
 ~~~
 
 两者语义相同，内部 ready-set 数据结构不同。
+
+## WaitSet 是 level-triggered 思维，而不是消息队列
+
+Condition 的 trigger value 表示“当前条件是否成立”。WaitSet 被唤醒后仍要重新扫描
+attached Condition，而不是假设一次 notify 就严格对应一个事件。
+
+这与 condition_variable 的典型用法一致：
+
+~~~cpp
+cond_.wait(lock, predicate);
+~~~
+
+predicate 才是事实来源，notify 只是提示“状态可能变化”。因此即使出现 spurious wakeup，
+WaitSet 也会重新检查条件，而不会凭一次唤醒伪造数据。
+
+## Listener 与 WaitSet 是两种不同的 execution ownership
+
+~~~text
+Listener:
+middleware thread enters user callback
+
+WaitSet:
+middleware only changes condition + notify
+application thread wakes and handles work
+~~~
+
+这对机器人程序非常关键。Listener callback 如果直接执行重计算、锁住业务 mutex 或
+阻塞 I/O，就可能拖慢 receiver/status 路径；WaitSet 则把业务工作留在应用自己控制的
+线程里。
+
+## Notifier 为什么比轮询更重要
+
+朴素实现可以每 1 ms 扫描所有 Reader：
+
+~~~text
+while running:
+    for condition in all_conditions:
+        check()
+    sleep(1ms)
+~~~
+
+它会产生固定 CPU 开销，并把唤醒延迟量化到 polling period。ConditionNotifier 让状态
+变化主动唤醒 WaitSet，只在真正发生变化时竞争 mutex/condition_variable。
+
+## rmw_wait / ROS 2 Executor 在这条链的后半段
+
+使用 rmw_fastrtps 时，可以把回调延迟拆成：
+
+~~~text
+network receive
+→ ReaderHistory becomes ready
+→ DDS condition/status
+→ Fast DDS WaitSet / rmw_wait
+→ ROS 2 Executor chooses callback
+→ user callback
+~~~
+
+调 Executor 线程数和 callback group 只能改变后半段；如果前面的 fragment reassembly
+或 ReaderHistory 尚未 ready，Executor 无法提前执行。
+
+## 一个容易出现的锁反转风险
+
+Listener 模式下，如果 middleware callback 持有内部路径需要的锁，而用户 callback 又
+拿业务锁；另一个业务线程反过来持业务锁调用 DDS API，就可能形成锁顺序冲突。
+
+因此 Listener callback 更适合做短小的状态转移或投递，不适合承载复杂控制算法。
+需要明确线程归属的机器人程序通常更容易用 WaitSet/Executor 建立稳定的执行边界。
+
+## 关闭 WaitSet 也需要唤醒睡眠线程
+
+任何 shutdown 设计都必须考虑：如果应用线程正在无限 wait，谁负责改变 condition 或
+GuardCondition 并 notify，使它能够退出。只设置一个 running=false 而不唤醒
+condition_variable，会得到经典的“退出标志已改但线程永远睡着”问题。

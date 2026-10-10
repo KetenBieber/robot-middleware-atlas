@@ -148,3 +148,79 @@ data age
 ~~~
 
 FlowController 只解决其中一部分。
+
+## FlowController 调度的是 Change，不是 Topic 名字
+
+进入异步路径以后，真正被调度的是已经存在于 WriterHistory 中、等待发送的
+CacheChange/fragment 工作。也就是说 serialization 与 History commit 已经发生。
+
+~~~text
+application write
+  ↓
+CacheChange committed
+  ↓
+writer pending work
+  ↓
+FlowController
+  ↓
+selected fragment/change
+  ↓
+RTPS message + Transport
+~~~
+
+因此 async 主要隔离的是“何时发送”，不是“何时拥有样本”。
+
+## 带宽限制可以直接换算成最小排空时间
+
+若配置 max_bytes_per_period=B、period=T，一个长度为 S 的 burst 在没有其他 Writer
+竞争时，理论上也至少需要大约：
+
+~~~text
+ceil(S / B) × T
+~~~
+
+才能被调度完。实际时间还要加上优先级竞争、fragment overhead 和 transport 成本。
+
+例如相机突发 8 MB，而控制器每 10 ms 只允许 1 MB，那么仅限流就能引入至少 80 ms
+量级的发送展开时间。此时“异步发布不阻塞生产者”并不能说明数据是新鲜的。
+
+## priority 解决先后，capacity 解决过载
+
+FlowController 的 priority 可以保证高优先级 Writer 更早被考虑，但如果生产速率长期
+大于消费速率，任何 priority 都无法消灭 backlog。
+
+过载策略必须额外明确：
+
+~~~text
+queue capacity
+History depth
+drop / overwrite
+max blocking time
+deadline
+data-age alarm
+~~~
+
+对于速度指令，晚 200 ms 送达的“可靠旧命令”可能比直接丢弃更危险。
+
+## Async sender 仍与可靠性共享状态
+
+同一个 CacheChange 既受 FlowController 发送调度影响，也受 StatefulWriter /
+ReaderProxy 的 ACK、NACK、重传状态影响。因此不能把 flow queue 当成独立于 WriterHistory
+的普通生产者消费者队列。
+
+当 Reader 很慢时，发送调度已经完成的 Change 仍可能因为可靠性要求留在 History；
+这就是为什么“网络已 send”与“内存可回收”是两件事。
+
+## 一个更适合机器人部署的观察面
+
+异步模式至少应记录：
+
+- 每个 Writer pending changes；
+- 最老 pending sample 的 data age；
+- 每周期实际发送字节；
+- WriterHistory 占用；
+- 重传量；
+- write() timeout；
+- receiver 端 sample lost/rejected。
+
+只看链路带宽利用率无法判断控制消息是否正在被大流量 topic 挤成旧数据。

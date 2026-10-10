@@ -364,3 +364,88 @@ ROS Graph
 ~~~
 
 这样 Fast DDS 专题就从源码内核真正闭环到了 ROS 2。
+
+## 17. Executor 调优为什么不能替代 DDS 调优
+
+把 latency 分解后可以看到：
+
+~~~text
+T_total =
+T_transport
++ T_rtps
++ T_history
++ T_wait
++ T_executor
++ T_callback
+~~~
+
+Executor priority/threads 只直接影响后两三项。如果大点云还在 DATAFRAG reassembly，
+或 Reliable Writer 的 History/FlowController 已经产生 backlog，调高 Executor 优先级
+不会让样本更早 ready。
+
+## 18. ROS depth 与 Fast DDS capacity 不是一个孤立数字
+
+RMW 会把 ROS History/depth 映射到 DDS QoS，但真正的运行时容量还要结合：
+
+~~~text
+History kind/depth
+ResourceLimits
+matched readers
+Reliability
+payload size
+Data Sharing pool
+~~~
+
+因此 ROS 代码里写 QoS(10) 并不等于“系统永远只占 10 个消息的内存”。可靠性与多
+instance、大 payload 仍会改变底层资源使用。
+
+## 19. callback latency 应该从三个时间戳看
+
+推荐在机器人链路同时记录：
+
+~~~text
+t_source   数据产生
+t_receive  RMW/DDS ready
+t_callback 用户 callback 开始
+~~~
+
+于是可以分开：
+
+~~~text
+middleware/data age = t_receive - t_source
+executor delay      = t_callback - t_receive
+~~~
+
+只记录 callback 执行开始时间，会把 DDS backlog 和 Executor 排队混成一个数字。
+
+## 20. shutdown 同样跨越 RMW 与 Fast DDS 两层
+
+ROS context shutdown 以后，还要确保：
+
+~~~text
+Executor/wait threads wake
+→ RMW handles stop being used
+→ DDS endpoints detach
+→ Fast DDS receiver/event/flow activity quiesces
+→ Participant resources release
+~~~
+
+如果业务对象先析构而 DDS/RMW callback 仍可进入，就会把中间件内部的生命周期问题
+扩散成用户对象 use-after-free。
+
+## 21. 一份机器人 ROS 2 调优检查表
+
+对于关键 topic，至少记录：
+
+| 项目 | 问题 |
+| --- | --- |
+| Reliability | 丢一帧还是晚一帧更危险？ |
+| History/depth | 允许保留多少旧数据？ |
+| ResourceLimits | 内存上界是否明确？ |
+| Publish mode | write 延迟还是 data age 优先？ |
+| Transport | 同机/跨机实际走哪条路径？ |
+| Loan/Data Sharing | 类型与 RMW 是否真的支持？ |
+| WaitSet/Executor | ready 后多久进入 callback？ |
+| Shutdown | 谁负责唤醒与 quiescence？ |
+
+把这些问题一起回答，ROS 2 QoS 才从 API 参数变成可验证的系统合同。

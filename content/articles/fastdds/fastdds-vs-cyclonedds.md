@@ -233,3 +233,84 @@ rmw_wait
 
 哪些只是某个实现选择的数据结构
 ~~~
+
+## 一张实现边界对照表
+
+| 问题 | Fast DDS | Cyclone DDS |
+| --- | --- | --- |
+| 高层 façade | DataWriter/DataReader + Impl | DDSc entities |
+| 协议 core | Stateful/Stateless Writer/Reader | DDSI writer/proxy entities |
+| Writer 历史 | WriterHistory + CacheChange_t | WHC + serdata/index |
+| Reader 重排 | WriterProxy + ReaderHistory | defrag/reorder + RHC |
+| 远端状态 | ReaderProxy/WriterProxy 类 | match/proxy structures |
+| 定时协议 | ResourceEvent/TimedEvent | xevent queue |
+| 异步发送 | FlowController | send queue/thread |
+| 同机优化 | SHM Transport + Data Sharing + loan | PSMX/local delivery/loan |
+
+这个表的目的不是比较 feature 数，而是帮助定位“同一语义在哪个实现对象里”。
+
+## 两种代码风格带来的阅读重点不同
+
+Fast DDS 采用大量显式 C++ 对象与 Impl/Proxy/Pool 组合，适合沿 ownership graph 阅读：
+
+~~~text
+谁拥有谁
+→ 谁持 mutex
+→ 谁保存远端状态
+→ 谁触发 timer
+~~~
+
+Cyclone DDS 更适合沿 DDSI 数据结构与索引关系阅读：
+
+~~~text
+serialized sample
+→ WHC/RHC index
+→ proxy match state
+→ xevent / transport
+~~~
+
+如果只套用另一个实现的类名，很容易把标准机制和实现选择混在一起。
+
+## Reliable 的共同不变量
+
+无论实现如何不同，Reliable RTPS 都必须解决：
+
+~~~text
+sequence identity
+missing detection
+receiver acknowledgement
+writer repair
+history retention
+late/stale state cleanup
+~~~
+
+Fast DDS 用 CacheChange_t + ReaderProxy/WriterProxy 显式表达；Cyclone DDS 用 WHC、
+proxy/match 与 reorder 结构表达。这个“不变量”比类名更值得迁移到自己的 middleware
+设计里。
+
+## 机器人部署时不应该按品牌做结论
+
+真正影响系统行为的是配置与 workload：
+
+- payload 大小与频率；
+- Reliability/History/ResourceLimits；
+- 同机还是跨机；
+- 是否启用共享内存/loan；
+- publish mode；
+- executor/waitset 调度；
+- CPU affinity 与网络条件。
+
+同一个实现换一组 QoS 和 transport，表现可能比两个实现之间的平均差异更大。
+
+## 适合从 Fast DDS 学什么
+
+Fast DDS 特别适合学习：
+
+1. façade/Impl 如何隔离公共 API 与运行时；
+2. CacheChange 如何成为跨 History/RTPS 的生命周期单位；
+3. Proxy 对象如何把远端协议状态本地化；
+4. FlowController 如何把发送调度对象化；
+5. payload pool 如何给共享内存/loan 留扩展点；
+6. discovery 与 user data 如何复用同一套 RTPS 基础设施。
+
+把这些原则抽出来，比记住某个函数名更有价值。
